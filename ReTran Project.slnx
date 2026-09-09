@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="ReTran App/ReTran App.csproj">
+    <Deploy Solution="Debug|*" />
+  </Project>
+  <Project Path="ReTran Core/ReTran Core.csproj" />
+</Solution>
