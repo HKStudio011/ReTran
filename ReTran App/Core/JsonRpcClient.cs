@@ -31,7 +31,15 @@ public sealed class JsonRpcClient : IAsyncDisposable
         string id = (++_nextId).ToString();
         var tcs = new TaskCompletionSource<JsonNode?>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pending[id] = tcs;
-        string line = $"{{\"jsonrpc\":\"2.0\",\"id\":\"{id}\",\"method\":\"{method}\",\"params\":{(@params is null ? "{}" : @params.ToJsonString())}}}";
+        // JsonObject serialization keeps key order and escapes method/params correctly.
+        var request = new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = id,
+            ["method"] = method,
+            ["params"] = @params ?? new JsonObject(),
+        };
+        string line = request.ToJsonString();
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _cts.Token);
         await _output.WriteAsync((line + "\n").AsMemory(), linked.Token);
         await _output.FlushAsync(linked.Token);
@@ -50,7 +58,16 @@ public sealed class JsonRpcClient : IAsyncDisposable
                     && _pending.TryGetValue(id, out var tcs))
                 {
                     _pending.Remove(id);
-                    tcs.TrySetResult(n["result"]);
+                    if (n["error"] is { } error)
+                    {
+                        int code = error["code"]?.GetValue<int>() ?? 0;
+                        string message = error["message"]?.GetValue<string>() ?? "Unknown RPC error";
+                        tcs.TrySetException(new RpcException(code, message));
+                    }
+                    else
+                    {
+                        tcs.TrySetResult(n["result"]);
+                    }
                 }
             }
         }
@@ -67,5 +84,23 @@ public sealed class JsonRpcClient : IAsyncDisposable
     {
         _cts.Cancel();
         try { await _output.FlushAsync(); } catch { /* best effort */ }
+    }
+}
+
+/// <summary>
+/// JSON-RPC error response received from the peer; carries the standard error code and message.
+/// Phản hồi lỗi JSON-RPC nhận từ đối tác; mang mã lỗi và thông báo chuẩn.
+/// </summary>
+public sealed class RpcException : Exception
+{
+    /// <summary>
+    /// The JSON-RPC error code (e.g. -32601 Method not found, -32603 Internal error).
+    /// Mã lỗi JSON-RPC (ví dụ -32601 Method not found, -32603 Internal error).
+    /// </summary>
+    public int Code { get; }
+
+    public RpcException(int code, string message) : base(message)
+    {
+        Code = code;
     }
 }
