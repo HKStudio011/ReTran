@@ -42,7 +42,14 @@ public sealed class JsonConfigLoader : ICoreConfigLoader
         }
 
         string json = File.ReadAllText(path);
-        return JsonSerializer.Deserialize<CoreConfig>(json, Options) ?? new CoreConfig();
+        try
+        {
+            return JsonSerializer.Deserialize<CoreConfig>(json, Options) ?? new CoreConfig();
+        }
+        catch (JsonException)
+        {
+            return new CoreConfig();
+        }
     }
 }
 
@@ -57,8 +64,8 @@ public sealed record CoreConfig(
     private static readonly ICoreConfigLoader Loader = new JsonConfigLoader();
 
     /// <summary>
-    /// Loads core configuration from the given path, returning defaults when the file is absent.
-    /// Nạp cấu hình lõi từ đường dẫn cho trước; trả về giá trị mặc định khi tệp không tồn tại.
+    /// Loads core configuration from the given path, returning defaults when the file is absent or malformed.
+    /// Nạp cấu hình lõi từ đường dẫn cho trước; trả về giá trị mặc định khi tệp không tồn tại hoặc sai định dạng.
     /// </summary>
     public static CoreConfig LoadFrom(string path) => Loader.Load(path);
 

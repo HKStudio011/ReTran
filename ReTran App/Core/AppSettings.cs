@@ -28,8 +28,10 @@ public sealed record AppSettings(
         "ReTran", "settings.json");
 
     /// <summary>
-    /// Loads settings from disk, creating the file with defaults when it is missing.
-    /// Nạp cài đặt từ đĩa; tạo tệp với giá trị mặc định khi tệp chưa tồn tại.
+    /// Loads settings from disk, returning defaults when the file is absent or malformed;
+    /// creates the file with defaults on first run.
+    /// Nạp cài đặt từ đĩa; trả về giá trị mặc định khi tệp không tồn tại hoặc sai định dạng;
+    /// tạo tệp với giá trị mặc định ở lần chạy đầu.
     /// </summary>
     public static async Task<AppSettings> LoadAsync()
     {
@@ -41,8 +43,16 @@ public sealed record AppSettings(
             return defaults;
         }
 
-        string json = await File.ReadAllTextAsync(path);
-        return JsonSerializer.Deserialize<AppSettings>(json, Options) ?? new AppSettings();
+        try
+        {
+            string json = await File.ReadAllTextAsync(path);
+            return JsonSerializer.Deserialize<AppSettings>(json, Options) ?? new AppSettings();
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException or JsonException)
+        {
+            // The file may vanish between the check and the read, or be malformed: fall back to defaults.
+            return new AppSettings();
+        }
     }
 
     /// <summary>
