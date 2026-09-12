@@ -1,8 +1,0 @@
-﻿<maui:MauiWinUIApplication
-    x:Class="ReTran_Core.WinUI.App"
-    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:maui="using:Microsoft.Maui"
-    xmlns:local="using:ReTran_Core.WinUI">
-
-</maui:MauiWinUIApplication>

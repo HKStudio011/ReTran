@@ -5,9 +5,9 @@
 
 **Goal:** Ứng dụng desktop Windows: capture màn hình / cửa sổ / game (kể cả exclusive fullscreen, kiểu OBS) → OCR định vị text → dịch (nhiều provider) → hiển thị trong app → xuất frame chú thích sang OBS — **chạy mượt trong lúc user vừa chơi game vừa stream**.
 
-**Architecture:** C# (.NET 10 MAUI Blazor Hybrid) làm shell UI + core pipeline (capture, orchestrator, OBS client). Python sidecar (FastAPI) chạy PaddleOCR + model dịch local. Rust cdylib (`retran-hook`) — DLL inject vào tiến trình game hook D3D11 `Present` để capture exclusive fullscreen (cơ chế giống OBS GPU hook). OCR/translation đứng sau interface (`IOcrEngine`, `ITranslator`) để thay engine/provider bất kỳ lúc nào.
+**Architecture:** C# (.NET 10 MAUI Blazor Hybrid) làm shell UI + core pipeline (capture, orchestrator, OBS client). Python sidecar (FastAPI) chạy PaddleOCR + model dịch local. Rust cdylib (`retran-hook`) — DLL inject vào tiến trình game hook D3D11 `Present` để capture exclusive fullscreen (cơ chế giống OBS GPU hook). SQLite + EF Core lưu cache dịch per-context và dữ liệu ứng dụng; JSON cho settings. OCR/translation đứng sau interface (`IOcrEngine`, `ITranslator`) để thay engine/provider bất kỳ lúc nào.
 
-**Tech Stack:** C# 10 / .NET 10 (MAUI Blazor Hybrid, Win32 interop), Python 3.11 + PaddleOCR 3.x + FastAPI, TypeScript + Tailwind v4 (vite-project), Rust (hook DLL), obs-websocket. GPU: RTX 5060 Ti 16GB (CUDA) — đã kiểm tra máy thật.
+**Tech Stack:** C# 10 / .NET 10 (MAUI Blazor Hybrid, Win32 interop, EF Core + SQLite), Python 3.11 + PaddleOCR 3.x + FastAPI, TypeScript + Tailwind v4 (vite-project), Rust (hook DLL), obs-websocket. GPU: RTX 5060 Ti 16GB (CUDA) — đã kiểm tra máy thật.
 
 **Yêu cầu đã chốt từ user:**
 1. App = MAUI Blazor Hybrid chứa UI (giữ nguyên hướng scaffold hiện tại).
@@ -15,6 +15,7 @@
 3. Capture **hỗ trợ cả 3 mode** gồm exclusive fullscreen (giống OBS).
 4. Code C# **đa ngôn ngữ: tiếng Việt + tiếng Anh** (doc comments song ngữ EN/VI).
 5. **Tối ưu hiệu năng là yêu cầu cứng**: app chạy đồng thời với game + stream, không được làm tụt fps game.
+6. **Persistence: SQLite + EF Core** làm CSDL ứng dụng; cache text đã dịch **theo ngữ cảnh** — từng game/phần mềm (tên process), hoặc của màn hình khi chỉ quay màn hình; JSON cho settings.
 
 ---
 
@@ -40,7 +41,7 @@ Bối cảnh: game + OBS stream đang chạy, app chỉ được "gánh" thêm m
 | Capture màn hình/cửa sổ | DXGI (GPU→CPU copy, không tốn CPU xử lý) | < 2% CPU |
 | Capture exclusive FS | Hook chỉ copy back buffer trong `Present` (đã nằm trên GPU pipeline), shared memory + event — app đọc passively | < 1% CPU phía game, ~0.5% phía app |
 | OCR | **Throttle ~3 fps** (text game/UI thay đổi chậm, không cần 60fps); model mobile mặc định; drop frame nếu inference chưa xong; GPU riêng biệt với game nhờ VRAM 16GB dư | VRAM < 1 GB, không tranh contention CPU nặng |
-| Dịch | **Diff-based**: chỉ gửi text mới xuất hiện; cache (text, src, dst) → hit rate cao vì HUD/menu lặp lại; fully async, không block pipeline | API call giảm ~80–90% nhờ cache+diff |
+| Dịch | **Diff-based**: chỉ gửi text mới xuất hiện; cache per-context trong SQLite (ngữ cảnh game/app/màn hình × text × src × dst) → hit rate cao vì HUD/menu lặp lại; fully async, không block pipeline | API call giảm ~80–90% nhờ cache+diff |
 | UI overlay | Throttle 10–15 fps cập nhật canvas | Negligible |
 | OBS export | Image source cập nhật ~10fps qua obs-websocket | Negligible |
 | **Tổng cộng** | | **< 8% CPU, < 500 MB RAM khi game+stream đang chạy** |
@@ -152,21 +153,31 @@ Hai track chạy **song song** từ đầu:
 
 **Hoàn thành khi:** chạy live với game borderless đang chơi: box + text hiện đúng, latency + footprint đạt ngân sách.
 
-#### Milestone 3 — Dịch đa provider (~4–5 ngày)
+#### Milestone 3 — Dịch đa provider + persistence (~5–6 ngày)
 
-**Task 3.1: `ITranslator`** — `TranslateAsync(IReadOnlyList<string>, srcLang, dstLang)` (batch); config: provider, API key, endpoint, ngôn ngữ.
+**Task 3.1: SQLite + EF Core foundation** (`src/ReTran.Core/Data/`)
+- `ReTranDbContext` (EF Core + `Microsoft.EntityFrameworkCore.Sqlite`), DB file `%LOCALAPPDATA%\ReTran\retran.db`.
+- Tables: `TranslationCache` (ContextKey, SourceText, SrcLang, DstLang, TranslatedText, UpdatedAtUtc, Hits — unique index `(ContextKey, SourceText, SrcLang, DstLang)`), `ProcessAllowlist` (cho Track B). EF migrations từ đầu.
+- Settings app: JSON (`settings.json` cạnh DB) — provider keys, capture defaults, OBS config. Không đưa settings vào DB.
 
-**Task 3.2: Bốn providers**
+**Task 3.2: `ITranslator` + `TranslationContext`**
+- `TranslateAsync(IReadOnlyList<string>, TranslationContext, srcLang, dstLang)` (batch); config: provider, API key, endpoint, ngôn ngữ.
+- `TranslationContext` = danh tính nguồn nội dung: tên process (+ window title) của game/app khi capture cửa sổ/hook, hoặc `screen:<monitor>` khi chỉ quay màn hình. Resolve tự động từ `IFrameSource` đang hoạt động — user không cần cấu hình thủ công.
+
+**Task 3.3: Bốn providers**
 - `GoogleTranslator` (official API)
 - `DeepLTranslator`
 - `LocalTranslator` — NLLB/m2m100 qua ONNX Runtime **chạy trong Python sidecar** (endpoint `/translate`), offline, không tốn key
 - `OpenAiCompatibleTranslator` — bất kỳ endpoint chuẩn OpenAI (Ollama local mặc định, cloud tùy chọn)
 
-**Task 3.3: Diff + cache layer** (`TranslationCache`) — chỉ gửi text mới xuất hiện; cache (text, src, dst); đo hit rate trên phiên chơi thật.
+**Task 3.4: Diff + cache per-context layer** (`TranslationCacheService`)
+- Runtime diff theo phiên: chỉ gửi text mới xuất hiện kể từ frame OCR trước.
+- Cache bền trong SQLite theo `(ContextKey, SourceText, SrcLang, DstLang)` → cùng một dòng "Missions" trong game A và game B (hoặc trên màn hình) là 2 bản ghi riêng; hit → trả về ngay không gọi API, tăng `Hits`.
+- Đo hit rate + số API call trên phiên chơi thật → `Docs/performance.md`.
 
-**Task 3.4: UI** — cột "Gốc | Dịch", option ẩn text gốc; chọn provider trong settings.
+**Task 3.5: UI** — cột "Gốc | Dịch", option ẩn text gốc; chọn provider trong settings; quản lý cache (xem/xóa theo ngữ cảnh).
 
-**Hoàn thành khi:** khung hình song song gốc/dịch live; cache + diff hoạt động (số đo hit rate); đổi provider không cần restart app.
+**Hoàn thành khi:** khung hình song song gốc/dịch live; cache per-context + diff hoạt động (số đo hit rate thật); đổi provider không cần restart app; DB migrations chạy sạch.
 
 #### Milestone 4 — Xuất OBS + hoàn thiện (~1 tuần)
 
