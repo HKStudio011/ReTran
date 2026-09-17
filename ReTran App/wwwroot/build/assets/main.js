@@ -2664,4 +2664,9 @@ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e)
 	n === "system" && document.documentElement.setAttribute("data-theme", e.matches ? "dark" : "light");
 });
 //#endregion
-export { t as $, i as applyColor, r as applyTheme };
+//#region src/ts/main.ts
+async function a(e) {
+	await navigator.clipboard.writeText(e);
+}
+//#endregion
+export { t as $, i as applyColor, r as applyTheme, a as copyText };

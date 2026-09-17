@@ -18,6 +18,7 @@ namespace ReTran_App
 
             builder.Services.AddSingleton<ReTran_App.Services.JsInteropService>();
             builder.Services.AddSingleton<ReTran_App.Core.OverlayState>();
+            builder.Services.AddSingleton<ReTran_App.Services.OverlayFeedServer>();
 
 #if DEBUG
     		builder.Services.AddBlazorWebViewDeveloperTools();

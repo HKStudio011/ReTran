@@ -1,5 +1,135 @@
 ﻿@page "/"
+@inject ReTran_App.Core.OverlayState State
+@inject ReTran_App.Services.OverlayFeedServer FeedServer
+@inject ReTran_App.Services.JsInteropService Js
+@inject IJSRuntime JS
+@implements IDisposable
 
-<h1>Hello, world!</h1>
+<h1>Điều khiển / Control</h1>
 
-Welcome to your new app.
+<section>
+    <h2>Nguồn chụp / Capture source</h2>
+    <label>
+        Nguồn / Source:
+        <select @bind="_source">
+            <option value="screen:0">Màn hình 0 / Screen 0</option>
+            <option value="screen:1">Màn hình 1 / Screen 1</option>
+            <option value="window">Cửa sổ / Window (HWND)</option>
+        </select>
+    </label>
+    @if (_source == "window")
+    {
+        <label>
+            HWND cửa sổ / Window HWND:
+            <input @bind="_hwnd" placeholder="VD / e.g. 0x1A2B3C" />
+        </label>
+    }
+    <p>Lựa chọn chỉ được lưu tạm — RPC capture chưa có, Core live ở milestone sau. / Stored selection only — capture RPC not yet available, Core live comes in a later milestone.</p>
+</section>
+
+<section>
+    <h2>Dịch / Translation</h2>
+    <label>
+        Nhà cung cấp / Provider:
+        <select @bind="_provider">
+            <option>Google</option>
+            <option>DeepL</option>
+            <option>Local</option>
+            <option>LLM</option>
+        </select>
+    </label>
+</section>
+
+<section>
+    <h2>Demo pipeline</h2>
+    <button @onclick="StartDemo" disabled="@_running">Bắt đầu Demo (Core live ở milestone sau) / Start Demo</button>
+    <button @onclick="StopDemo" disabled="@(!_running)">Dừng Demo / Stop Demo</button>
+    <p>@_status</p>
+</section>
+
+<section>
+    <h2>OBS</h2>
+    <p>URL cho OBS / OBS URL: <code>@ObsUrl</code></p>
+    <button @onclick="CopyUrlAsync">Sao chép / Copy</button>
+    @if (!string.IsNullOrEmpty(_copyStatus))
+    {
+        <span>@_copyStatus</span>
+    }
+    @if (FeedServer.Port == 0)
+    {
+        <p>Máy chủ feed chưa chạy / Feed server not running.</p>
+    }
+    <iframe src="@ObsUrl" width="480" height="270" title="Xem trước overlay / Overlay preview"></iframe>
+</section>
+
+<!-- Task 6 appends the theme section here (theme toggle + color dots). -->
+
+@code {
+    private string _source = "screen:0";
+    private string _hwnd = string.Empty;
+    private string _provider = "Google";
+    private ReTran_App.Core.DemoFeed? _feed;
+    private bool _running;
+    private string _status = "Demo: đã dừng / stopped.";
+    private string _copyStatus = string.Empty;
+
+    private string ObsUrl => $"http://127.0.0.1:{FeedServer.Port}/overlay";
+
+    protected override void OnAfterRender(bool firstRender)
+    {
+        // Nothing else initializes the JS bridge (verified: no other caller of
+        // Initialize/NotifyWebViewReady), so the control page does it on first
+        // render — otherwise copyText would silently no-op.
+        if (firstRender)
+        {
+            Js.Initialize(JS);
+            Js.NotifyWebViewReady();
+        }
+    }
+
+    private void StartDemo()
+    {
+        if (_feed is not null) return;
+        _feed = new ReTran_App.Core.DemoFeed(State);
+        _feed.Start();
+        _running = true;
+        _status = $"Demo: đang chạy / running — nguồn / source: {SourceLabel()}.";
+    }
+
+    private void StopDemo()
+    {
+        if (_feed is null) return;
+        _feed.Stop();
+        _feed.Dispose();
+        _feed = null;
+        _running = false;
+        _status = "Demo: đã dừng / stopped.";
+    }
+
+    private string SourceLabel() => _source == "window" && !string.IsNullOrWhiteSpace(_hwnd)
+        ? $"Window ({_hwnd})"
+        : _source;
+
+    private async Task CopyUrlAsync()
+    {
+        try
+        {
+            await Js.InvokeVoidAsync("copyText", ObsUrl);
+            _copyStatus = "Đã sao chép / Copied.";
+        }
+        catch (Exception)
+        {
+            _copyStatus = "Sao chép thất bại / Copy failed.";
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_feed is not null)
+        {
+            _feed.Stop();
+            _feed.Dispose();
+            _feed = null;
+        }
+    }
+}

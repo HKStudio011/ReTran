@@ -1,14 +1,43 @@
-﻿using ReTran_App.Core;
+﻿using Microsoft.Extensions.Logging;
+using ReTran_App.Core;
+using ReTran_App.Services;
 
 namespace ReTran_App
 {
     public partial class MainPage : ContentPage
     {
         private CoreProcessClient? _core;
+        // Overlay feed server: single DI instance serving the DI OverlayState to OBS.
+        // Started once with the app window, disposed on exit. DemoFeed itself is
+        // started/stopped only by the control page buttons, never here.
+        private OverlayFeedServer? _feedServer;
+        private bool _feedServerStarted;
 
         public MainPage()
         {
             InitializeComponent();
+        }
+
+        protected override async void OnAppearing()
+        {
+            base.OnAppearing();
+            if (_feedServerStarted) return;
+            _feedServerStarted = true;
+            try
+            {
+                var services = IPlatformApplication.Current?.Services;
+                _feedServer = (OverlayFeedServer?)services?.GetService(typeof(OverlayFeedServer));
+                if (_feedServer is null) return;
+                await _feedServer.StartAsync(CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                // Best-effort: the control page shows Port == 0 as "not running".
+                // Best-effort: trang điều khiển hiển thị Port == 0 là "chưa chạy".
+                var logger = (ILogger<MainPage>?)IPlatformApplication.Current?.Services.GetService(typeof(ILogger<MainPage>));
+                logger?.LogWarning(ex, "Overlay feed server failed to start; OBS URL will show as not running.");
+                _feedServer = null;
+            }
         }
 
         private async void OnStartCoreClicked(object? sender, EventArgs e)
@@ -84,6 +113,11 @@ namespace ReTran_App
             {
                 _core.DisposeAsync().AsTask().GetAwaiter().GetResult();
                 _core = null;
+            }
+            if (_feedServer is not null)
+            {
+                _feedServer.DisposeAsync().AsTask().GetAwaiter().GetResult();
+                _feedServer = null;
             }
         }
     }
