@@ -17,6 +17,7 @@ namespace ReTran_App
             builder.Services.AddMauiBlazorWebView();
 
             builder.Services.AddSingleton<ReTran_App.Services.JsInteropService>();
+            builder.Services.AddSingleton<ReTran_App.Core.OverlayState>();
 
 #if DEBUG
     		builder.Services.AddBlazorWebViewDeveloperTools();

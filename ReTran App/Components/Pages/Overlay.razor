@@ -1,0 +1,25 @@
+@page "/overlay"
+@layout ReTran_App.Components.Layout.OverlayLayout
+@inject ReTran_App.Core.OverlayState State
+@implements IDisposable
+
+@foreach (var b in _boxes)
+{
+    <div style="position:absolute;left:@(b.X*100)%;top:@(b.Y*100)%;width:@(b.W*100)%;border:2px solid #22c55e;background:rgba(0,0,0,.45);color:#fff;padding:2px 6px;font-size:clamp(12px,2.2vw,28px);">
+        @b.Translated
+    </div>
+}
+
+@code {
+    private IReadOnlyList<ReTran_App.Core.OverlayBox> _boxes = Array.Empty<ReTran_App.Core.OverlayBox>();
+
+    protected override void OnInitialized()
+    {
+        Refresh();
+        State.Changed += OnChanged;
+    }
+
+    private void OnChanged() => InvokeAsync(() => { Refresh(); StateHasChanged(); });
+    private void Refresh() => _boxes = State.Latest?.Boxes ?? _boxes;
+    public void Dispose() => State.Changed -= OnChanged;
+}
