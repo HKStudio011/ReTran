@@ -86,6 +86,12 @@ public class JsInteropService : IAsyncDisposable
         return await module.InvokeAsync<double[]>("getViewportSize");
     }
 
+    /// <summary>Sets the UI theme (light/dark/system) via the Vite module. Đặt theme giao diện (sáng/tối/theo hệ thống) qua module Vite.</summary>
+    public async ValueTask SetThemeAsync(string theme) => await InvokeVoidAsync("setTheme", theme);
+
+    /// <summary>Sets the accent color pair via the Vite module. Đặt cặp màu nhấn qua module Vite.</summary>
+    public async ValueTask SetColorAsync(string colorId) => await InvokeVoidAsync("setColor", colorId);
+
     /// <summary>
     /// Disposes the imported JS module.
     /// Giải phóng module JS đã import.

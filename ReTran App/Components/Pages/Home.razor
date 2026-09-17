@@ -62,7 +62,24 @@
     <iframe src="@ObsUrl" width="480" height="270" title="Xem trước overlay / Overlay preview"></iframe>
 </section>
 
-<!-- Task 6 appends the theme section here (theme toggle + color dots). -->
+<section>
+    <h2>Giao diện / Theme</h2>
+    <div>
+        <button @onclick='() => SetThemeAsync("light")'>Sáng / Light</button>
+        <button @onclick='() => SetThemeAsync("dark")'>Tối / Dark</button>
+        <button @onclick='() => SetThemeAsync("system")'>Hệ thống / System</button>
+    </div>
+    <div>
+        <button @onclick='() => SetColorAsync("default")' title="Mặc định / Default"><span style="display:inline-block;width:1em;height:1em;border-radius:50%;background:var(--primary);border:1px solid currentColor;"></span> Mặc định / Default</button>
+        <button data-color="emerald" @onclick='() => SetColorAsync("emerald")' title="Emerald"><span style="display:inline-block;width:1em;height:1em;border-radius:50%;background:var(--primary);border:1px solid currentColor;"></span> Emerald</button>
+        <button data-color="violet" @onclick='() => SetColorAsync("violet")' title="Violet"><span style="display:inline-block;width:1em;height:1em;border-radius:50%;background:var(--primary);border:1px solid currentColor;"></span> Violet</button>
+        <button data-color="sunset" @onclick='() => SetColorAsync("sunset")' title="Sunset"><span style="display:inline-block;width:1em;height:1em;border-radius:50%;background:var(--primary);border:1px solid currentColor;"></span> Sunset</button>
+    </div>
+    @if (!string.IsNullOrEmpty(_themeStatus))
+    {
+        <span>@_themeStatus</span>
+    }
+</section>
 
 @code {
     private string _source = "screen:0";
@@ -72,6 +89,7 @@
     private bool _running;
     private string _status = "Demo: đã dừng / stopped.";
     private string _copyStatus = string.Empty;
+    private string _themeStatus = string.Empty;
 
     private string ObsUrl => $"http://127.0.0.1:{FeedServer.Port}/overlay";
 
@@ -130,6 +148,32 @@
             _feed.Stop();
             _feed.Dispose();
             _feed = null;
+        }
+    }
+
+    private async Task SetThemeAsync(string theme)
+    {
+        try
+        {
+            await Js.SetThemeAsync(theme);
+            _themeStatus = $"Theme: {theme}.";
+        }
+        catch (Exception)
+        {
+            _themeStatus = "Đổi theme thất bại / Theme change failed.";
+        }
+    }
+
+    private async Task SetColorAsync(string colorId)
+    {
+        try
+        {
+            await Js.SetColorAsync(colorId);
+            _themeStatus = $"Màu / Color: {colorId}.";
+        }
+        catch (Exception)
+        {
+            _themeStatus = "Đổi màu thất bại / Color change failed.";
         }
     }
 }

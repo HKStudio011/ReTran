@@ -1,7 +1,7 @@
 import $ from "jquery";
 import '../css/style.css';
 
-export { applyTheme, applyColor } from './theme-manager'
+export { applyTheme, applyColor, setTheme, setColor, initTheme } from './theme-manager'
 
 export { $ };
 

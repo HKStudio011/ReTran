@@ -34,3 +34,21 @@
     --secondary: #6c757d;
 }
 
+/* EMERALD */
+[data-color="emerald"] {
+    --primary: #16a34a;
+    --secondary: #64748b;
+}
+
+/* VIOLET */
+[data-color="violet"] {
+    --primary: #7c3aed;
+    --secondary: #64748b;
+}
+
+/* SUNSET */
+[data-color="sunset"] {
+    --primary: #ea580c;
+    --secondary: #57534c;
+}
+

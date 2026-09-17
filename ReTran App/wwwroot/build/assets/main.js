@@ -2663,10 +2663,21 @@ function i(e) {
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => {
 	n === "system" && document.documentElement.setAttribute("data-theme", e.matches ? "dark" : "light");
 });
+var a = "retran-theme", o = "retran-color";
+function s(e) {
+	localStorage.setItem(a, e), r(e);
+}
+function c(e) {
+	localStorage.setItem(o, e), i(e);
+}
+function l() {
+	r(localStorage.getItem(a) ?? "system"), i(localStorage.getItem(o) ?? "default");
+}
+l();
 //#endregion
 //#region src/ts/main.ts
-async function a(e) {
+async function u(e) {
 	await navigator.clipboard.writeText(e);
 }
 //#endregion
-export { t as $, i as applyColor, r as applyTheme, a as copyText };
+export { t as $, i as applyColor, r as applyTheme, u as copyText, l as initTheme, c as setColor, s as setTheme };
