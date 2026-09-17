@@ -15,10 +15,6 @@ namespace ReTran_App
                 });
 
             builder.Services.AddMauiBlazorWebView();
-            builder.Services.AddSingleton<ReTran_App.Services.JsInteropService>();
-            // Task 2 will provide OverlayState — uncomment then.
-            // OverlayState sẽ được tạo ở Task 2 — mở comment dòng dưới khi đó.
-            // builder.Services.AddSingleton<ReTran_App.Core.OverlayState>();
 
 #if DEBUG
     		builder.Services.AddBlazorWebViewDeveloperTools();
