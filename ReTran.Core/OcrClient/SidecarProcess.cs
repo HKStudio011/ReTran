@@ -30,7 +30,7 @@ public sealed class SidecarProcess : IAsyncDisposable
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
-            WorkingDirectory = Path.Combine(workingDir, "ReTran Core"),
+            WorkingDirectory = Path.Combine(workingDir, "ReTran.OCR"),
             CreateNoWindow = true,
         };
         psi.ArgumentList.Add("-m");

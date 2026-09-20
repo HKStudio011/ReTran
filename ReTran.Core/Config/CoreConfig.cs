@@ -59,7 +59,9 @@ public sealed class JsonConfigLoader : ICoreConfigLoader
 /// </summary>
 public sealed record CoreConfig(
     string? PythonExe = null,
-    [property: JsonPropertyName("ocrFps")] int OcrFps = 3)
+    [property: JsonPropertyName("ocrFps")] int OcrFps = 3,
+    [property: JsonPropertyName("captureMonitor")] int CaptureMonitor = 0,
+    [property: JsonPropertyName("captureFps")] int CaptureFps = 10)
 {
     private static readonly ICoreConfigLoader Loader = new JsonConfigLoader();
 

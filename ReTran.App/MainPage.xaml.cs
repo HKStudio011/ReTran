@@ -99,7 +99,7 @@ namespace ReTran_App
             var dir = new DirectoryInfo(AppContext.BaseDirectory);
             while (dir is not null)
             {
-                string candidate = Path.Combine(dir.FullName, "ReTran Core", "core-cs", "bin", "Debug", "net10.0-windows", "ReTran.Core.exe");
+                string candidate = Path.Combine(dir.FullName, "ReTran.Core", "bin", "Debug", "net10.0-windows", "ReTran.Core.exe");
                 if (File.Exists(candidate)) return candidate;
                 dir = dir.Parent;
             }

@@ -208,6 +208,25 @@ public sealed class OverlayFeedServer(OverlayState state, int port = 17863) : IA
                 await ServeFileAsync(ctx, "overlay/overlay.js", "text/javascript; charset=utf-8", ct).ConfigureAwait(false);
                 return;
             }
+            if (path.StartsWith("/build/", StringComparison.Ordinal))
+            {
+                // Vite build output (styles.css for overlay.html). Only css/js/map,
+                // no "..", so the wwwroot cannot be escaped.
+                // Output build của Vite (styles.css cho overlay.html). Chỉ css/js/map,
+                // cấm ".." nên không thể thoát khỏi wwwroot.
+                string? buildContentType = path.EndsWith(".css", StringComparison.OrdinalIgnoreCase)
+                    ? "text/css; charset=utf-8"
+                    : path.EndsWith(".js", StringComparison.OrdinalIgnoreCase)
+                    ? "text/javascript; charset=utf-8"
+                    : path.EndsWith(".map", StringComparison.OrdinalIgnoreCase)
+                    ? "application/json; charset=utf-8"
+                    : null;
+                if (buildContentType is not null && !path.Contains(".."))
+                {
+                    await ServeFileAsync(ctx, path.TrimStart('/'), buildContentType, ct).ConfigureAwait(false);
+                    return;
+                }
+            }
             ctx.Response.StatusCode = 404;
             ctx.Response.Close();
         }

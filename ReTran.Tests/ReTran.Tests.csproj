@@ -1,0 +1,42 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- net10.0-windows10.0.19041.0: must match ReTran.App's Windows TFM (NU1201 otherwise);
+         ReTran.Core is Windows-only too, so this covers both references. -->
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <!-- The referenced MAUI app brings transitive Maui targets (Resizetizer) that fail in a plain test project. -->
+    <UseMaui>false</UseMaui>
+    <EnableMauiImageProcessing>false</EnableMauiImageProcessing>
+  </PropertyGroup>
+
+
+  <ItemGroup>
+    <PackageReference Include="Appium.WebDriver" Version="9.0.0" />
+    <PackageReference Include="bUnit" Version="2.11.3" />
+    <PackageReference Include="coverlet.collector" Version="10.0.1">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.10.1" />
+    <!-- xUnit v2 stack (matches the rest of the repo). Do NOT add xunit.v3 here:
+         bunit 2.x targets v2, and mixing v2+v3 breaks the runner. -->
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ReTran.Core\ReTran.Core.csproj" />
+    <ProjectReference Include="..\ReTran.App\ReTran.App.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>

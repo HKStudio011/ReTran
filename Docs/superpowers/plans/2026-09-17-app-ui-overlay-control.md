@@ -6,11 +6,11 @@
 
 **Architecture:** Một nguồn dữ liệu duy nhất: `OverlayState` (Singleton, giữ frame mới nhất + drop cũ). Core đẩy notification `frame.ocr_result`/`frame.translated` qua `CoreProcessClient` vào `OverlayState`; trang `/overlay` (Blazor, xem nội bộ) và `OverlayFeedServer` (HttpListener + SSE, phục vụ OBS) cùng đọc từ đó. Trang overlay cho OBS là HTML tĩnh + vanilla JS (không qua build Vite) để OBS Browser Source tải độc lập với WebView của App.
 
-**Tech Stack:** .NET 10 MAUI Blazor Hybrid (`net10.0-windows10.0.19041.0`), Razor, `HttpListener` (stdlib, không thêm package), xUnit (`ReTran.App.Core.Tests`, TFM `net10.0-windows`), Vite+Tailwind hiện có (chỉ cho trang điều khiển, không đụng config build).
+**Tech Stack:** .NET 10 MAUI Blazor Hybrid (`net10.0-windows10.0.19041.0`), Razor, `HttpListener` (stdlib, không thêm package), xUnit (`ReTran.App.Core.Tests`, TFM `net10.0-windows10.0.19041.0`), Vite+Tailwind hiện có (chỉ cho trang điều khiển, không đụng config build).
 
 ## Global Constraints
 
-- C# TFM App: `net10.0-windows10.0.19041.0`; test TFM: `net10.0-windows` (khớp `ReTran.App.Core.Tests.csproj` hiện tại).
+- C# TFM App: `net10.0-windows10.0.19041.0`; test TFM: `net10.0-windows10.0.19041.0` (khớp `ReTran.App.Core.Tests.csproj` hiện tại — TFM ngắn `-f net10.0-windows` lỗi MSB4086, không dùng).
 - C# public API: doc comment song ngữ (Anh câu đầu, Việt ngay sau) theo AGENTS.md.
 - Log qua DI `Microsoft.Extensions.Logging`, không `Console.WriteLine` (stdout/stderr của App không phải JSON-RPC nhưng giữ kỷ luật log chung).
 - Không layer nào phụ thuộc concrete engine: UI chỉ thấy `OverlayState` + `CoreProcessClient`, không gọi thẳng Core CLI hay sidecar.
@@ -157,7 +157,7 @@ public class OverlayStateTests
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `dotnet test "ReTran.App.Core.Tests/ReTran.App.Core.Tests.csproj" -f net10.0-windows --filter OverlayStateTests`
+Run: `dotnet test "ReTran.App.Core.Tests/ReTran.App.Core.Tests.csproj" -f net10.0-windows10.0.19041.0 --filter OverlayStateTests`
 Expected: FAIL — `OverlayState`, `DemoFeed` do not exist (compile error).
 
 - [ ] **Step 3: Implement `OverlayState.cs` + `DemoFeed.cs`**
@@ -252,7 +252,7 @@ public sealed class DemoFeed : IOverlayFeed
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `dotnet test "ReTran.App.Core.Tests/ReTran.App.Core.Tests.csproj" -f net10.0-windows`
+Run: `dotnet test "ReTran.App.Core.Tests/ReTran.App.Core.Tests.csproj" -f net10.0-windows10.0.19041.0`
 Expected: PASS (2 new + toàn bộ test M0 cũ xanh).
 
 - [ ] **Step 5: Commit**
@@ -380,7 +380,7 @@ public class OverlayFeedServerTests
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `dotnet test "ReTran.App.Core.Tests/ReTran.App.Core.Tests.csproj" -f net10.0-windows --filter OverlayFeedServerTests`
+Run: `dotnet test "ReTran.App.Core.Tests/ReTran.App.Core.Tests.csproj" -f net10.0-windows10.0.19041.0 --filter OverlayFeedServerTests`
 Expected: FAIL — `OverlayFeedServer` does not exist.
 
 - [ ] **Step 3: Implement server + static page**
@@ -419,7 +419,7 @@ es.onmessage = (e) => {
 
 - [ ] **Step 4: Run tests + real OBS smoke**
 
-Run: `dotnet test "ReTran.App.Core.Tests/ReTran.App.Core.Tests.csproj" -f net10.0-windows`
+Run: `dotnet test "ReTran.App.Core.Tests/ReTran.App.Core.Tests.csproj" -f net10.0-windows10.0.19041.0`
 Expected: PASS (toàn bộ xanh).
 Smoke: chạy App + `DemoFeed` → mở OBS → Browser Source URL `http://127.0.0.1:17863/overlay` (1920×1080) → thấy boxes xanh + chữ demo cập nhật. Chụp screenshot OBS làm bằng chứng report.
 
@@ -563,7 +563,7 @@ Khi Core có runtime methods (`capture.start/stop`, notification `frame.*`), th�
 ## UI Acceptance (end-to-end)
 
 1. `dotnet build "ReTran App/ReTran App.csproj" -f net10.0-windows10.0.19041.0` — 0 error.
-2. `dotnet test "ReTran.App.Core.Tests/ReTran.App.Core.Tests.csproj" -f net10.0-windows` — toàn bộ xanh (M0 + OverlayState 2 + FeedServer 1).
+2. `dotnet test "ReTran.App.Core.Tests/ReTran.App.Core.Tests.csproj" -f net10.0-windows10.0.19041.0` — toàn bộ xanh (M0 + OverlayState 2 + FeedServer 1).
 3. Chạy App → Start Demo → `/overlay` trong WebView hiện boxes di chuyển ("Xin chào").
 4. OBS Browser Source `http://127.0.0.1:17863/overlay` hiện cùng nội dung (screenshot).
 5. Nút Copy cho URL đúng port thực tế (kể cả khi port fallback).

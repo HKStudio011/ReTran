@@ -365,3 +365,6 @@ FodyWeavers.xsd
 .venv/
 __pycache__/
 *.pyc
+
+# Agent scratch workspace (venvs, models, SDD artifacts) - never commit
+.team-workspace/

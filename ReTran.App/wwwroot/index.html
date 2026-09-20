@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="lib/bootstrap/dist/css/bootstrap.min.css" />
     <link rel="stylesheet" href="app.css" />
     <link rel="stylesheet" href="ReTran App.styles.css" />
+    <link rel="stylesheet" href="build/assets/styles.css" />
     <link rel="icon" href="data:,">
 </head>
 
@@ -24,6 +25,8 @@
     </div>
 
     <script src="_framework/blazor.webview.js" autostart="false"></script>
+    <!-- Vite build: theme + helpers (module cached, Blazor interop reuses the same instance). -->
+    <script type="module" src="build/assets/main.js"></script>
 
 </body>
 

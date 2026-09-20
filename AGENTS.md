@@ -21,26 +21,30 @@
 
 ```
 ReTran Project/
-├── ReTran Project.slnx        # solution: ReTran App + ReTran Core pyproj (no build) + core-cs (from M0)
-├── ReTran App/                # .NET 10 MAUI Blazor Hybrid — controller surface / UI shell
-│   ├── Components/            # Razor components (pages, layout)
+├── ReTran Project.slnx        # solution: ReTran.App + ReTran.Core + ReTran.OCR pyproj (no build) + ReTran.Tests
+├── ReTran.App/                # .NET 10 MAUI Blazor Hybrid — controller surface / UI shell
+│   ├── Components/            # Razor components (pages: control /, overlay /overlay)
+│   ├── Services/              # JsInteropService, OverlayFeedServer (127.0.0.1:17863 + SSE for OBS)
+│   ├── Core/                  # CoreProcessClient, OverlayState, DemoFeed
 │   ├── vite-project/          # Vite + TypeScript + Tailwind v4 frontend → builds to ../wwwroot/build
-│   └── wwwroot/               # static assets + vite build output
-├── ReTran Core/               # headless engine (NO UI), polyglot:
-│   ├── pyproject.toml         # Python OCR sidecar project `retran-core` — uv-managed .venv (CPython 3.13)
-│   ├── core-cs/               # C# main core process (ReTran.Core.csproj, net10.0-windows console) — created in M0
-│   └── hook/                  # Rust cdylib for exclusive-fullscreen game capture — planned
+│   └── wwwroot/               # static assets + vite build output + overlay/ (static OBS page)
+├── ReTran.Core/               # headless C# engine (NO UI): ReTran.Core.csproj, net10.0-windows console
+│   ├── Cli/ Config/ JsonRpc/ OcrClient/  # (flattened, no src/ split)
+│   └── Program.cs
+├── ReTran.OCR/                # Python OCR sidecar project `retran-core` — uv-managed .venv (CPython 3.13)
+│   └── hook/                  # (planned) Rust cdylib for exclusive-fullscreen game capture
+├── ReTran.Tests/              # xUnit v2 + bUnit + Appium test project (core + app tests)
 └── Docs/                      # design notes, decisions; superpowers/specs + superpowers/plans
 ```
 
-Current state: ReTran App is the MAUI Blazor Hybrid shell (template scaffold). ReTran Core is a Python project skeleton (`pyproject.toml` + `.pyproj`); the C# core process and Rust hook do not exist yet — the M0 plan (`Docs/superpowers/plans/2026-09-09-m0-core-ipc-backbone.md`) builds the JSON-RPC backbone.
+Current state: M0 IPC backbone done (App launches Core, Core spawns sidecar, all pingable). M1 Capture done in sandbox, merged. App UI done: control page `/`, transparent `/overlay`, local overlay HTTP+SSE for OBS Browser Source (`http://127.0.0.1:17863/overlay`). Rust hook planned, not started.
 
 ## Tech Stack & Role of Each Language
 
 | Language | Role | Status |
 |---|---|---|
-| **C#** (.NET 10) | App shell (MAUI Blazor Hybrid controller surface) + headless core process (`ReTran Core/core-cs`, net10.0-windows console): Windows capture interop, JSON-RPC peer, OCR sidecar client, translation orchestration, OBS WebSocket client; EF Core + SQLite persistence in the App | scaffolded (App) / M0 (core-cs) |
-| **TypeScript / JavaScript** | UI logic in the WebView (overlay drawing, result display); built by Vite from `ReTran App/vite-project` | scaffolded |
+| **C#** (.NET 10) | App shell (MAUI Blazor Hybrid controller surface) + headless core process (`ReTran.Core`, net10.0-windows console): Windows capture interop, JSON-RPC peer, OCR sidecar client, translation orchestration; EF Core + SQLite persistence in the App (planned) | done (M0 backbone, M1 capture, App UI) |
+| **TypeScript / JavaScript** | UI logic in the WebView (overlay drawing, result display); built by Vite from `ReTran.App/vite-project` | scaffolded |
 | **HTML / CSS** | WebView markup and styling (Tailwind v4) | scaffolded |
 | **Python** | OCR sidecar (`retran-core`): long-lived PaddleOCR process spawned by the C# core, JSON-RPC over stdio; local translation models later | scaffolded (pyproject + uv .venv) |
 | **Rust** | Native hook DLL for exclusive fullscreen game capture (OBS-style D3D11 Present hook, injected into the game process) | planned — `cargo` not installed on dev machine yet |
@@ -82,11 +86,11 @@ Diff-based: only newly appearing text lines are sent to the translator. Results 
 
 ### OBS Export
 
-Export annotated frames to OBS via **obs-websocket** (update an image source, or feed a browser source). Keep frame rate modest; full 60fps streaming is not a first milestone.
+Export the overlay to OBS via a **Browser Source** pointing at the App's local overlay server (`http://127.0.0.1:17863/overlay`, HTTP+SSE, `OverlayFeedServer`). obs-websocket image-source updates are the fallback, not the primary path. Keep frame rate modest; full 60fps streaming is not a first milestone.
 
 ## Data & Persistence
 
-- **SQLite + EF Core** (`ReTranDbContext` in `ReTran App/`) is the application database, **owned by the App**: translation cache (per content context), process allowlist, anything needing queries or history. DB file: `%LOCALAPPDATA%\ReTran\retran.db`. Use EF migrations from day one — no raw schema scripts. Core never opens this file; it asks the App over IPC for cache lookups/writes.
+- **SQLite + EF Core** (`ReTranDbContext` in `ReTran.App/`) is the application database, **owned by the App**: translation cache (per content context), process allowlist, anything needing queries or history. DB file: `%LOCALAPPDATA%\ReTran\retran.db`. Use EF migrations from day one — no raw schema scripts. Core never opens this file; it asks the App over IPC for cache lookups/writes.
 - **JSON** for app settings (`settings.json` beside the DB): provider keys/endpoint, capture defaults, OBS config, core/python executable paths — small startup-read data stays out of the DB.
 - **Core's own state** (last-seen text set, session scratch) is JSON under `%LOCALAPPDATA%\ReTran\core\` — no database in Core.
 
@@ -113,17 +117,16 @@ Verified on this machine (Windows, .NET SDK 10.0.400, Node v24, uv 0.11.x; syste
 # C# — build the whole solution (verified clean 2026-09-09)
 dotnet build "ReTran Project.slnx"
 
-# Frontend — from ReTran App/vite-project (output → ../wwwroot/build)
+# Frontend — from ReTran.App/vite-project (output → ../wwwroot/build)
 npm run dev      # watch mode
 npm run build    # tsc && vite build
 
-# Python sidecar — from ReTran Core/ (uv creates .venv with CPython 3.13; never use system/hermes Python)
+# Python sidecar — from ReTran.OCR/ (uv creates .venv with CPython 3.13; never use system/hermes Python)
 uv sync
 uv run pytest tests -v
 ```
 
-- `ReTran Core/core-cs` is added to the `.slnx` by M0; until then build it directly: `dotnet build "ReTran Core/core-cs/ReTran.Core.csproj"`.
-- Python work runs through `uv run` from `ReTran Core/` — do not pollute the system Python or use other venvs.
+- Python work runs through `uv run` from `ReTran.OCR/` — do not pollute the system Python or use other venvs.
 
 ## Code Conventions
 

@@ -1,9 +1,10 @@
 <Solution>
-  <Project Path="ReTran App/ReTran App.csproj">
+  <Project Path="ReTran.App/ReTran.App.csproj">
     <Deploy Solution="Debug|*" />
   </Project>
-  <Project Path="ReTran Core/ReTran Core.pyproj" Type="888888a0-9f3d-457c-b088-3a5042f75d52" Id="a3d32e99-7355-4817-b5cc-f59a9ba18d40">
+  <Project Path="ReTran.Core/ReTran.Core.csproj" />
+  <Project Path="ReTran.OCR/ReTran.OCR.pyproj" Type="888888a0-9f3d-457c-b088-3a5042f75d52" Id="a3d32e99-7355-4817-b5cc-f59a9ba18d40">
     <Build Project="false" />
   </Project>
-  <Project Path="ReTran Core/core-cs/ReTran.Core.csproj" />
+  <Project Path="ReTran.Tests/ReTran.Tests.csproj" Id="fee0bb12-0899-43e2-8356-aa69b7479c94" />
 </Solution>

@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json.Nodes;
+using ReTran.Core.Capture;
 using ReTran.Core.Cli;
 using ReTran.Core.JsonRpc;
 
@@ -22,7 +23,8 @@ public static class Program
 
         var dispatcher = new CommandDispatcher();
         dispatcher.Register("version", _ => Task.FromResult(WriteStdout(Version)));
-        // ocr / translate / capture handlers land in M1–M3.
+        CaptureCommands.Register(dispatcher);
+        // ocr / translate handlers land in M2–M3.
         return await dispatcher.DispatchAsync(args);
     }
 
