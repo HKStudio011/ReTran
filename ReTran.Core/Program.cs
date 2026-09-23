@@ -24,7 +24,8 @@ public static class Program
         var dispatcher = new CommandDispatcher();
         dispatcher.Register("version", _ => Task.FromResult(WriteStdout(Version)));
         CaptureCommands.Register(dispatcher);
-        // ocr / translate handlers land in M2–M3.
+        OcrCommands.Register(dispatcher);
+        // translate handler lands in M3.
         return await dispatcher.DispatchAsync(args);
     }
 
