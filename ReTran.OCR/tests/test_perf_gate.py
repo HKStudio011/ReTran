@@ -42,8 +42,8 @@ def test_engine_uses_mobile_det_and_disables_doc_pipelines(monkeypatch):
     assert kwargs["use_doc_orientation_classify"] is False
     assert kwargs["use_doc_unwarping"] is False
     assert kwargs["use_textline_orientation"] is False
-    # rec stays whatever lang resolves (en_PP-OCRv5_mobile_rec) — never pinned here:
-    assert "text_recognition_model_name" not in kwargs
+    # rec pinned to mobile: paddle ignores lang once det is pinned (spec §4.1):
+    assert kwargs["text_recognition_model_name"] == "en_PP-OCRv5_mobile_rec"
     # parse path still works with the fake predict payload:
     assert [s.text for s in spots] == ["HI"]
     assert spots[0].box == [[10.0, 10.0], [60.0, 10.0], [60.0, 30.0], [10.0, 30.0]]

@@ -55,10 +55,13 @@ class PaddleOcrEngine:
             # doc-orientation/unwarping/textline pipelines — three extra models and
             # most of the M2 latency (Docs/performance.md M2 baseline). Game/UI
             # text does not need the doc preprocessor; pin mobile det instead.
+            # Once det is pinned, paddleocr ignores lang (rec would fall back to
+            # the server model), so pin mobile rec too (spec §4.1).
             return PaddleOCR(
                 lang=self.lang,
                 enable_mkldnn=False,
                 text_detection_model_name="PP-OCRv5_mobile_det",
+                text_recognition_model_name=f"{self.lang}_PP-OCRv5_mobile_rec",
                 use_doc_orientation_classify=False,
                 use_doc_unwarping=False,
                 use_textline_orientation=False,
