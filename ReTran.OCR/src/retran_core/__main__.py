@@ -5,12 +5,15 @@ import sys
 
 from . import __version__
 from .jsonrpc import serve
+from .ocr.handlers import make_spot_handler
+from .ocr.paddle_engine import PaddleOcrEngine
 
 
 def _handlers():
     return {
         "sidecar.ping": lambda p: "pong",
         "sidecar.version": lambda p: __version__,
+        "ocr.spot": make_spot_handler(PaddleOcrEngine(lang="en")),
     }
 
 

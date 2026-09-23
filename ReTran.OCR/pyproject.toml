@@ -5,6 +5,8 @@ description = ""
 requires-python = ">=3.13"
 dependencies = [
     "numpy>=2.5.3",
+    "paddleocr>=3.4.1",
+    "paddlepaddle>=3.3.1",
     "pillow>=12.3.0",
     "torch>=2.14",
 ]
