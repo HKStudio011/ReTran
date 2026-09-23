@@ -48,3 +48,4 @@ def test_paddle_engine_is_lazy():
 
     src = open(mod.__file__, encoding="utf-8").read()
     assert "import paddleocr" not in src.split("def ")[0]  # no top-level paddleocr import
+    assert "from paddleocr" not in src.split("def ")[0]  # also block `from paddleocr import ...`
