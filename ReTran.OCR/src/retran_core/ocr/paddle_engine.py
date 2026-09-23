@@ -51,7 +51,18 @@ class PaddleOcrEngine:
             # enable_mkldnn=False: paddlepaddle 3.3.x oneDNN/PIR path crashes on
             # PP-OCRv5 (ConvertPirAttribute2RuntimeAttribute, onednn_instruction.cc;
             # see PaddlePaddle/Paddle#77340). Official workaround: disable oneDNN.
-            return PaddleOCR(lang=self.lang, enable_mkldnn=False)
+            # M3 perf gate: lang="en" would resolve PP-OCRv5_server_det plus the
+            # doc-orientation/unwarping/textline pipelines — three extra models and
+            # most of the M2 latency (Docs/performance.md M2 baseline). Game/UI
+            # text does not need the doc preprocessor; pin mobile det instead.
+            return PaddleOCR(
+                lang=self.lang,
+                enable_mkldnn=False,
+                text_detection_model_name="PP-OCRv5_mobile_det",
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+            )
         except Exception as exc:
             raise RuntimeError(f"model init failed: {exc}") from exc
 

@@ -75,8 +75,16 @@ public class OcrCliTests
             import numpy as np
             from PIL import Image
             from paddleocr import PaddleOCR
+            # Keep kwargs in sync with PaddleOcrEngine._create (M3 perf gate):
             img = np.array(Image.open(sys.argv[1]).convert("RGB"))[:, :, ::-1]
-            PaddleOCR(lang="en").predict(img)
+            PaddleOCR(
+                lang="en",
+                enable_mkldnn=False,
+                text_detection_model_name="PP-OCRv5_mobile_det",
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+            ).predict(img)
             print("WARM_OK")
             """);
         try
