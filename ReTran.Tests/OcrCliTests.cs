@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text.Json.Nodes;
 using ReTran.Core.Cli;
 using ReTran.Core.Config;
@@ -14,7 +13,7 @@ public class OcrCliTests
     {
         var d = new CommandDispatcher();
         OcrCommands.Register(d);
-        var (_, stderr, exit) = await RunDispatcherAsync(d, ["ocr"]);
+        var (_, stderr, exit) = await OcrTestSupport.RunDispatcherAsync(d, ["ocr"]);
         Assert.Equal(2, exit);
         Assert.Contains("usage", stderr, StringComparison.OrdinalIgnoreCase);
     }
@@ -24,7 +23,7 @@ public class OcrCliTests
     {
         var d = new CommandDispatcher();
         OcrCommands.Register(d);
-        var (_, stderr, exit) = await RunDispatcherAsync(d,
+        var (_, stderr, exit) = await OcrTestSupport.RunDispatcherAsync(d,
             ["ocr", Path.Combine(Path.GetTempPath(), $"nope-{Guid.NewGuid():N}.png")]);
         Assert.Equal(1, exit);
         Assert.Contains("not found", stderr, StringComparison.OrdinalIgnoreCase);
@@ -48,14 +47,14 @@ public class OcrCliTests
         string python = OcrBootstrap.ResolvePythonExe(new CoreConfig(), repoRoot) ?? "";
         if (python.Length == 0 || !File.Exists(python)) return;
 
-        string fixture = CreateTextFixturePng();
+        string fixture = OcrTestSupport.CreateTextFixturePng();
         try
         {
-            if (!await TryWarmUpModel(python, repoRoot, fixture)) return; // no paddle/model/network -> skip
+            if (!await OcrTestSupport.TryWarmUpModel(python, repoRoot, fixture)) return; // no paddle/model/network -> skip
 
             var d = new CommandDispatcher();
             OcrCommands.Register(d);
-            var (stdout, stderr, exit) = await RunDispatcherAsync(d, ["ocr", fixture]);
+            var (stdout, stderr, exit) = await OcrTestSupport.RunDispatcherAsync(d, ["ocr", fixture]);
             Assert.True(exit == 0, $"ocr CLI failed (exit {exit}): {stderr}");
             var json = JsonNode.Parse(stdout)!;
             Assert.NotEmpty(json["spots"]!.AsArray());
@@ -64,89 +63,5 @@ public class OcrCliTests
             Assert.NotNull(json["new_texts"]);
         }
         finally { File.Delete(fixture); }
-    }
-
-    /// <summary>Runs one python snippet that loads PaddleOCR and OCRs the fixture (warms the model cache).</summary>
-    private static async Task<bool> TryWarmUpModel(string python, string repoRoot, string fixturePng)
-    {
-        string script = Path.Combine(Path.GetTempPath(), $"retran-warmup-{Guid.NewGuid():N}.py");
-        File.WriteAllText(script, """
-            import sys
-            import numpy as np
-            from PIL import Image
-            from paddleocr import PaddleOCR
-            # Keep kwargs in sync with PaddleOcrEngine._create (M3 perf gate):
-            img = np.array(Image.open(sys.argv[1]).convert("RGB"))[:, :, ::-1]
-            PaddleOCR(
-                lang="en",
-                enable_mkldnn=False,
-                text_detection_model_name="PP-OCRv5_mobile_det",
-                text_recognition_model_name="en_PP-OCRv5_mobile_rec",
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False,
-                use_textline_orientation=False,
-            ).predict(img)
-            print("WARM_OK")
-            """);
-        try
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = python,
-                WorkingDirectory = repoRoot,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
-            };
-            psi.ArgumentList.Add(script);
-            psi.ArgumentList.Add(fixturePng);
-            using var p = Process.Start(psi)!;
-            Task<string> outTask = p.StandardOutput.ReadToEndAsync();
-            Task<string> errTask = p.StandardError.ReadToEndAsync();
-            // generous: first run downloads the model (~15-20MB)
-            bool exited = p.WaitForExit(300_000);
-            if (!exited)
-            {
-                try { p.Kill(entireProcessTree: true); } catch { }
-                return false;
-            }
-            _ = await errTask;
-            string stdout = await outTask;
-            return p.ExitCode == 0 && stdout.Contains("WARM_OK");
-        }
-        catch { return false; }
-        finally { if (File.Exists(script)) File.Delete(script); }
-    }
-
-    /// <summary>Draws HELLO RETRAN on white; returns the temp PNG path (caller deletes).</summary>
-    private static string CreateTextFixturePng()
-    {
-        string path = Path.Combine(Path.GetTempPath(), $"retran-ocr-fixture-{Guid.NewGuid():N}.png");
-        using var bmp = new System.Drawing.Bitmap(640, 96);
-        using var g = System.Drawing.Graphics.FromImage(bmp);
-        g.Clear(System.Drawing.Color.White);
-        using var font = new System.Drawing.Font("Arial", 48f, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Pixel);
-        g.DrawString("HELLO RETRAN", font, System.Drawing.Brushes.Black, 10f, 20f);
-        bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
-        return path;
-    }
-
-    private static async Task<(string Stdout, string Stderr, int Exit)> RunDispatcherAsync(
-        CommandDispatcher d, string[] args)
-    {
-        var origOut = Console.Out;
-        var origErr = Console.Error;
-        using var so = new StringWriter();
-        using var se = new StringWriter();
-        Console.SetOut(so);
-        Console.SetError(se); // brief said SetErr — .NET API is SetError (no SetErr exists)
-        try
-        {
-            // Brief returned (so, se, await dispatch) — tuple elements eval L→R, so strings
-            // would be captured BEFORE dispatch writes. Await first, then snapshot.
-            int exit = await d.DispatchAsync(args);
-            return (so.ToString(), se.ToString(), exit);
-        }
-        finally { Console.SetOut(origOut); Console.SetError(origErr); }
     }
 }

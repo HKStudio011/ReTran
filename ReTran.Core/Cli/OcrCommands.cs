@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using ReTran.Core.Capture;
 using ReTran.Core.Config;
 using ReTran.Core.Ocr;
 using ReTran.Core.OcrClient;
@@ -6,8 +7,8 @@ using ReTran.Core.OcrClient;
 namespace ReTran.Core.Cli;
 
 /// <summary>
-/// One-shot <c>ocr</c> CLI subcommand: PNG file in, spotted text JSON out.
-/// Subcommand CLI <c>ocr</c> một lần: nhận tệp PNG, in JSON text đã nhận diện.
+/// <c>ocr</c> CLI subcommands: one-shot PNG spotting and the continuous <c>ocr loop</c> (JSON lines).
+/// Các subcommand CLI <c>ocr</c>: nhận diện PNG một lần và vòng lặp liên tục <c>ocr loop</c> (JSON lines).
 /// </summary>
 public static class OcrCommands
 {
@@ -25,6 +26,10 @@ public static class OcrCommands
 
     private static async Task<int> RunAsync(string[] args)
     {
+        if (args.Length >= 1 && string.Equals(args[0], "loop", StringComparison.OrdinalIgnoreCase))
+        {
+            return await RunLoopAsync(args[1..]);
+        }
         if (args.Length != 1)
         {
             Console.Error.WriteLine("usage: ReTran.Core ocr <input.png>");
@@ -60,6 +65,67 @@ public static class OcrCommands
         {
             Console.Error.WriteLine($"ocr failed: {ex.Message}");
             return 1;
+        }
+    }
+
+    private static async Task<int> RunLoopAsync(string[] args)
+    {
+        CoreConfig config = CoreConfig.LoadFrom(CoreConfig.DefaultPath);
+        OcrLoopOptions? options = OcrLoop.TryParse(args, config.OcrFps, out string? parseError);
+        if (options is null)
+        {
+            Console.Error.WriteLine(OcrLoop.Usage);
+            if (parseError is not null)
+                Console.Error.WriteLine(parseError);
+            return 2;
+        }
+
+        // Validate the source BEFORE spawning the sidecar (fast exit 2 for bad --monitor).
+        ICaptureSource source;
+        try
+        {
+            source = OcrLoop.CreateSource(options);
+        }
+        catch (ArgumentOutOfRangeException ex)
+        {
+            Console.Error.WriteLine($"invalid source: {ex.Message}");
+            return 2;
+        }
+
+        using var cts = new CancellationTokenSource();
+        ConsoleCancelEventHandler onCancel = (_, e) =>
+        {
+            e.Cancel = true; // we shut down in order; do not kill the process
+            cts.Cancel();
+        };
+        Console.CancelKeyPress += onCancel;
+        try
+        {
+            string? repoRoot = OcrBootstrap.FindRepoRoot();
+            if (repoRoot is null)
+            {
+                Console.Error.WriteLine("repo root not found (ReTran.OCR/pyproject.toml above cwd).");
+                return 1;
+            }
+            string? python = OcrBootstrap.ResolvePythonExe(config, repoRoot);
+            if (python is null)
+            {
+                Console.Error.WriteLine("python not found (set PythonExe in config or run `uv sync` in ReTran.OCR/).");
+                return 1;
+            }
+            await using var sp = await SidecarProcess.StartAsync(python, repoRoot, cts.Token);
+            var pipeline = new OcrPipeline(sp, new OcrDiff());
+            return await OcrLoop.RunAsync(options, source, pipeline, Console.Out, Console.Error, cts.Token);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"ocr loop failed: {ex.Message}");
+            return 1;
+        }
+        finally
+        {
+            Console.CancelKeyPress -= onCancel;
+            source.Dispose();
         }
     }
 }
