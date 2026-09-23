@@ -23,6 +23,14 @@ def _err(id_: Any, code: int, message: str) -> str:
     )
 
 
+class RpcInvalidParams(Exception):
+    """Handler error mapped to JSON-RPC -32602 (invalid params).
+
+    Attributes:
+        message: Human-readable reason returned to the caller.
+    """
+
+
 def handle_line(line: str, handlers: Dict[str, Handler]) -> Optional[str]:
     """Process one request line; return one response line, or None for blank lines.
 
@@ -49,6 +57,8 @@ def handle_line(line: str, handlers: Dict[str, Handler]) -> Optional[str]:
         return _err(id_, -32601, f"Method not found: {method}")
     try:
         return _resp(id_, handler(params))
+    except RpcInvalidParams as exc:
+        return _err(id_, -32602, str(exc))
     except Exception as exc:  # noqa: BLE001 - report any handler failure as internal error
         return _err(id_, -32603, str(exc))
 
