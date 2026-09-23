@@ -18,6 +18,8 @@ public sealed class SidecarProcess : IAsyncDisposable, ISidecarRpc
     private int _nextId = 0;
     private readonly Dictionary<string, TaskCompletionSource<JsonNode?>> _pending = new();
     private readonly object _gate = new();
+    private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private volatile bool _exited;
 
     private SidecarProcess(Process proc, StreamWriter stdin) { _proc = proc; _stdin = stdin; }
 
@@ -85,14 +87,33 @@ public sealed class SidecarProcess : IAsyncDisposable, ISidecarRpc
         });
     }
 
-    /// <summary>Sends a request and awaits its response (matched by id).</summary>
+    /// <summary>
+    /// Sends a request and awaits its response (matched by id); throws when the sidecar has already exited.
+    /// Gửi yêu cầu và đợi phản hồi (ghép theo id); ném ngoại lệ khi sidecar đã thoát.
+    /// </summary>
+    /// <exception cref="SidecarRpcException">
+    /// Thrown when the sidecar has already exited, or exits before replying.
+    /// Khi sidecar đã thoát, hoặc thoát trước khi phản hồi.
+    /// </exception>
     public async Task<JsonNode?> CallAsync(string method, JsonNode? @params, CancellationToken ct)
     {
-        string id = (++_nextId).ToString();
         var tcs = new TaskCompletionSource<JsonNode?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        lock (_gate) _pending[id] = tcs;
-        await _stdin.WriteAsync((Rpc.SerializeRequest(new JsonRpcRequest(id, method, @params)) + "\n").AsMemory(), ct);
-        await _stdin.FlushAsync(ct);
+        string requestLine;
+        lock (_gate)
+        {
+            if (_exited)
+                throw new SidecarRpcException(RpcErrorCodes.InternalError, "sidecar exited");
+            string id = (++_nextId).ToString();
+            _pending[id] = tcs;
+            requestLine = Rpc.SerializeRequest(new JsonRpcRequest(id, method, @params)) + "\n";
+        }
+        await _writeLock.WaitAsync(ct);
+        try
+        {
+            await _stdin.WriteAsync(requestLine.AsMemory(), ct);
+            await _stdin.FlushAsync(ct);
+        }
+        finally { _writeLock.Release(); }
         return await tcs.Task.WaitAsync(ct);
     }
 
@@ -119,6 +140,7 @@ public sealed class SidecarProcess : IAsyncDisposable, ISidecarRpc
     {
         lock (_gate)
         {
+            _exited = true;
             foreach (var tcs in _pending.Values) tcs.TrySetException(ex);
             _pending.Clear();
         }
