@@ -18,6 +18,21 @@ public class SidecarProcessTests
         Assert.Equal("pong", pong!.GetValue<string>());
     }
 
+    [Fact]
+    public async Task Spot_InvalidImage_SurfacesSidecarErrorAsException()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        if (FindRepoRoot() is not string repoRoot) return;
+        string pythonExe = Path.Combine(repoRoot, "ReTran.OCR", ".venv", "Scripts", "python.exe");
+        if (!File.Exists(pythonExe)) return;
+        await using var sp = await SidecarProcess.StartAsync(pythonExe, repoRoot, CancellationToken.None);
+        var p = new JsonObject { ["image"] = "@@@" };
+        var ex = await Assert.ThrowsAsync<SidecarRpcException>(() =>
+            sp.CallAsync("ocr.spot", p, CancellationToken.None));
+        Assert.Equal(-32602, ex.Code);
+        Assert.Contains("invalid", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>Walks up from the test bin dir to the repo root (dir containing "ReTran.OCR/pyproject.toml").</summary>
     private static string? FindRepoRoot()
     {

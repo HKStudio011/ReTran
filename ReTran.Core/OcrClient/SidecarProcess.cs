@@ -11,12 +11,13 @@ namespace ReTran.Core.OcrClient;
 /// Owns the long-lived Python OCR sidecar process and talks JSON-RPC over its stdio.
 /// Sở hữu tiến trình sidecar Python dài hạn và nói chuyện JSON-RPC qua stdio của nó.
 /// </summary>
-public sealed class SidecarProcess : IAsyncDisposable
+public sealed class SidecarProcess : IAsyncDisposable, ISidecarRpc
 {
     private readonly Process _proc;
     private readonly StreamWriter _stdin;
     private int _nextId = 0;
     private readonly Dictionary<string, TaskCompletionSource<JsonNode?>> _pending = new();
+    private readonly object _gate = new();
 
     private SidecarProcess(Process proc, StreamWriter stdin) { _proc = proc; _stdin = stdin; }
 
@@ -38,6 +39,9 @@ public sealed class SidecarProcess : IAsyncDisposable
         psi.ArgumentList.Add("serve");
         var proc = new Process { StartInfo = psi };
         proc.Start();
+        // Paddle floods stderr; an unread redirected pipe would fill up and deadlock the sidecar.
+        proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) Console.Error.WriteLine($"[sidecar] {e.Data}"); };
+        proc.BeginErrorReadLine();
         // .NET 10: StandardInput is a StreamWriter, StandardOutput a StreamReader — use them directly.
         proc.StandardInput.NewLine = "\n";
         var sp = new SidecarProcess(proc, proc.StandardInput);
@@ -56,15 +60,28 @@ public sealed class SidecarProcess : IAsyncDisposable
                 string? line;
                 while ((line = await reader.ReadLineAsync()) is not null)
                 {
-                    if (Rpc.ParseLine(line) is { } n
-                        && n["id"]?.GetValue<string>() is { } id
-                        && n["result"] is { } r)
+                    if (Rpc.ParseLine(line) is not { } n
+                        || n["id"]?.GetValue<string>() is not { } id)
+                        continue;
+                    if (n["result"] is { } r)
                     {
                         Deliver(id, r);
                     }
+                    else if (n["error"] is { } err)
+                    {
+                        int code = err["code"] is JsonValue cv && cv.TryGetValue<int>(out var c)
+                            ? c : RpcErrorCodes.InternalError;
+                        string msg = err["message"] is JsonValue mv && mv.TryGetValue<string>(out var m)
+                            ? m : "sidecar error";
+                        Fail(id, new SidecarRpcException(code, msg));
+                    }
                 }
             }
-            catch { /* sidecar exited; pending waiters are cancelled by DisposeAsync */ }
+            catch { /* unexpected read failure; waiters are failed in finally */ }
+            finally
+            {
+                FailAllPending(new SidecarRpcException(RpcErrorCodes.InternalError, "sidecar exited"));
+            }
         });
     }
 
@@ -73,7 +90,7 @@ public sealed class SidecarProcess : IAsyncDisposable
     {
         string id = (++_nextId).ToString();
         var tcs = new TaskCompletionSource<JsonNode?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _pending[id] = tcs;
+        lock (_gate) _pending[id] = tcs;
         await _stdin.WriteAsync((Rpc.SerializeRequest(new JsonRpcRequest(id, method, @params)) + "\n").AsMemory(), ct);
         await _stdin.FlushAsync(ct);
         return await tcs.Task.WaitAsync(ct);
@@ -82,7 +99,29 @@ public sealed class SidecarProcess : IAsyncDisposable
     /// <summary>Called by the read loop to route a response to its waiter.</summary>
     private void Deliver(string id, JsonNode? result)
     {
-        if (_pending.TryGetValue(id, out var tcs)) { _pending.Remove(id); tcs.TrySetResult(result); }
+        lock (_gate)
+        {
+            if (_pending.TryGetValue(id, out var tcs)) { _pending.Remove(id); tcs.TrySetResult(result); }
+        }
+    }
+
+    /// <summary>Routes a sidecar error reply to its waiter as an exception.</summary>
+    private void Fail(string id, Exception ex)
+    {
+        lock (_gate)
+        {
+            if (_pending.TryGetValue(id, out var tcs)) { _pending.Remove(id); tcs.TrySetException(ex); }
+        }
+    }
+
+    /// <summary>Fails every waiter when the sidecar process exits.</summary>
+    private void FailAllPending(Exception ex)
+    {
+        lock (_gate)
+        {
+            foreach (var tcs in _pending.Values) tcs.TrySetException(ex);
+            _pending.Clear();
+        }
     }
 
     public async ValueTask DisposeAsync()
