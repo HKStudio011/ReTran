@@ -3,6 +3,8 @@ using System.Text.Json.Nodes;
 using ReTran.Core.Capture;
 using ReTran.Core.Cli;
 using ReTran.Core.JsonRpc;
+using ReTran.Core.Ocr;
+using ReTran.Core.OcrClient;
 
 namespace ReTran.Core;
 
@@ -31,16 +33,53 @@ public static class Program
 
     private static int WriteStdout(string s) { Console.Out.Write(s + "\n"); return 0; }
 
-    /// <summary>Runs the long-running JSON-RPC peer on stdio.</summary>
+    /// <summary>
+    /// Registers core method ocr.spot: validates {image} (-32602) and delegates to the pipeline (-32603 when unavailable).
+    /// Đăng ký phương thức core ocr.spot: kiểm tra {image} (-32602) và ủy quyền cho pipeline (-32603 khi không sẵn sàng).
+    /// </summary>
+    /// <param name="server">Server to register on. Server cần đăng ký.</param>
+    /// <param name="pipeline">Pipeline to sidecar, or null when the sidecar could not start. Pipeline tới sidecar, hoặc null khi chưa khởi tạo được.</param>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="server"/> is null.</exception>
+    public static void RegisterOcrMethod(JsonRpcServer server, OcrPipeline? pipeline)
+    {
+        ArgumentNullException.ThrowIfNull(server);
+        server.Register("ocr.spot", async p =>
+        {
+            if (pipeline is null)
+                throw new RpcMethodException(RpcErrorCodes.InternalError,
+                    "sidecar not available (python/venv missing or spawn failed).");
+            if (p?["image"] is not JsonValue jv || !jv.TryGetValue<string>(out var image) || image.Length == 0)
+                throw new RpcMethodException(RpcErrorCodes.InvalidParams,
+                    "missing or empty 'image' (non-empty base64 PNG string).");
+            return await pipeline.SpotAsync(image);
+        });
+    }
+
+    /// <summary>Runs the long-running JSON-RPC peer on stdio (spawns the OCR sidecar when possible).</summary>
     private static async Task<int> RunServeAsync()
     {
         var server = new JsonRpcServer();
         server.Register("core.ping", _ => Task.FromResult<JsonNode?>(JsonValue.Create("pong")));
         server.Register("core.version", _ => Task.FromResult<JsonNode?>(JsonValue.Create(Version)));
+
+        SidecarProcess? rpc = null;
+        string? repoRoot = OcrBootstrap.FindRepoRoot();
+        if (repoRoot is not null)
+        {
+            string? python = OcrBootstrap.ResolvePythonExe(Config.CoreConfig.LoadFrom(Config.CoreConfig.DefaultPath), repoRoot);
+            if (python is not null)
+            {
+                try { rpc = await SidecarProcess.StartAsync(python, repoRoot, CancellationToken.None); }
+                catch (Exception ex) { Console.Error.WriteLine($"sidecar spawn failed: {ex.Message}"); }
+            }
+        }
+        RegisterOcrMethod(server, rpc is null ? null : new OcrPipeline(rpc, new OcrDiff()));
+
         var transport = new LineJsonRpcTransport(
             new StreamReader(Console.OpenStandardInput()),
             new StreamWriter(Console.OpenStandardOutput()) { NewLine = "\n" });
         await server.RunAsync(transport, CancellationToken.None);
+        if (rpc is not null) await rpc.DisposeAsync();
         return 0;
     }
 }

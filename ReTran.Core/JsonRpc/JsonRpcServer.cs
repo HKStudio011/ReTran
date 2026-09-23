@@ -45,6 +45,11 @@ public sealed class JsonRpcServer
                 JsonNode? result = await handler(@params);
                 await transport.WriteLineAsync(JsonRpc.SerializeResponse(new JsonRpcResponse(id, result, null)), ct);
             }
+            catch (RpcMethodException ex)
+            {
+                await transport.WriteLineAsync(JsonRpc.SerializeResponse(
+                    new JsonRpcResponse(id, null, new JsonRpcError(ex.Code, ex.Message))), ct);
+            }
             catch (Exception ex)
             {
                 await transport.WriteLineAsync(JsonRpc.SerializeResponse(
