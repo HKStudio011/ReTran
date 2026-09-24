@@ -20,10 +20,17 @@ namespace RetranCore.Tests;
 /// </summary>
 internal static class OcrTestSupport
 {
-    /// <summary>Runs the dispatcher with Console redirected; snapshots stdout/stderr AFTER the await.</summary>
+    /// <summary>Process-wide gate serializing the Console redirect window across parallel test classes.</summary>
+    private static readonly SemaphoreSlim ConsoleRedirectGate = new(1, 1);
+
+    /// <summary>
+    /// Runs the dispatcher with Console redirected; snapshots stdout/stderr AFTER the await.
+    /// Serialized via a static gate so parallel test classes cannot clobber each other's Console writers.
+    /// </summary>
     public static async Task<(string Stdout, string Stderr, int Exit)> RunDispatcherAsync(
         CommandDispatcher d, string[] args)
     {
+        await ConsoleRedirectGate.WaitAsync();
         var origOut = Console.Out;
         var origErr = Console.Error;
         using var so = new StringWriter();
@@ -35,7 +42,12 @@ internal static class OcrTestSupport
             int exit = await d.DispatchAsync(args);
             return (so.ToString(), se.ToString(), exit);
         }
-        finally { Console.SetOut(origOut); Console.SetError(origErr); }
+        finally
+        {
+            Console.SetOut(origOut);
+            Console.SetError(origErr);
+            ConsoleRedirectGate.Release();
+        }
     }
 
     /// <summary>Draws HELLO RETRAN on white; returns the temp PNG path (caller deletes).</summary>
