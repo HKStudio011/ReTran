@@ -117,6 +117,10 @@ public static class OcrCommands
             var pipeline = new OcrPipeline(sp, new OcrDiff());
             return await OcrLoop.RunAsync(options, source, pipeline, Console.Out, Console.Error, cts.Token);
         }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested)
+        {
+            return 0; // Ctrl+C during sidecar spawn -> clean stop (spec §6)
+        }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"ocr loop failed: {ex.Message}");
