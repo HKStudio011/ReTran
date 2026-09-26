@@ -16,7 +16,7 @@ public sealed class CommandDispatcher
     {
         if (args.Length == 0 || !_handlers.TryGetValue(args[0], out var handler))
         {
-            Console.Error.WriteLine("usage: ReTran.Core <serve|version|ocr|translate|capture> [args]");
+            Console.Error.WriteLine("usage: ReTran.Core <serve|version|ocr|capture> [args]");
             return 2;
         }
         return await handler(args.Skip(1).ToArray());
