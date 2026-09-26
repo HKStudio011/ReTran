@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using OpenQA.Selenium;
 using OpenQA.Selenium.Appium;
 using OpenQA.Selenium.Appium.Windows;
+using ReTran_App.Core;
 using Xunit;
 
 namespace RetranCore.Tests;
@@ -28,7 +29,7 @@ public class AppiumSmokeTests
     {
         if (!AppiumUp()) return; // no Appium server on 127.0.0.1:4723 -> skip
         if (FindAppExe() is not string appExe) return; // App not built -> skip
-        if (FindCoreExe() is null) return; // Core not resolvable (no exe, no RETRAN_CORE_EXE) -> skip
+        if (CoreLocator.FindCoreExe() is null) return; // Core not resolvable (no exe, no RETRAN_CORE_EXE) -> skip
 
         var opts = new AppiumOptions();
         opts.App = appExe; // "app" capability: the real ReTran.App.exe to launch
@@ -168,22 +169,6 @@ public class AppiumSmokeTests
         {
             string p = Path.Combine(d.FullName, "ReTran.App", "bin", "Debug",
                 "net10.0-windows10.0.19041.0", "win-x64", "ReTran.App.exe");
-            if (File.Exists(p)) return p;
-            d = d.Parent;
-        }
-        return null;
-    }
-
-    /// <summary>Mirrors MainPage.FindCoreExe(): RETRAN_CORE_EXE env var wins, else the default repo build path.</summary>
-    private static string? FindCoreExe()
-    {
-        string? env = Environment.GetEnvironmentVariable("RETRAN_CORE_EXE");
-        if (env is not null && File.Exists(env)) return env;
-
-        var d = new DirectoryInfo(Directory.GetCurrentDirectory());
-        while (d is not null)
-        {
-            string p = Path.Combine(d.FullName, "ReTran.Core", "bin", "Debug", "net10.0-windows", "ReTran.Core.exe");
             if (File.Exists(p)) return p;
             d = d.Parent;
         }
