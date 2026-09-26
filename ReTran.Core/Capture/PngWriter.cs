@@ -1,12 +1,8 @@
-using System.Drawing;
-using System.Drawing.Imaging;
-using System.Runtime.InteropServices;
-
 namespace ReTran.Core.Capture;
 
 /// <summary>
-/// Encodes a <see cref="Frame"/> (BGRA) to a PNG file via System.Drawing.
-/// Mã hóa một <see cref="Frame"/> (BGRA) thành tệp PNG qua System.Drawing.
+/// Writes a <see cref="Frame"/> (BGRA) to a PNG file via <see cref="BgraPngEncoder"/>.
+/// Ghi <see cref="Frame"/> (BGRA) ra tệp PNG qua <see cref="BgraPngEncoder"/>.
 /// </summary>
 public static class PngWriter
 {
@@ -26,17 +22,6 @@ public static class PngWriter
         if (!string.IsNullOrEmpty(dir))
             Directory.CreateDirectory(dir);
 
-        GCHandle handle = GCHandle.Alloc(frame.Pixels, GCHandleType.Pinned);
-        try
-        {
-            using var bitmap = new Bitmap(
-                frame.Width, frame.Height, frame.Stride,
-                PixelFormat.Format32bppArgb, handle.AddrOfPinnedObject());
-            bitmap.Save(path, ImageFormat.Png);
-        }
-        finally
-        {
-            handle.Free();
-        }
+        File.WriteAllBytes(path, BgraPngEncoder.ToPngBytes(frame));
     }
 }
