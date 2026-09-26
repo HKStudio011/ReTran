@@ -203,8 +203,8 @@ Với `PYTHONUTF8=1` + `ocr loop --hwnd 0x3E1E78 --max-frames 10` → **exit 0, 
 
 | Row | M2 baseline | M3 measured | Budget | Verdict |
 |---|---|---|---|---|
-| Capture CPU | N/A (M2 chưa có capture) | core tổng **5,0%** (không tách được capture riêng) | < 2% | **N/A** (không tách riêng) — core tổng đã vượt 2% |
-| OCR throughput | 1080p median 35,467 s → 0,028 fps; 640×96 3,003 s → 0,33 fps | loop median **9027 ms** → ~0,11 fps (fps thật **0,1**); one-shot warm median 8951 / 7456 ms | ≤ ~333 ms (~3 fps) | **BREACH ~27×** (provisional) |
+| Capture CPU | N/A (M2 chưa có capture) | core tổng **5,0%** (không tách được capture riêng) | < 2% | **provisional BREACH (core tổng, capture chưa tách)** |
+| OCR throughput | 1080p median 35,467 s → 0,028 fps; 640×96 3,003 s → 0,33 fps | loop median **9027 ms** → ~0,11 fps (từ median) / 0,1 fps (từ wall); one-shot warm median 8951 / 7456 ms | ≤ ~333 ms (~3 fps) | **BREACH ~27×** (provisional) |
 | OCR VRAM | 0 (paddle CPU build) | **0** (cùng CPU build) | < 1 GB | **PASS** |
 | UI/overlay update | N/A | N/A | 10–15 fps | **N/A** |
 | OBS export | N/A | N/A | ~10 fps | **N/A** |
@@ -258,6 +258,7 @@ $exe = "ReTran.Core\bin\Debug\net10.0-windows\ReTran.Core.exe"
 
 # Step 5 — loop throughput (vanilla: --monitor 0 fail HDR; --hwnd vanilla crash cp1252)
 # workaround: PYTHONUTF8=1 + HWND Notepad chứa text fixture (Get-Process notepad → MainWindowHandle → hex)
+# NOTE: 0x3E1E78 là handle CỦA SESSION ĐO CŨ — session-specific; derive lại theo dòng trên, đừng copy máy móc.
 $env:PYTHONUTF8 = '1'
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $out = & $exe ocr loop --hwnd 0x3E1E78 --max-frames 10
@@ -266,6 +267,10 @@ $sw.Stop()
 $out | ForEach-Object { ($_ | ConvertFrom-Json).elapsed_ms }
 
 # Step 6 — CPU/RAM trong lúc loop (PYTHONUTF8=1; uv từ ReTran.OCR/, exe path tuyệt đối)
+# Chạy standalone: tự set PYTHONUTF8 ở dưới (đừng phụ thuộc Step 5).
+# 0x3E1E78 là handle session đo cũ — derive lại như Step 5 (Get-Process notepad → MainWindowHandle → hex);
+# exe path tuyệt đối cũng là của máy đo — sửa lại theo máy mình.
+$env:PYTHONUTF8 = '1'
 $job = Start-Job -ScriptBlock { param($x) & $x ocr loop --hwnd 0x3E1E78 --fps 3 --max-frames 30 } `
   -ArgumentList 'D:\Code\ReTran Project\ReTran.Core\bin\Debug\net10.0-windows\ReTran.Core.exe'
 Start-Sleep -Seconds 2
