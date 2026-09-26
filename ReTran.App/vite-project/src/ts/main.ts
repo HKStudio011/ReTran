@@ -1,9 +1,6 @@
-import $ from "jquery";
 import '../css/style.css';
 
 export { applyTheme, applyColor, setTheme, setColor, initTheme } from './theme-manager'
-
-export { $ };
 
 /** Copies text to the clipboard. Sao chép văn bản vào clipboard. */
 export async function copyText(text: string): Promise<void> {
