@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Đo T6 baseline OCR (CPU + mobile det) trên máy idle, dọn dẹp dependency/dead code/trùng lặp không đổi hành vi, và probe paddlepaddle-gpu trên RTX 5060 Ti để chốt hướng Plan 2 (ONNX hay ở lại paddle).
+**Goal:** Đo T6 baseline OCR (CPU + mobile det) — máy đang tải cũng được, ghi background load làm confounder — dọn dẹp dependency/dead code/trùng lặp không đổi hành vi, và probe paddlepaddle-gpu trên RTX 5060 Ti để chốt hướng Plan 2 (ONNX hay ở lại paddle).
 
 **Architecture:** Không đổi kiến trúc — spec `Docs/superpowers/specs/2026-09-26-cleanup-gpu-perf-design.md` governs. Task 1 là measurement (không code). Task 2–7 là dọn dẹp có kiểm thử: mỗi task giữ nguyên test suite (C# 70 / Python 15) và chỉ cắt phần chết/trùng. Task 8 probe GPU trong **venv riêng** (`%TEMP%`), không đụng venv dự án; kết quả ghi vào appendix của spec để Plan 2 (ONNX/DirectML + đo lại) viết trên sự thật.
 
@@ -13,7 +13,7 @@
 (Copy verbatim từ spec `2026-09-26-cleanup-gpu-perf-design.md`.)
 
 - Spec governs: `Docs/superpowers/specs/2026-09-26-cleanup-gpu-perf-design.md`.
-- Preflight đo: avg CPU ≤ 20% (`Get-Counter '\Processor(_Total)\% Processor Time'`, 3 sample × 2s); **> 20% → STOP, báo user đóng ComfyUI/Hermes/WSL rồi đo lại** — không đo máy bận.
+- Preflight đo (quyết định user 2026-09-26 — thay idle hard gate): vẫn chạy `Get-Counter` (3 sample × 2s) để **ghi background load làm confounder**, nhưng **không STOP** khi > 20%. Attribution (pipeline tốn bao nhiêu) dùng **per-process CPU** của `ReTran.Core.exe` + sidecar (Step 6 psutil) — số này có ý nghĩa cả khi máy bận. Gate < 8% CPU khi gaming+streaming đo ở Phase 3 (Plan 2) dưới tải thật.
 - Không claim PASS/BREACH mà không có số đo thật; mọi số trong `Docs/performance.md` copy từ output thật của step đo, không ước lượng.
 - Test baseline: C# **70** / Python **15** — không giảm test, không giảm assertion; skip-êm qua early return (không `Assert.Skip`); không `Console.WriteLine` trong test body.
 - Commands: `dotnet build "ReTran Project.slnx"`; `dotnet test "ReTran.Tests/ReTran.Tests.csproj" -f net10.0-windows10.0.19041.0`; `uv run pytest tests -v` (từ `ReTran.OCR/`); `npm run build` (từ `ReTran.App/vite-project`).
@@ -42,7 +42,7 @@ dotnet build "ReTran Project.slnx"
 ```
 Expected: Build succeeded, 0 lỗi. (Không build → Task sau dùng exe cũ/ thiếu.)
 
-- [ ] **Step 2: Idle preflight (hard gate)**
+- [ ] **Step 2: Background CPU snapshot (confounder — không STOP)**
 
 ```powershell
 $samples = (Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 2 -MaxSamples 3).CounterSamples | ForEach-Object { $_.CookedValue }
@@ -50,8 +50,8 @@ $avg = ($samples | Measure-Object -Average).Average
 "bg CPU avg: $avg %"
 ```
 
-- `$avg -le 20` → ghi lại giá trị + thời điểm, tiếp tục.
-- `$avg -gt 20` → **STOP**, báo user: `NEEDS_CONTEXT — máy đang load XX% (trên ngưỡng 20%), đóng ComfyUI/Hermes/WSL/etc rồi mình đo lại`. Không đo tiếp, không commit số đo máy bận.
+- Ghi lại giá trị + thời điểm — đây là confounder, đưa vào section "Bối cảnh đo" của doc (bắt buộc, kể cả ≤ 20%).
+- **Không STOP** khi > 20% (quyết định user 2026-09-26: đo ngay khi máy bận; attribution dựa vào per-process CPU ở Step 6).
 
 - [ ] **Step 3: Tạo fixtures**
 
@@ -144,7 +144,7 @@ Chèn **ngay trước** dòng `## M1 capture baseline`, mirror cấu trúc secti
 (Bảng style M2: CPU/RAM/GPU — note: T2/T3 applied — mobile det + 1280 cap.)
 
 ### Bối cảnh đo (background load — quan trọng khi đọc số)
-(avg từ Step 2 + giờ đo; nếu >20% section này phải nói rõ và verdict là "provisional".)
+(avg từ Step 2 + giờ đo; section này bắt buộc nêu rõ background load — số có thể chịu contention, attribution dùng per-process CPU ở "CPU / RAM".)
 
 ### Số liệu — one-shot (cold + warm N=5, hai fixture)
 | Fixture | Cold (s) | Warm min | Warm median | Warm mean | Ghi chú |

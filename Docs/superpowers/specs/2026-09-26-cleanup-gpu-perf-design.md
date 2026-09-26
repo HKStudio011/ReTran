@@ -30,7 +30,7 @@ Tình trạng tích hợp: App chỉ gọi được `core.ping`; UI chưa nối 
 | 1 | Ưu tiên hiệu năng | **OCR pipeline latency** (budget 333 ms/lượt) |
 | 2 | Mức tinh gọn | **Dọn dẹp + cắt deps** — không đổi kiến trúc |
 | 3 | Chiến lược GPU | **Ladder:** `paddlepaddle-gpu` → ONNX Runtime GPU (CUDA) → ONNX DirectML |
-| 4 | Baseline | **Đo T6 CPU baseline trước** khi đổi engine (máy idle) |
+| 4 | Baseline | **Đo T6 CPU baseline trước** khi đổi engine (ghi background load làm confounder, attribution = per-process CPU) |
 | 5 | Phương án tổng thể | **A — ladder có đo lường:** T6 → dọn dẹp → GPU từng nấc, mỗi bước có số đo |
 
 ## 3. Trình tự 3 phase
@@ -39,7 +39,7 @@ Tình trạng tích hợp: App chỉ gọi được `core.ping`; UI chưa nối 
 
 Chạy đúng plan M3 Task 6 (`Docs/superpowers/plans/2026-09-24-m3-frame-loop.md`):
 
-1. Preflight máy idle: avg CPU ≤ 20% (`Get-Counter '\Processor(_Total)\% Processor Time'`) — nếu > 20% thì **dừng, báo user đóng ComfyUI/Hermes/WSL rồi đo lại**.
+1. Preflight đo (quyết định user 2026-09-26, thay idle hard gate): `Get-Counter '\Processor(_Total)\% Processor Time'` (3 sample × 2s) — **ghi background load làm confounder, không STOP** khi > 20%; attribution dùng per-process CPU của core + sidecar.
 2. Fixtures 1920×1080 + 640×96; one-shot cold + warm N=5; loop throughput (`ocr loop --max-frames 10`); CPU/RAM trong lúc loop.
 3. Ghi section **M3** vào `Docs/performance.md` (trước section M1), kèm acceptance table PASS/BREACH.
 
@@ -101,7 +101,7 @@ Chạy đúng plan M3 Task 6 (`Docs/superpowers/plans/2026-09-24-m3-frame-loop.m
 - Cùng bộ ONNX models + code 2b, chỉ đổi EP sang `onnxruntime-directml` (DX12, không cần cài CUDA/cuDNN, chạy mọi GPU Windows).
 - EP chọn qua cấu hình/auto-detect (`cuda` thử trước → fallback `dml`) — nằm trong Python engine, không ra ngoài sidecar contract.
 
-**Exit mỗi nấc:** probe output ghi vào report; warm median đo được (methodology như T6, máy idle).
+**Exit mỗi nấc:** probe output ghi vào report; warm median đo được (methodology như T6).
 
 ### Phase 3 — Đo lại full gate + chốt
 
@@ -111,7 +111,7 @@ Chạy đúng plan M3 Task 6 (`Docs/superpowers/plans/2026-09-24-m3-frame-loop.m
 
 ## 4. Perf gate & testing (xuyên suốt)
 
-- Preflight idle ≤ 20% CPU trước mọi lần đo; disclosure background load trong doc.
+- Ghi background load trước mọi lần đo (confounder, disclosure trong doc); attribution = per-process CPU; gate < 8% CPU khi gaming+streaming đo ở Phase 3.
 - Commands: `dotnet build "ReTran Project.slnx"`; `dotnet test "ReTran.Tests/ReTran.Tests.csproj" -f net10.0-windows10.0.19041.0`; `uv run pytest tests -v` (từ `ReTran.OCR/`).
 - Baseline test: C# **70** / Python **15** — không giảm test, không giảm assertion; skip-êm qua early return.
 - Commit nhỏ theo từng task; stage đúng file của task.
@@ -133,4 +133,4 @@ Chạy đúng plan M3 Task 6 (`Docs/superpowers/plans/2026-09-24-m3-frame-loop.m
 | `torch` là transitive của paddleocr | Ghi nhận, giữ lại — không ép gỡ làm sidecar chết |
 | Gỡ Bootstrap còn usage sót | Rà class trước khi gỡ link; không refactor CSS |
 | MAUI TFM đổi → NU1201 | Tests giữ windows TFM khớp App — verify build |
-| Đo khi máy bận | Preflight hard gate: > 20% → dừng, không đo |
+| Đo khi máy bận | Ghi background load làm confounder + per-process CPU attribution (quyết định user 2026-09-26 — bỏ STOP gate) |
