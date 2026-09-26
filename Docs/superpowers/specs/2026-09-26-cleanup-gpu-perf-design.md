@@ -134,3 +134,26 @@ Chạy đúng plan M3 Task 6 (`Docs/superpowers/plans/2026-09-24-m3-frame-loop.m
 | Gỡ Bootstrap còn usage sót | Rà class trước khi gỡ link; không refactor CSS |
 | MAUI TFM đổi → NU1201 | Tests giữ windows TFM khớp App — verify build |
 | Đo khi máy bận | Ghi background load làm confounder + per-process CPU attribution (quyết định user 2026-09-26 — bỏ STOP gate) |
+
+## Appendix: Kết quả probe GPU (điều tra cho Plan 2)
+
+- **Ngày / máy:** 2026-09-26, GPU NVIDIA GeForce RTX 5060 Ti, driver 32.0.16.1714 (`nvidia-smi`: 617.14, 16311 MiB) — venv probe riêng `%TEMP%\retran-gpu-probe` (CPython 3.13.13), không đụng `ReTran.OCR/.venv`.
+- **Chiến lược cài (Step 2):** **FAIL** — cả 2 chiến lược (1: `paddleocr paddlepaddle-gpu>=3.3.1 numpy pillow`; 2: `paddlepaddle-gpu>=3.3.1`) cùng lỗi verbatim:
+
+  ```
+  error: No solution found when resolving dependencies
+    cause: Because only paddlepaddle-gpu<=2.6.2 is available and you require paddlepaddle-gpu>=3.3.1, we can conclude that your requirements are unsatisfiable.
+  ```
+
+  Dry-run không giới hạn version (`uv pip install --dry-run paddlepaddle-gpu`) cho root cause verbatim:
+
+  ```
+  error: No solution found when resolving dependencies
+    cause: Because all versions of paddlepaddle-gpu have no wheels with a matching Python ABI tag (e.g., `cp313`) and you require paddlepaddle-gpu, we can conclude that your requirements are unsatisfiable.
+  hint: You require CPython 3.13 (`cp313`), but we only found wheels for `paddlepaddle-gpu` (v2.6.2) with the following Python ABI tags: `cp38`, `cp39`, `cp310`, `cp311`, `cp312`
+  ```
+
+  → PyPI không có wheel `paddlepaddle-gpu` cp313 cho Windows; max version trên PyPI = 2.6.2 (chỉ tới cp312).
+- **CUDA probe (Step 3):** **bị bỏ qua** — ladder stop ở Step 2 theo stop-condition (cài wheel fail → không chạy Steps 3–4). `cuda_compiled` / `device` / `mm_ok_ms` **không đo được** — CUDA/sm_120 khi này *chưa từng được test* (fail ở khâu cài, trước runtime).
+- **OCR probe (Step 4):** **bị bỏ qua** (xem trên) — cold/warm `spot_ms` **không đo được**, không có số để so với baseline CPU Task 1 (median one-shot **8951 ms** 1080p / **7456 ms** 640×96 từ `Docs/performance.md` section M3).
+- **Kết luận cho Plan 2:** paddle GPU **không cài được trên py3.13 từ PyPI** (ladder nấc 2a fail) → **chuyển ONNX Runtime (Plan 2 nấc 2b)**, lý do: không có wheel `paddlepaddle-gpu` cp313. Ghi chú trung thực: (1) fail là ABI/index — rủi ro `sm_120` trong §6 *chưa được xác minh* vì không tới được runtime; (2) số này đo với PyPI mặc định — nếu Plan 2 muốn chốt dứt điểm nấc 2a, hướng còn lại là thử index chính thức của paddle / Python ≤ 3.12 (chưa kiểm chứng trong probe này).
