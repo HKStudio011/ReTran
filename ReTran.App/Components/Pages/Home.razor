@@ -5,81 +5,87 @@
 @inject IJSRuntime JS
 @implements IDisposable
 
-<h1>Điều khiển / Control</h1>
+<PageTitle>ReTran - Điều khiển / Control</PageTitle>
 
-<section>
-    <h2>Nguồn chụp / Capture source</h2>
-    <label>
-        Nguồn / Source:
-        <select @bind="_source">
-            <option value="screen:0">Màn hình 0 / Screen 0</option>
-            <option value="screen:1">Màn hình 1 / Screen 1</option>
-            <option value="window">Cửa sổ / Window (HWND)</option>
-        </select>
-    </label>
-    @if (_source == "window")
-    {
-        <label>
-            HWND cửa sổ / Window HWND:
-            <input @bind="_hwnd" placeholder="VD / e.g. 0x1A2B3C" />
+<div class="flex items-center justify-between mb-6">
+    <h1 class="text-2xl font-bold text-surface m-0">Điều khiển / Control</h1>
+</div>
+
+<div class="space-y-4">
+    <Card Title="Nguồn chụp / Capture source">
+        <label class="flex flex-col gap-1.5 text-sm text-surface">
+            Nguồn / Source:
+            <select @bind="_source" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
+                <option value="screen:0">Màn hình 0 / Screen 0</option>
+                <option value="screen:1">Màn hình 1 / Screen 1</option>
+                <option value="window">Cửa sổ / Window (HWND)</option>
+            </select>
         </label>
-    }
-    <p>Lựa chọn chỉ được lưu tạm — RPC capture chưa có, Core live ở milestone sau. / Stored selection only — capture RPC not yet available, Core live comes in a later milestone.</p>
-</section>
+        @if (_source == "window")
+        {
+            <label class="flex flex-col gap-1.5 text-sm text-surface">
+                HWND cửa sổ / Window HWND:
+                <input @bind="_hwnd" placeholder="VD / e.g. 0x1A2B3C" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary" />
+            </label>
+        }
+        <p class="text-sm text-secondary">Lựa chọn chỉ được lưu tạm — RPC capture chưa có, Core live ở milestone sau. / Stored selection only — capture RPC not yet available, Core live comes in a later milestone.</p>
+    </Card>
 
-<section>
-    <h2>Dịch / Translation</h2>
-    <label>
-        Nhà cung cấp / Provider:
-        <select @bind="_provider">
-            <option>Google</option>
-            <option>DeepL</option>
-            <option>Local</option>
-            <option>LLM</option>
-        </select>
-    </label>
-</section>
+    <Card Title="Dịch / Translation">
+        <label class="flex flex-col gap-1.5 text-sm text-surface">
+            Nhà cung cấp / Provider:
+            <select @bind="_provider" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
+                <option>Google</option>
+                <option>DeepL</option>
+                <option>Local</option>
+                <option>LLM</option>
+            </select>
+        </label>
+    </Card>
 
-<section>
-    <h2>Demo pipeline</h2>
-    <button @onclick="StartDemo" disabled="@_running">Bắt đầu Demo (Core live ở milestone sau) / Start Demo</button>
-    <button @onclick="StopDemo" disabled="@(!_running)">Dừng Demo / Stop Demo</button>
-    <p>@_status</p>
-</section>
+    <Card Title="Demo pipeline">
+        <div class="flex gap-2 flex-wrap">
+            <button class="btn btn-primary" @onclick="StartDemo" disabled="@_running">Bắt đầu Demo (Core live ở milestone sau) / Start Demo</button>
+            <button class="btn btn-outline-secondary" @onclick="StopDemo" disabled="@(!_running)">Dừng Demo / Stop</button>
+        </div>
+        <p class="text-sm text-secondary">@_status</p>
+    </Card>
 
-<section>
-    <h2>OBS</h2>
-    <p>URL cho OBS / OBS URL: <code>@ObsUrl</code></p>
-    <button @onclick="CopyUrlAsync">Sao chép / Copy</button>
-    @if (!string.IsNullOrEmpty(_copyStatus))
-    {
-        <span>@_copyStatus</span>
-    }
-    @if (FeedServer.Port == 0)
-    {
-        <p>Máy chủ feed chưa chạy / Feed server not running.</p>
-    }
-    <iframe src="@ObsUrl" width="480" height="270" title="Xem trước overlay / Overlay preview"></iframe>
-</section>
+    <Card Title="OBS">
+        <div class="flex items-center gap-2 flex-wrap">
+            <span class="text-sm text-surface">URL cho OBS / OBS URL:</span>
+            <code class="px-2 py-1 rounded bg-background border text-sm text-surface break-all">@ObsUrl</code>
+            <button class="btn btn-outline-primary" @onclick="CopyUrlAsync">Sao chép / Copy</button>
+            @if (!string.IsNullOrEmpty(_copyStatus))
+            {
+                <span class="text-sm text-secondary">@_copyStatus</span>
+            }
+        </div>
+        @if (FeedServer.Port == 0)
+        {
+            <p class="text-sm text-danger">Máy chủ feed chưa chạy / Feed server not running.</p>
+        }
+        <iframe src="@ObsUrl" title="Xem trước overlay / Overlay preview" class="w-full max-w-[480px] h-[270px] rounded border"></iframe>
+    </Card>
 
-<section>
-    <h2>Giao diện / Theme</h2>
-    <div>
-        <button @onclick='() => SetThemeAsync("light")'>Sáng / Light</button>
-        <button @onclick='() => SetThemeAsync("dark")'>Tối / Dark</button>
-        <button @onclick='() => SetThemeAsync("system")'>Hệ thống / System</button>
-    </div>
-    <div>
-        <button @onclick='() => SetColorAsync("default")' title="Mặc định / Default"><span style="display:inline-block;width:1em;height:1em;border-radius:50%;background:var(--primary);border:1px solid currentColor;"></span> Mặc định / Default</button>
-        <button data-color="emerald" @onclick='() => SetColorAsync("emerald")' title="Emerald"><span style="display:inline-block;width:1em;height:1em;border-radius:50%;background:var(--primary);border:1px solid currentColor;"></span> Emerald</button>
-        <button data-color="violet" @onclick='() => SetColorAsync("violet")' title="Violet"><span style="display:inline-block;width:1em;height:1em;border-radius:50%;background:var(--primary);border:1px solid currentColor;"></span> Violet</button>
-        <button data-color="sunset" @onclick='() => SetColorAsync("sunset")' title="Sunset"><span style="display:inline-block;width:1em;height:1em;border-radius:50%;background:var(--primary);border:1px solid currentColor;"></span> Sunset</button>
-    </div>
-    @if (!string.IsNullOrEmpty(_themeStatus))
-    {
-        <span>@_themeStatus</span>
-    }
-</section>
+    <Card Title="Giao diện / Theme">
+        <div class="flex gap-2 flex-wrap">
+            <button class="btn btn-outline-secondary" @onclick='() => SetThemeAsync("light")'>Sáng / Light</button>
+            <button class="btn btn-outline-secondary" @onclick='() => SetThemeAsync("dark")'>Tối / Dark</button>
+            <button class="btn btn-outline-secondary" @onclick='() => SetThemeAsync("system")'>Hệ thống / System</button>
+        </div>
+        <div class="flex gap-2 flex-wrap">
+            <button class="btn btn-outline-secondary" @onclick='() => SetColorAsync("default")' title="Mặc định / Default"><span class="inline-block w-4 h-4 rounded-full border border-current bg-[var(--primary)]"></span> Mặc định / Default</button>
+            <button class="btn btn-outline-secondary" data-color="emerald" @onclick='() => SetColorAsync("emerald")' title="Emerald"><span class="inline-block w-4 h-4 rounded-full border border-current bg-[var(--primary)]"></span> Emerald</button>
+            <button class="btn btn-outline-secondary" data-color="violet" @onclick='() => SetColorAsync("violet")' title="Violet"><span class="inline-block w-4 h-4 rounded-full border border-current bg-[var(--primary)]"></span> Violet</button>
+            <button class="btn btn-outline-secondary" data-color="sunset" @onclick='() => SetColorAsync("sunset")' title="Sunset"><span class="inline-block w-4 h-4 rounded-full border border-current bg-[var(--primary)]"></span> Sunset</button>
+        </div>
+        @if (!string.IsNullOrEmpty(_themeStatus))
+        {
+            <span class="text-sm text-secondary">@_themeStatus</span>
+        }
+    </Card>
+</div>
 
 @code {
     private string _source = "screen:0";
