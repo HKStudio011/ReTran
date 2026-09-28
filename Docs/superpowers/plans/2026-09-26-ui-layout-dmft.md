@@ -258,10 +258,10 @@ Thay toàn bộ nội dung `ReTran.App/Components/Pages/Home.razor` thành:
             <button class="btn btn-outline-secondary" @onclick='() => SetThemeAsync("system")'>Hệ thống / System</button>
         </div>
         <div class="flex gap-2 flex-wrap">
-            <button class="btn btn-outline-secondary" @onclick='() => SetColorAsync("default")' title="Mặc định / Default"><span class="inline-block w-4 h-4 rounded-full border border-current" style="background:var(--primary);"></span> Mặc định / Default</button>
-            <button class="btn btn-outline-secondary" data-color="emerald" @onclick='() => SetColorAsync("emerald")' title="Emerald"><span class="inline-block w-4 h-4 rounded-full border border-current" style="background:var(--primary);"></span> Emerald</button>
-            <button class="btn btn-outline-secondary" data-color="violet" @onclick='() => SetColorAsync("violet")' title="Violet"><span class="inline-block w-4 h-4 rounded-full border border-current" style="background:var(--primary);"></span> Violet</button>
-            <button class="btn btn-outline-secondary" data-color="sunset" @onclick='() => SetColorAsync("sunset")' title="Sunset"><span class="inline-block w-4 h-4 rounded-full border border-current" style="background:var(--primary);"></span> Sunset</button>
+            <button class="btn btn-outline-secondary" @onclick='() => SetColorAsync("default")' title="Mặc định / Default"><span class="inline-block w-4 h-4 rounded-full border border-current bg-[var(--primary)]"></span> Mặc định / Default</button>
+            <button class="btn btn-outline-secondary" data-color="emerald" @onclick='() => SetColorAsync("emerald")' title="Emerald"><span class="inline-block w-4 h-4 rounded-full border border-current bg-[var(--primary)]"></span> Emerald</button>
+            <button class="btn btn-outline-secondary" data-color="violet" @onclick='() => SetColorAsync("violet")' title="Violet"><span class="inline-block w-4 h-4 rounded-full border border-current bg-[var(--primary)]"></span> Violet</button>
+            <button class="btn btn-outline-secondary" data-color="sunset" @onclick='() => SetColorAsync("sunset")' title="Sunset"><span class="inline-block w-4 h-4 rounded-full border border-current bg-[var(--primary)]"></span> Sunset</button>
         </div>
         @if (!string.IsNullOrEmpty(_themeStatus))
         {
