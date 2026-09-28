@@ -1,17 +1,17 @@
-﻿<div class="top-row ps-3 navbar navbar-dark">
-    <div class="container-fluid">
-        <a class="navbar-brand" href="">ReTran App</a>
-    </div>
+﻿@using System.Reflection
+
+<div class="p-4">
+    <a class="text-xl font-bold text-primary no-underline" href="">ReTran</a>
 </div>
 
-<input type="checkbox" title="Navigation menu" class="navbar-toggler" />
+<nav class="flex-1 p-2">
+    <NavLink class="flex items-center gap-3 px-4 py-2.5 rounded text-surface hover:bg-primary hover:text-light no-underline mb-1"
+             href="" Match="NavLinkMatch.All">
+        <span class="w-5 text-center">&#9654;</span>
+        <span>Điều khiển / Control</span>
+    </NavLink>
+</nav>
 
-<div class="nav-scrollable" onclick="document.querySelector('.navbar-toggler').click()">
-    <nav class="nav flex-column">
-        <div class="nav-item px-3">
-            <NavLink class="nav-link" href="" Match="NavLinkMatch.All">
-                <span class="bi bi-house-door-fill-nav-menu" aria-hidden="true"></span> Home
-            </NavLink>
-        </div>
-    </nav>
+<div class="p-3 text-xs text-secondary">
+    <span>Windows - v@(Assembly.GetEntryAssembly()?.GetName().Version?.ToString() ?? "Unknown")</span>
 </div>
