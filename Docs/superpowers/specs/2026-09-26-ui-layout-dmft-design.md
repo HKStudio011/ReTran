@@ -88,7 +88,7 @@
     [Parameter] public string Title { get; set; } = string.Empty;
 
     /// <summary>
-    /// Card body / Nội dung bên trong card.
+    /// Card body rendered inside the card / Nội dung hiển thị bên trong card.
     /// </summary>
     [Parameter] public RenderFragment? ChildContent { get; set; }
 }
