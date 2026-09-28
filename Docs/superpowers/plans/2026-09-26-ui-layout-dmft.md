@@ -544,7 +544,7 @@ Expected: tất cả rỗng / 0 match (riêng index.html chỉ còn `build/asset
 - [ ] **Step 3: Chạy app + screenshot light theme**
 
 ```powershell
-Start-Process "D:\Code\ReTran Project\ReTran.App\bin\Debug\net10.0-windows10.0.19041.0\win-x64\ReTran App.exe"
+Start-Process "D:\Code\ReTran Project\ReTran.App\bin\Debug\net10.0-windows10.0.19041.0\win-x64\ReTran.App.exe"
 Start-Sleep -Seconds 8
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
