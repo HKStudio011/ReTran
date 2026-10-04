@@ -42,6 +42,7 @@ public class I18nServiceTests
     public void Set_Raises_Changed_And_Ignores_Invalid()
     {
         var svc = Create();
+        svc.Set("vi"); // pin known start lang before subscribing — may fire on en-US machines, no listener yet
         var fired = 0;
         svc.Changed += () => fired++;
 
