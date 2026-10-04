@@ -15,15 +15,6 @@ public class AppiumSmokeTests
 {
     private static readonly Uri AppiumUri = new("http://127.0.0.1:4723/");
 
-    // Selenium .NET's By.Name sends the "css selector" mechanism, which WinAppDriver (appium-windows-driver)
-    // rejects. Its "name" strategy is an exact UIA Name match that answers in well under a second WHEN the
-    // string exists in the top visual-tree row; a string that isn't there yet falls through into the WebView2
-    // subtree and hangs the server (observed: 60s no-response on "Core: started" polled right after the click).
-    // So: build the raw By directly, and only search for strings known to be present — dynamic status text is
-    // polled on a pre-captured element handle instead (see WaitStatusShows).
-    private static readonly ConstructorInfo RawByCtor = typeof(By).GetConstructor(
-        BindingFlags.Instance | BindingFlags.NonPublic, null, new[] { typeof(string), typeof(string) }, null)!;
-
     [Fact]
     public void StartCore_Ping_ShowsPong()
     {
@@ -38,16 +29,16 @@ public class AppiumSmokeTests
         if (driver is null) return; // Appium up but `windows` driver not installed -> skip (environment)
         try
         {
-            // Grab the status label while its text is still the known-present initial value.
-            // A name search for a NOT-YET-APPEARING string falls through the top row into the
-            // WebView2 subtree and hangs WinAppDriver forever (observed: 60s no-response on
-            // "Core: started" polled 4ms after the click). Capturing the handle first lets us
-            // poll the label's Name property — a property read on one element never walks the tree.
-            var status = WaitByName(driver, "Core: stopped", TimeSpan.FromSeconds(15));
-            WaitByName(driver, "Start Core", TimeSpan.FromSeconds(45)).Click();
-            WaitStatusShows(status, "Core: started", TimeSpan.FromSeconds(30));
-            WaitByName(driver, "Ping", TimeSpan.FromSeconds(15)).Click(); // button always exists (row 0) -> shallow hit
-            WaitStatusShows(status, "Ping: pong", TimeSpan.FromSeconds(30));
+            // Grab the status label by AutomationId — the label's Name (Text) is locale-dependent
+            // (vi/en after i18n) and a name search for an absent string hangs WinAppDriver.
+            // Lấy status label theo AutomationId — Name (Text) phụ thuộc ngôn ngữ (vi/en sau i18n)
+            // và tìm theo name khi chuỗi vắng mặt sẽ treo WinAppDriver.
+            var status = WaitByAutomationId(driver, "coreStatusLabel", TimeSpan.FromSeconds(15));
+            WaitStatusShowsAny(status, TimeSpan.FromSeconds(5), "Core: stopped", "Core: đã dừng"); // giá trị ban đầu theo locale
+            WaitByAutomationId(driver, "startCoreButton", TimeSpan.FromSeconds(45)).Click();
+            WaitStatusShowsAny(status, TimeSpan.FromSeconds(30), "Core: started", "Core: đã chạy");
+            WaitByAutomationId(driver, "pingButton", TimeSpan.FromSeconds(15)).Click();
+            WaitStatusShows(status, "Ping: pong", TimeSpan.FromSeconds(30)); // technical, không đổi qua i18n
         }
         catch
         {
@@ -76,23 +67,6 @@ public class AppiumSmokeTests
         {
             return null;
         }
-    }
-
-    /// <summary>Builds a By with an arbitrary locator mechanism (bypasses Selenium's css-selector remap of By.Name).</summary>
-    private static By RawBy(string mechanism, string criteria) =>
-        (By)RawByCtor.Invoke(new object[] { mechanism, criteria })!;
-
-    /// <summary>Polls until an element with the exact UIA Name appears. Throws NoSuchElementException on timeout.</summary>
-    private static IWebElement WaitByName(WindowsDriver driver, string name, TimeSpan timeout)
-    {
-        var sw = Stopwatch.StartNew();
-        while (sw.Elapsed < timeout)
-        {
-            try { return driver.FindElement(RawBy("name", name)); }
-            catch (NoSuchElementException) { /* keep polling */ }
-            Thread.Sleep(500);
-        }
-        throw new NoSuchElementException($"No element with UIA Name '{name}' within {timeout.TotalSeconds:0}s");
     }
 
     /// <summary>
@@ -140,6 +114,53 @@ public class AppiumSmokeTests
             bmp.Save(Path.Combine(Path.GetTempPath(), "retran-smoke-failure.png"));
         }
         catch { /* diagnostics are best-effort */ }
+    }
+
+    /// <summary>
+    /// Polls until an element with the given UIA AutomationId appears. Throws NoSuchElementException on timeout.
+    /// Quét cho tới khi phần tử có AutomationId cho trước xuất hiện. Ném NoSuchElementException khi hết thời gian.
+    /// </summary>
+    private static IWebElement WaitByAutomationId(WindowsDriver driver, string automationId, TimeSpan timeout)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.Elapsed < timeout)
+        {
+            try { return driver.FindElement(MobileBy.AccessibilityId(automationId)); }
+            catch (NoSuchElementException) { /* keep polling */ }
+            Thread.Sleep(500);
+        }
+        throw new NoSuchElementException($"No element with AutomationId '{automationId}' within {timeout.TotalSeconds:0}s");
+    }
+
+    /// <summary>
+    /// Polls a captured status-label element until its UIA Name contains ANY of <paramref name="expected"/>
+    /// (locale-dependent values are accepted in both vi and en forms).
+    /// Quét status label đã nắm cho tới khi UIA Name chứa MỘT trong các giá trị (nhận cả 2 dạng vi/en).
+    /// </summary>
+    private static void WaitStatusShowsAny(IWebElement status, TimeSpan timeout, params string[] expected)
+    {
+        var sw = Stopwatch.StartNew();
+        string last = "";
+        while (sw.Elapsed < timeout)
+        {
+            try
+            {
+                last = status.GetAttribute("Name") ?? "";
+                if (last.Length == 0) last = status.Text ?? "";
+                foreach (var candidate in expected)
+                {
+                    if (last.Contains(candidate, StringComparison.Ordinal)) return;
+                }
+            }
+            catch (StaleElementReferenceException ex)
+            {
+                throw new NoSuchElementException(
+                    $"Status label went stale before showing any of [{string.Join(", ", expected)}]: {ex.Message}");
+            }
+            Thread.Sleep(250);
+        }
+        throw new NoSuchElementException(
+            $"Status label never showed any of [{string.Join(", ", expected)}] within {timeout.TotalSeconds:0}s (last text: '{last}')");
     }
 
     private const int SM_XVIRTUALSCREEN = 0;

@@ -8,11 +8,11 @@
     <Grid RowDefinitions="Auto,*">
         <VerticalStackLayout Grid.Row="0" Spacing="6" Padding="12">
             <HorizontalStackLayout Spacing="8">
-                <Button x:Name="StartCoreButton" Text="Start Core" Clicked="OnStartCoreClicked" />
-                <Button x:Name="PingButton" Text="Ping" Clicked="OnPingClicked" IsEnabled="False" />
-                <Button x:Name="StopButton" Text="Stop" Clicked="OnStopClicked" IsEnabled="False" />
+                <Button x:Name="StartCoreButton" AutomationId="startCoreButton" Text="Start Core" Clicked="OnStartCoreClicked" />
+                <Button x:Name="PingButton" AutomationId="pingButton" Text="Ping" Clicked="OnPingClicked" IsEnabled="False" />
+                <Button x:Name="StopButton" AutomationId="stopButton" Text="Stop" Clicked="OnStopClicked" IsEnabled="False" />
             </HorizontalStackLayout>
-            <Label x:Name="StatusLabel" Text="Core: stopped" FontSize="12" />
+            <Label x:Name="StatusLabel" AutomationId="coreStatusLabel" Text="Core: stopped" FontSize="12" />
         </VerticalStackLayout>
 
         <BlazorWebView Grid.Row="1" x:Name="blazorWebView" HostPage="wwwroot/index.html">

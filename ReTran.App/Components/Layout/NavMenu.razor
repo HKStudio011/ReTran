@@ -1,4 +1,6 @@
 ﻿@using System.Reflection
+@inject ReTran_App.Services.I18nService L
+@implements IDisposable
 
 <div class="p-4">
     <a class="text-xl font-bold text-primary no-underline" href="">ReTran</a>
@@ -8,10 +10,22 @@
     <NavLink class="flex items-center gap-3 px-4 py-2.5 rounded text-surface hover:bg-primary hover:text-light no-underline mb-1"
              href="" Match="NavLinkMatch.All">
         <span class="w-5 text-center">&#9654;</span>
-        <span>Điều khiển / Control</span>
+        <span>@(L["nav.control"])</span>
     </NavLink>
 </nav>
 
 <div class="p-3 text-xs text-secondary">
     <span>Windows - v@(Assembly.GetEntryAssembly()?.GetName().Version?.ToString() ?? "Unknown")</span>
 </div>
+
+@code {
+    protected override void OnInitialized()
+    {
+        L.Changed += OnLangChanged;
+        base.OnInitialized();
+    }
+
+    private void OnLangChanged() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose() => L.Changed -= OnLangChanged;
+}

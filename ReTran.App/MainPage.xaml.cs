@@ -12,6 +12,9 @@ namespace ReTran_App
         // started/stopped only by the control page buttons, never here.
         private OverlayFeedServer? _feedServer;
         private bool _feedServerStarted;
+        private I18nService? _l10n;
+        private string? _statusKind; // "stopped" | "started" | "startFailed" | "raw"
+        private string? _statusArg;
 
         public MainPage()
         {
@@ -23,9 +26,17 @@ namespace ReTran_App
             base.OnAppearing();
             if (_feedServerStarted) return;
             _feedServerStarted = true;
+
+            var services = IPlatformApplication.Current?.Services;
+            _l10n = (I18nService?)services?.GetService(typeof(I18nService));
+            if (_l10n is not null)
+            {
+                _l10n.Changed += OnLangChanged;
+                ApplyLocalizedTexts();
+            }
+
             try
             {
-                var services = IPlatformApplication.Current?.Services;
                 _feedServer = (OverlayFeedServer?)services?.GetService(typeof(OverlayFeedServer));
                 if (_feedServer is null) return;
                 await _feedServer.StartAsync(CancellationToken.None);
@@ -34,10 +45,52 @@ namespace ReTran_App
             {
                 // Best-effort: the control page shows Port == 0 as "not running".
                 // Best-effort: trang điều khiển hiển thị Port == 0 là "chưa chạy".
-                var logger = (ILogger<MainPage>?)IPlatformApplication.Current?.Services.GetService(typeof(ILogger<MainPage>));
+                var logger = (ILogger<MainPage>?)services?.GetService(typeof(ILogger<MainPage>));
                 logger?.LogWarning(ex, "Overlay feed server failed to start; OBS URL will show as not running.");
                 _feedServer = null;
             }
+        }
+
+        // I18nService.Set có thể chạy trên thread WebView → marshal về UI thread của MAUI.
+        private void OnLangChanged() => Dispatcher.Dispatch(ApplyLocalizedTexts);
+
+        private void ApplyLocalizedTexts()
+        {
+            if (_l10n is null) return;
+            StartCoreButton.Text = _l10n["core.btn.startCore"];
+            _statusKind ??= "stopped";
+            if (_statusKind is "stopped" or "started" or "startFailed")
+            {
+                StatusLabel.Text = RenderStatusText();
+            }
+        }
+
+        private void SetStatus(string kind, string? arg = null)
+        {
+            _statusKind = kind;
+            _statusArg = arg;
+            StatusLabel.Text = RenderStatusText();
+        }
+
+        private string RenderStatusText()
+        {
+            if (_l10n is null)
+            {
+                return _statusKind switch
+                {
+                    "stopped" => "Core: stopped",
+                    "started" => "Core: started",
+                    "startFailed" => $"Core not found / failed to start: {_statusArg}",
+                    _ => _statusArg ?? StatusLabel.Text, // "raw": chuỗi technical (Ping) giữ nguyên
+                };
+            }
+            return _statusKind switch
+            {
+                "stopped" => _l10n["core.status.stopped"],
+                "started" => _l10n["core.status.started"],
+                "startFailed" => _l10n.Fmt("core.status.startFailed", _statusArg ?? string.Empty),
+                _ => _statusArg ?? StatusLabel.Text, // "raw": chuỗi technical (Ping) giữ nguyên
+            };
         }
 
         private async void OnStartCoreClicked(object? sender, EventArgs e)
@@ -49,14 +102,14 @@ namespace ReTran_App
                     ?? throw new FileNotFoundException("ReTran.Core.exe not found. Build it first or set RETRAN_CORE_EXE.");
                 _core = new CoreProcessClient();
                 await _core.StartAsync(exe, CancellationToken.None);
-                StatusLabel.Text = "Core: started";
+                SetStatus("started");
                 PingButton.IsEnabled = true;
                 StopButton.IsEnabled = true;
                 StartCoreButton.IsEnabled = false;
             }
             catch (Exception ex)
             {
-                StatusLabel.Text = $"Core not found / failed to start: {ex.Message}";
+                SetStatus("startFailed", ex.Message);
                 StartCoreButton.IsEnabled = true; // allow retry after a failed start
             }
         }
@@ -67,11 +120,11 @@ namespace ReTran_App
             try
             {
                 var result = await _core.PingAsync(CancellationToken.None);
-                StatusLabel.Text = $"Ping: {result}";
+                SetStatus("raw", $"Ping: {result}");
             }
             catch (Exception ex)
             {
-                StatusLabel.Text = $"Ping failed: {ex.Message}";
+                SetStatus("raw", $"Ping failed: {ex.Message}");
             }
         }
 
@@ -80,7 +133,7 @@ namespace ReTran_App
             if (_core is null) return;
             await _core.DisposeAsync();
             _core = null;
-            StatusLabel.Text = "Core: stopped";
+            SetStatus("stopped");
             PingButton.IsEnabled = false;
             StopButton.IsEnabled = false;
             StartCoreButton.IsEnabled = true;
