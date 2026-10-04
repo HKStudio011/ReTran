@@ -1,0 +1,96 @@
+namespace ReTran_App.Services;
+
+/// <summary>
+/// Static vi/en string tables consumed by <see cref="I18nService"/>.
+/// Bảng chuỗi tĩnh vi/en dùng bởi <see cref="I18nService"/>.
+/// </summary>
+public static class I18nStrings
+{
+    /// <summary>Vietnamese strings, keyed by dotted ids. Chuỗi tiếng Việt, khóa dạng chấm.</summary>
+    public static readonly IReadOnlyDictionary<string, string> Vi = new Dictionary<string, string>
+    {
+        ["page.control.title"] = "ReTran - Điều khiển",
+        ["home.title"] = "Điều khiển",
+        ["home.card.capture"] = "Nguồn chụp",
+        ["home.card.translation"] = "Dịch",
+        ["home.card.theme"] = "Giao diện",
+        ["home.label.source"] = "Nguồn:",
+        ["home.opt.screen0"] = "Màn hình 0",
+        ["home.opt.screen1"] = "Màn hình 1",
+        ["home.opt.window"] = "Cửa sổ (HWND)",
+        ["home.label.hwnd"] = "HWND cửa sổ:",
+        ["home.hwnd.placeholder"] = "VD: 0x1A2B3C",
+        ["home.note.capture"] = "Lựa chọn chỉ được lưu tạm — RPC capture chưa có, Core live ở milestone sau.",
+        ["home.label.provider"] = "Nhà cung cấp:",
+        ["home.btn.startDemo"] = "Bắt đầu Demo (Core live ở milestone sau)",
+        ["home.btn.stopDemo"] = "Dừng Demo",
+        ["home.label.obsUrl"] = "URL cho OBS:",
+        ["home.btn.copy"] = "Sao chép",
+        ["home.status.copied"] = "Đã sao chép.",
+        ["home.status.copyFailed"] = "Sao chép thất bại.",
+        ["home.status.feedNotRunning"] = "Máy chủ feed chưa chạy.",
+        ["home.iframe.title"] = "Xem trước overlay",
+        ["home.btn.theme.light"] = "Sáng",
+        ["home.btn.theme.dark"] = "Tối",
+        ["home.btn.theme.system"] = "Hệ thống",
+        ["home.swatch.default"] = "Mặc định",
+        ["home.lang.label"] = "Ngôn ngữ:",
+        ["home.status.demoStopped"] = "Demo: đã dừng.",
+        ["home.status.demoRunning"] = "Demo: đang chạy — nguồn: {0}.",
+        ["home.status.theme"] = "Theme: {0}.",
+        ["home.status.themeFailed"] = "Đổi theme thất bại.",
+        ["home.status.color"] = "Màu: {0}.",
+        ["home.status.colorFailed"] = "Đổi màu thất bại.",
+        ["nav.control"] = "Điều khiển",
+        ["notfound.title"] = "Không tìm thấy",
+        ["notfound.body"] = "Xin lỗi, nội dung bạn tìm không tồn tại.",
+        ["core.btn.startCore"] = "Khởi động Core",
+        ["core.status.stopped"] = "Core: đã dừng",
+        ["core.status.started"] = "Core: đã chạy",
+        ["core.status.startFailed"] = "Không tìm thấy Core / khởi động thất bại: {0}",
+    };
+
+    /// <summary>English strings, keyed by dotted ids. Chuỗi tiếng Anh, khóa dạng chấm.</summary>
+    public static readonly IReadOnlyDictionary<string, string> En = new Dictionary<string, string>
+    {
+        ["page.control.title"] = "ReTran - Control",
+        ["home.title"] = "Control",
+        ["home.card.capture"] = "Capture source",
+        ["home.card.translation"] = "Translation",
+        ["home.card.theme"] = "Appearance",
+        ["home.label.source"] = "Source:",
+        ["home.opt.screen0"] = "Screen 0",
+        ["home.opt.screen1"] = "Screen 1",
+        ["home.opt.window"] = "Window (HWND)",
+        ["home.label.hwnd"] = "Window HWND:",
+        ["home.hwnd.placeholder"] = "e.g. 0x1A2B3C",
+        ["home.note.capture"] = "Stored selection only — capture RPC not yet available, Core live comes in a later milestone.",
+        ["home.label.provider"] = "Provider:",
+        ["home.btn.startDemo"] = "Start Demo",
+        ["home.btn.stopDemo"] = "Stop",
+        ["home.label.obsUrl"] = "OBS URL:",
+        ["home.btn.copy"] = "Copy",
+        ["home.status.copied"] = "Copied.",
+        ["home.status.copyFailed"] = "Copy failed.",
+        ["home.status.feedNotRunning"] = "Feed server not running.",
+        ["home.iframe.title"] = "Overlay preview",
+        ["home.btn.theme.light"] = "Light",
+        ["home.btn.theme.dark"] = "Dark",
+        ["home.btn.theme.system"] = "System",
+        ["home.swatch.default"] = "Default",
+        ["home.lang.label"] = "Language:",
+        ["home.status.demoStopped"] = "Demo: stopped.",
+        ["home.status.demoRunning"] = "Demo: running — source: {0}.",
+        ["home.status.theme"] = "Theme: {0}.",
+        ["home.status.themeFailed"] = "Theme change failed.",
+        ["home.status.color"] = "Color: {0}.",
+        ["home.status.colorFailed"] = "Color change failed.",
+        ["nav.control"] = "Control",
+        ["notfound.title"] = "Not Found",
+        ["notfound.body"] = "Sorry, the content you are looking for does not exist.",
+        ["core.btn.startCore"] = "Start Core",
+        ["core.status.stopped"] = "Core: stopped",
+        ["core.status.started"] = "Core: started",
+        ["core.status.startFailed"] = "Core not found / failed to start: {0}",
+    };
+}
