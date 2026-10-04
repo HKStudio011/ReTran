@@ -83,7 +83,8 @@ public class HomeComponentTests : BunitContext
         ButtonByText(cut, "EN").Click();
         cut.WaitForAssertion(() => Assert.Contains("Start Demo", cut.Markup));
         Assert.Contains("Feed server not running", cut.Markup); // cảnh báo feed bản en
-        module.VerifyInvoke("setLang"); // persist "en"
+        var langInvocation = module.VerifyInvoke("setLang"); // persist "en"
+        Assert.Equal("en", langInvocation.Arguments[0]);
 
         ButtonByText(cut, "VI").Click();
         cut.WaitForAssertion(() => Assert.Contains("Bắt đầu Demo", cut.Markup));

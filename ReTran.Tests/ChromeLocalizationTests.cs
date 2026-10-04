@@ -18,9 +18,11 @@ public class ChromeLocalizationTests : BunitContext
         Services.AddSingleton(i18n);
         var cut = Render<ReTran_App.Components.Layout.NavMenu>();
         Assert.Contains("Điều khiển", cut.Markup);
+        Assert.DoesNotContain("Điều khiển / Control", cut.Markup);
 
         i18n.Set("en");
         cut.WaitForAssertion(() => Assert.Contains("Control", cut.Markup));
+        Assert.DoesNotContain("Điều khiển / Control", cut.Markup); // chuỗi kép cũ không được quay lại
     }
 
     [Fact]

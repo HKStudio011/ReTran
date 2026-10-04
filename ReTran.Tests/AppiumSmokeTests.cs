@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Drawing;
 using System.Net.Sockets;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using OpenQA.Selenium;
 using OpenQA.Selenium.Appium;
