@@ -2,38 +2,39 @@
 @inject ReTran_App.Core.OverlayState State
 @inject ReTran_App.Services.OverlayFeedServer FeedServer
 @inject ReTran_App.Services.JsInteropService Js
+@inject ReTran_App.Services.I18nService L
 @inject IJSRuntime JS
 @implements IDisposable
 
-<PageTitle>ReTran - Điều khiển / Control</PageTitle>
+<PageTitle>@(L["page.control.title"])</PageTitle>
 
 <div class="flex items-center justify-between mb-6">
-    <h1 class="text-2xl font-bold text-surface m-0">Điều khiển / Control</h1>
+    <h1 class="text-2xl font-bold text-surface m-0">@(L["home.title"])</h1>
 </div>
 
 <div class="space-y-4">
-    <Card Title="Nguồn chụp / Capture source">
+    <Card Title="@(L["home.card.capture"])">
         <label class="flex flex-col gap-1.5 text-sm text-surface">
-            Nguồn / Source:
+            @(L["home.label.source"])
             <select @bind="_source" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
-                <option value="screen:0">Màn hình 0 / Screen 0</option>
-                <option value="screen:1">Màn hình 1 / Screen 1</option>
-                <option value="window">Cửa sổ / Window (HWND)</option>
+                <option value="screen:0">@(L["home.opt.screen0"])</option>
+                <option value="screen:1">@(L["home.opt.screen1"])</option>
+                <option value="window">@(L["home.opt.window"])</option>
             </select>
         </label>
         @if (_source == "window")
         {
             <label class="flex flex-col gap-1.5 text-sm text-surface">
-                HWND cửa sổ / Window HWND:
-                <input @bind="_hwnd" placeholder="VD / e.g. 0x1A2B3C" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary" />
+                @(L["home.label.hwnd"])
+                <input @bind="_hwnd" placeholder="@(L["home.hwnd.placeholder"])" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary" />
             </label>
         }
-        <p class="text-sm text-secondary">Lựa chọn chỉ được lưu tạm — RPC capture chưa có, Core live ở milestone sau. / Stored selection only — capture RPC not yet available, Core live comes in a later milestone.</p>
+        <p class="text-sm text-secondary">@(L["home.note.capture"])</p>
     </Card>
 
-    <Card Title="Dịch / Translation">
+    <Card Title="@(L["home.card.translation"])">
         <label class="flex flex-col gap-1.5 text-sm text-surface">
-            Nhà cung cấp / Provider:
+            @(L["home.label.provider"])
             <select @bind="_provider" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
                 <option>Google</option>
                 <option>DeepL</option>
@@ -45,44 +46,49 @@
 
     <Card Title="Demo pipeline">
         <div class="flex gap-2 flex-wrap">
-            <button class="btn btn-primary" @onclick="StartDemo" disabled="@_running">Bắt đầu Demo (Core live ở milestone sau) / Start Demo</button>
-            <button class="btn btn-outline-secondary" @onclick="StopDemo" disabled="@(!_running)">Dừng Demo / Stop</button>
+            <button class="btn btn-primary" @onclick="StartDemo" disabled="@_running">@(L["home.btn.startDemo"])</button>
+            <button class="btn btn-outline-secondary" @onclick="StopDemo" disabled="@(!_running)">@(L["home.btn.stopDemo"])</button>
         </div>
-        <p class="text-sm text-secondary">@_status</p>
+        <p class="text-sm text-secondary">@StatusText</p>
     </Card>
 
     <Card Title="OBS">
         <div class="flex items-center gap-2 flex-wrap">
-            <span class="text-sm text-surface">URL cho OBS / OBS URL:</span>
+            <span class="text-sm text-surface">@(L["home.label.obsUrl"])</span>
             <code class="px-2 py-1 rounded bg-background border text-sm text-surface break-all">@ObsUrl</code>
-            <button class="btn btn-outline-primary" @onclick="CopyUrlAsync">Sao chép / Copy</button>
-            @if (!string.IsNullOrEmpty(_copyStatus))
+            <button class="btn btn-outline-primary" @onclick="CopyUrlAsync">@(L["home.btn.copy"])</button>
+            @if (CopyStatusText.Length > 0)
             {
-                <span class="text-sm text-secondary">@_copyStatus</span>
+                <span class="text-sm text-secondary">@CopyStatusText</span>
             }
         </div>
         @if (FeedServer.Port == 0)
         {
-            <p class="text-sm text-danger">Máy chủ feed chưa chạy / Feed server not running.</p>
+            <p class="text-sm text-danger">@(L["home.status.feedNotRunning"])</p>
         }
-        <iframe src="@ObsUrl" title="Xem trước overlay / Overlay preview" class="w-full max-w-[480px] h-[270px] rounded border"></iframe>
+        <iframe src="@ObsUrl" title="@(L["home.iframe.title"])" class="w-full max-w-[480px] h-[270px] rounded border"></iframe>
     </Card>
 
-    <Card Title="Giao diện / Theme">
+    <Card Title="@(L["home.card.theme"])">
         <div class="flex gap-2 flex-wrap">
-            <button class="btn btn-outline-secondary" @onclick='() => SetThemeAsync("light")'>Sáng / Light</button>
-            <button class="btn btn-outline-secondary" @onclick='() => SetThemeAsync("dark")'>Tối / Dark</button>
-            <button class="btn btn-outline-secondary" @onclick='() => SetThemeAsync("system")'>Hệ thống / System</button>
+            <button class="btn btn-outline-secondary" @onclick='() => SetThemeAsync("light")'>@(L["home.btn.theme.light"])</button>
+            <button class="btn btn-outline-secondary" @onclick='() => SetThemeAsync("dark")'>@(L["home.btn.theme.dark"])</button>
+            <button class="btn btn-outline-secondary" @onclick='() => SetThemeAsync("system")'>@(L["home.btn.theme.system"])</button>
+        </div>
+        <div class="flex gap-2 flex-wrap items-center">
+            <span class="text-sm text-surface">@(L["home.lang.label"])</span>
+            <button class="@(LangBtnClass("vi"))" @onclick='() => SetLangAsync("vi")'>VI</button>
+            <button class="@(LangBtnClass("en"))" @onclick='() => SetLangAsync("en")'>EN</button>
         </div>
         <div class="flex gap-2 flex-wrap">
-            <button class="btn btn-outline-secondary" @onclick='() => SetColorAsync("default")' title="Mặc định / Default"><span class="inline-block w-4 h-4 rounded-full border border-current bg-[var(--primary)]"></span> Mặc định / Default</button>
+            <button class="btn btn-outline-secondary" @onclick='() => SetColorAsync("default")' title="@(L["home.swatch.default"])"><span class="inline-block w-4 h-4 rounded-full border border-current bg-[var(--primary)]"></span> @(L["home.swatch.default"])</button>
             <button class="btn btn-outline-secondary" data-color="emerald" @onclick='() => SetColorAsync("emerald")' title="Emerald"><span class="inline-block w-4 h-4 rounded-full border border-current bg-[var(--primary)]"></span> Emerald</button>
             <button class="btn btn-outline-secondary" data-color="violet" @onclick='() => SetColorAsync("violet")' title="Violet"><span class="inline-block w-4 h-4 rounded-full border border-current bg-[var(--primary)]"></span> Violet</button>
             <button class="btn btn-outline-secondary" data-color="sunset" @onclick='() => SetColorAsync("sunset")' title="Sunset"><span class="inline-block w-4 h-4 rounded-full border border-current bg-[var(--primary)]"></span> Sunset</button>
         </div>
-        @if (!string.IsNullOrEmpty(_themeStatus))
+        @if (ThemeStatusText.Length > 0)
         {
-            <span class="text-sm text-secondary">@_themeStatus</span>
+            <span class="text-sm text-secondary">@ThemeStatusText</span>
         }
     </Card>
 </div>
@@ -93,11 +99,41 @@
     private string _provider = "Google";
     private ReTran_App.Core.DemoFeed? _feed;
     private bool _running;
-    private string _status = "Demo: đã dừng / stopped.";
-    private string _copyStatus = string.Empty;
-    private string _themeStatus = string.Empty;
+    private string? _copyState;      // "copied" | "failed" | null
+    private string? _themeStateKind; // "theme" | "themeFail" | "color" | "colorFail"
+    private string? _themeStateValue;
 
     private string ObsUrl => $"http://127.0.0.1:{FeedServer.Port}/overlay";
+
+    // Trạng thái tính từ state + L → tự đổi ngôn ngữ khi L.Changed.
+    private string StatusText => _running
+        ? L.Fmt("home.status.demoRunning", SourceLabel())
+        : L["home.status.demoStopped"];
+
+    private string CopyStatusText => _copyState switch
+    {
+        "copied" => L["home.status.copied"],
+        "failed" => L["home.status.copyFailed"],
+        _ => string.Empty,
+    };
+
+    private string ThemeStatusText => _themeStateKind switch
+    {
+        "theme" => L.Fmt("home.status.theme", _themeStateValue ?? string.Empty),
+        "themeFail" => L["home.status.themeFailed"],
+        "color" => L.Fmt("home.status.color", _themeStateValue ?? string.Empty),
+        "colorFail" => L["home.status.colorFailed"],
+        _ => string.Empty,
+    };
+
+    private string LangBtnClass(string lang) =>
+        L.Lang == lang ? "btn btn-primary" : "btn btn-outline-secondary";
+
+    protected override void OnInitialized()
+    {
+        L.Changed += OnLangChanged;
+        base.OnInitialized();
+    }
 
     protected override void OnAfterRender(bool firstRender)
     {
@@ -108,6 +144,40 @@
         {
             Js.Initialize(JS);
             Js.NotifyWebViewReady();
+            _ = InitLangFromStorageAsync();
+        }
+    }
+
+    private async Task InitLangFromStorageAsync()
+    {
+        try
+        {
+            var stored = await Js.GetLangAsync();
+            if (stored is "vi" or "en" && stored != L.Lang)
+            {
+                L.Set(stored);
+            }
+        }
+        catch (Exception)
+        {
+            // JS/storage unavailable → keep the OS-culture default.
+            // Không đọc được JS/storage → giữ mặc định theo culture OS.
+        }
+    }
+
+    private void OnLangChanged() => _ = InvokeAsync(StateHasChanged);
+
+    private async Task SetLangAsync(string lang)
+    {
+        if (lang == L.Lang) return;
+        L.Set(lang); // UI đổi ngay qua event Changed
+        try
+        {
+            await Js.SetLangAsync(lang); // persist best-effort
+        }
+        catch (Exception)
+        {
+            // Lưu thất bại không ảnh hưởng ngôn ngữ đã áp trong RAM.
         }
     }
 
@@ -117,7 +187,6 @@
         _feed = new ReTran_App.Core.DemoFeed(State);
         _feed.Start();
         _running = true;
-        _status = $"Demo: đang chạy / running — nguồn / source: {SourceLabel()}.";
     }
 
     private void StopDemo()
@@ -127,7 +196,6 @@
         _feed.Dispose();
         _feed = null;
         _running = false;
-        _status = "Demo: đã dừng / stopped.";
     }
 
     private string SourceLabel() => _source == "window" && !string.IsNullOrWhiteSpace(_hwnd)
@@ -139,16 +207,17 @@
         try
         {
             await Js.InvokeVoidAsync("copyText", ObsUrl);
-            _copyStatus = "Đã sao chép / Copied.";
+            _copyState = "copied";
         }
         catch (Exception)
         {
-            _copyStatus = "Sao chép thất bại / Copy failed.";
+            _copyState = "failed";
         }
     }
 
     public void Dispose()
     {
+        L.Changed -= OnLangChanged;
         if (_feed is not null)
         {
             _feed.Stop();
@@ -162,11 +231,13 @@
         try
         {
             await Js.SetThemeAsync(theme);
-            _themeStatus = $"Theme: {theme}.";
+            _themeStateKind = "theme";
+            _themeStateValue = theme;
         }
         catch (Exception)
         {
-            _themeStatus = "Đổi theme thất bại / Theme change failed.";
+            _themeStateKind = "themeFail";
+            _themeStateValue = null;
         }
     }
 
@@ -175,11 +246,13 @@
         try
         {
             await Js.SetColorAsync(colorId);
-            _themeStatus = $"Màu / Color: {colorId}.";
+            _themeStateKind = "color";
+            _themeStateValue = colorId;
         }
         catch (Exception)
         {
-            _themeStatus = "Đổi màu thất bại / Color change failed.";
+            _themeStateKind = "colorFail";
+            _themeStateValue = null;
         }
     }
 }

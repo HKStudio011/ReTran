@@ -17,6 +17,9 @@ public class HomeComponentTests : BunitContext
         ctx.Services.AddSingleton(state);
         ctx.Services.AddSingleton(new OverlayFeedServer(state, port: 0)); // unstarted → Port == 0
         ctx.Services.AddSingleton(new JsInteropService());
+        var i18n = new I18nService();
+        i18n.Set("vi"); // test tường minh theo vi — không phụ thuộc culture máy
+        ctx.Services.AddSingleton(i18n);
     }
 
     private static IElement ButtonByText<T>(IRenderedComponent<T> cut, string text) where T : IComponent =>
@@ -44,9 +47,9 @@ public class HomeComponentTests : BunitContext
         module.SetupVoid("copyText", _ => true).SetVoidResult();
         var cut = Render<ReTran_App.Components.Pages.Home>();
         Assert.Contains(ObsUrl, cut.Markup); // URL rendered in the OBS section
-        Assert.Contains("Feed server not running", cut.Markup);
+        Assert.Contains("Máy chủ feed chưa chạy", cut.Markup); // vi feed warning
 
-        ButtonByText(cut, "Sao chép / Copy").Click();
+        ButtonByText(cut, "Sao chép").Click();
         cut.WaitForAssertion(() => Assert.Contains("Đã sao chép", cut.Markup));
 
         var invocation = module.VerifyInvoke("copyText");
@@ -61,10 +64,28 @@ public class HomeComponentTests : BunitContext
         module.SetupVoid("setTheme", _ => true).SetVoidResult();
         var cut = Render<ReTran_App.Components.Pages.Home>();
 
-        ButtonByText(cut, "Tối / Dark").Click();
+        ButtonByText(cut, "Tối").Click();
         cut.WaitForAssertion(() => Assert.Contains("Theme: dark.", cut.Markup));
 
         var invocation = module.VerifyInvoke("setTheme");
         Assert.Equal("dark", invocation.Arguments[0]);
+    }
+
+    [Fact]
+    public void LanguageSwitcher_SwapsMarkup_And_Persists()
+    {
+        AddHomeServices(this);
+        var module = JSInterop.SetupModule("./build/assets/main.js");
+        module.SetupVoid("setLang", _ => true).SetVoidResult();
+        var cut = Render<ReTran_App.Components.Pages.Home>();
+        Assert.Contains("Bắt đầu Demo", cut.Markup); // vi là mặc định trong test
+
+        ButtonByText(cut, "EN").Click();
+        cut.WaitForAssertion(() => Assert.Contains("Start Demo", cut.Markup));
+        Assert.Contains("Feed server not running", cut.Markup); // cảnh báo feed bản en
+        module.VerifyInvoke("setLang"); // persist "en"
+
+        ButtonByText(cut, "VI").Click();
+        cut.WaitForAssertion(() => Assert.Contains("Bắt đầu Demo", cut.Markup));
     }
 }

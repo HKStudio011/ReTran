@@ -28,5 +28,11 @@ s();
 async function c(e) {
 	await navigator.clipboard.writeText(e);
 }
+function l() {
+	return localStorage.getItem("retran.lang");
+}
+function u(e) {
+	localStorage.setItem("retran.lang", e);
+}
 //#endregion
-export { n as applyColor, t as applyTheme, c as copyText, s as initTheme, o as setColor, a as setTheme };
+export { n as applyColor, t as applyTheme, c as copyText, l as getLang, s as initTheme, o as setColor, u as setLang, a as setTheme };

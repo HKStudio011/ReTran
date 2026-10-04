@@ -92,6 +92,12 @@ public class JsInteropService : IAsyncDisposable
     /// <summary>Sets the accent color pair via the Vite module. Đặt cặp màu nhấn qua module Vite.</summary>
     public async ValueTask SetColorAsync(string colorId) => await InvokeVoidAsync("setColor", colorId);
 
+    /// <summary>Reads the persisted UI language from WebView storage. Đọc ngôn ngữ UI đã lưu trong WebView storage.</summary>
+    public async ValueTask<string?> GetLangAsync() => await InvokeAsync<string?>("getLang");
+
+    /// <summary>Persists the UI language to WebView storage. Lưu ngôn ngữ UI vào WebView storage.</summary>
+    public async ValueTask SetLangAsync(string lang) => await InvokeVoidAsync("setLang", lang);
+
     /// <summary>
     /// Disposes the imported JS module.
     /// Giải phóng module JS đã import.
