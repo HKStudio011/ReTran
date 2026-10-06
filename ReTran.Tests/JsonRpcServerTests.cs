@@ -139,7 +139,7 @@ public class JsonRpcServerTests
         Assert.Equal("translate.request_cache", JsonNode.Parse(t.LastRequest!)!["method"]!.GetValue<string>());
         string id = JsonNode.Parse(t.LastRequest!)!["id"]!.GetValue<string>();
         await t.InjectLineAsync($"{{\"jsonrpc\":\"2.0\",\"id\":\"{id}\",\"result\":{{\"hits\":{{}}}}}}");
-        Assert.NotNull((await call)["hits"]);
+        Assert.NotNull((await call)!["hits"]);
     }
 
     [Fact]
