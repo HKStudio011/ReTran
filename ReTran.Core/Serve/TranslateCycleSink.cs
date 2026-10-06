@@ -68,7 +68,7 @@ public sealed class TranslateCycleSink : ICycleSink
     /// <param name="dst">Target language code. Mã ngôn ngữ đích.</param>
     /// <param name="translator">Translation provider used for cache misses. Nhà cung cấp dịch cho các text miss cache.</param>
     /// <param name="cache">Batched cache channel to the App. Kênh cache theo lô tới App.</param>
-    /// <param name="notifier">JSON-RPC sender for <c>frame.translated</c> / <c>translate.put</c>. Bộ gửi JSON-RPC cho <c>frame.translated</c> / <c>translate.put</c>.</param>
+    /// <param name="notifier">JSON-RPC sender for <c>frame.translated</c>. Bộ gửi JSON-RPC cho <c>frame.translated</c>.</param>
     /// <param name="stderr">Writer for best-effort warnings; never the hot path. Nơi ghi cảnh báo best-effort; không thuộc hot path.</param>
     /// <exception cref="ArgumentNullException">Thrown when any reference parameter is null. Ném khi tham số tham chiếu nào đó là null.</exception>
     public TranslateCycleSink(
@@ -233,11 +233,11 @@ public sealed class TranslateCycleSink : ICycleSink
 
     /// <summary>
     /// One background batch: cache lookup (2 s cap, failure = all-miss) → session hits → parallel
-    /// translation (≤ 4) → <c>translate.put</c>. All failures are logged to stderr, never rethrown,
-    /// except cancellation when the sink is stopped.
+    /// translation (≤ 4) → <see cref="ICacheChannel.PutAsync"/> (the <c>translate.put</c> path).
+    /// All failures are logged to stderr, never rethrown, except cancellation when the sink is stopped.
     /// Một lô nền: tra cache (tối đa 2 s, lỗi = all-miss) → ghi hit vào session → dịch song song
-    /// (≤ 4) → <c>translate.put</c>. Mọi lỗi đều ghi stderr, không lan truyền, trừ khi bị hủy do
-    /// sink dừng.
+    /// (≤ 4) → <see cref="ICacheChannel.PutAsync"/> (đường <c>translate.put</c>). Mọi lỗi đều ghi
+    /// stderr, không lan truyền, trừ khi bị hủy do sink dừng.
     /// </summary>
     private async Task BackgroundAsync(List<string> texts, CancellationToken ct)
     {
@@ -284,23 +284,7 @@ public sealed class TranslateCycleSink : ICycleSink
                     .Select(r => r!.Value)
                     .ToList();
                 if (entries.Count > 0)
-                {
                     await _cache.PutAsync(_context, _src, _dst, entries, ct);
-
-                    // Spec §3.3: translate.put is a Core -> App notification carrying the batch.
-                    // Spec §3.3: translate.put là thông báo Core -> App mang theo lô bản dịch.
-                    await _notifier.NotifyAsync("translate.put", new JsonObject
-                    {
-                        ["context"] = _context,
-                        ["src"] = _src,
-                        ["dst"] = _dst,
-                        ["entries"] = new JsonArray(entries.Select(e => (JsonNode)new JsonObject
-                        {
-                            ["text"] = e.Text,
-                            ["translated"] = e.Translated,
-                        }).ToArray()),
-                    }, ct);
-                }
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)

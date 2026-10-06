@@ -127,9 +127,11 @@ public class TranslateCycleSinkTests
         await sink.OnCycleAsync(1, 100, 100, Result("A", "B"), CancellationToken.None);
         await sink.WhenIdleAsync();
         Assert.Equal(new[] { "B" }, tr.CallTexts); // A là hit -> không gọi dịch
-        var entry = n.Single("translate.put")!["entries"]!.AsArray().Single()!.AsObject();
-        Assert.Equal("B", entry["text"]!.GetValue<string>());
-        Assert.Equal("β", entry["translated"]!.GetValue<string>());
+        // ruling T-F3: observe tại cache layer (sink không notify translate.put trực tiếp)
+        var put = Assert.Single(cache.Puts);
+        var entry = Assert.Single(put);
+        Assert.Equal("B", entry.Text);
+        Assert.Equal("β", entry.Translated);
     }
 
     [Fact]
@@ -150,10 +152,12 @@ public class TranslateCycleSinkTests
         var err = new StringWriter();
         var tr = new StubTranslator { ThrowOnTranslate = true };
         var n = new StubNotifier();
-        var sink = Create(tr, new StubCache(), n, err);
+        var cache = new StubCache();
+        var sink = Create(tr, cache, n, err);
         await sink.OnCycleAsync(1, 100, 100, Result("BAD"), CancellationToken.None);
         await sink.WhenIdleAsync();
         Assert.DoesNotContain("translate.put", n.Methods);  // không ghi DB dòng lỗi
+        Assert.Empty(cache.Puts); // ruling T-F3: dịch lỗi -> không PutAsync -> không notification, không ghi cache
         Assert.Contains("warn", err.ToString(), StringComparison.OrdinalIgnoreCase); // có log stderr
     }
 
