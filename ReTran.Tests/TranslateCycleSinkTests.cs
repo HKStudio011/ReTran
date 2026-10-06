@@ -47,10 +47,15 @@ public class TranslateCycleSinkTests
         public Dictionary<string, string> Hits { get; set; } = new();
         public List<string>? Misses { get; set; }   // null -> tính từ input trừ Hits
         public bool ThrowOnLookup;
+        public TaskCompletionSource<bool>? HangLookup; // nếu set, lookup treo tới khi test release (fix round 2)
         public List<IReadOnlyList<(string Text, string Translated)>> Puts { get; } = new();
 
         public Task<CacheLookupResult> LookupAsync(string context, string src, string dst, IReadOnlyList<string> texts, CancellationToken ct)
         {
+            if (HangLookup is not null)
+                return HangLookup.Task.ContinueWith(
+                    _ => new CacheLookupResult(new Dictionary<string, string>(), texts),
+                    CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
             if (ThrowOnLookup) throw new TimeoutException("stub cache down");
             var hits = new Dictionary<string, string>();
             foreach (string t in texts)
@@ -182,5 +187,22 @@ public class TranslateCycleSinkTests
         await sink.OnCycleAsync(2, 100, 100, Result("DUP"), CancellationToken.None);
         await sink.WhenIdleAsync();
         Assert.Single(tr.CallTexts); // chỉ dịch 1 lần
+    }
+
+    [Fact]
+    public async Task LookupHanging_TimesOutAllMiss_NoHang()
+    {
+        var hang = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cache = new StubCache { HangLookup = hang };
+        var tr = new StubTranslator { Result = "β" };
+        var n = new StubNotifier();
+        var sink = Create(tr, cache, n);
+        await sink.OnCycleAsync(1, 100, 100, Result("STUCK"), CancellationToken.None);
+        // hard bound 2s: chain drain xong trước 10s -> không treo dù channel bỏ qua token
+        await sink.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Null(n.Single("frame.translated")!["boxes"]!.AsArray()[0]!["translated"]);
+        Assert.Equal(new[] { "STUCK" }, tr.CallTexts); // lookup treo -> timeout -> all-miss -> dịch hết
+        hang.TrySetResult(true); // release để dọn dẹp
     }
 }

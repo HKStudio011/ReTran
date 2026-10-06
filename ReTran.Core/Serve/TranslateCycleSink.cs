@@ -232,10 +232,10 @@ public sealed class TranslateCycleSink : ICycleSink
     }
 
     /// <summary>
-    /// One background batch: cache lookup (2 s cap, failure = all-miss) → session hits → parallel
-    /// translation (≤ 4) → <see cref="ICacheChannel.PutAsync"/> (the <c>translate.put</c> path).
+    /// One background batch: cache lookup (hard 2 s bound, failure = all-miss) → session hits →
+    /// parallel translation (≤ 4) → <see cref="ICacheChannel.PutAsync"/> (the <c>translate.put</c> path).
     /// All failures are logged to stderr, never rethrown, except cancellation when the sink is stopped.
-    /// Một lô nền: tra cache (tối đa 2 s, lỗi = all-miss) → ghi hit vào session → dịch song song
+    /// Một lô nền: tra cache (giới cứng 2 s, lỗi = all-miss) → ghi hit vào session → dịch song song
     /// (≤ 4) → <see cref="ICacheChannel.PutAsync"/> (đường <c>translate.put</c>). Mọi lỗi đều ghi
     /// stderr, không lan truyền, trừ khi bị hủy do sink dừng.
     /// </summary>
@@ -244,12 +244,18 @@ public sealed class TranslateCycleSink : ICycleSink
         try
         {
             IReadOnlyList<string> misses;
+            Task<CacheLookupResult>? lookupTask = null;
             try
             {
                 using var lookupCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 lookupCts.CancelAfter(CacheLookupTimeout);
-                CacheLookupResult result = await _cache.LookupAsync(
-                    _context, _src, _dst, texts, lookupCts.Token);
+                lookupTask = _cache.LookupAsync(_context, _src, _dst, texts, lookupCts.Token);
+
+                // Hard 2 s bound even when the channel ignores the cancellation token, so the
+                // background chain can never stall forever (spec §4.1).
+                // Giới cứng 2 s kể cả khi channel bỏ qua token hủy, để chuỗi nền không bao giờ
+                // bị đình trệ vĩnh viễn (spec §4.1).
+                CacheLookupResult result = await lookupTask.WaitAsync(CacheLookupTimeout, ct);
                 misses = result.Misses;
                 lock (_sync)
                 {
@@ -259,12 +265,15 @@ public sealed class TranslateCycleSink : ICycleSink
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
+                AbandonLookup(lookupTask);
                 throw; // stopped while looking up -> no point translating under a dead token. đang dừng khi tra -> không dịch với token đã hủy
             }
             catch (Exception ex)
             {
-                // Lookup failed or timed out: treat the whole batch as misses (spec §4.2).
-                // Tra lỗi hoặc hết 2 s: coi toàn bộ lô là miss (spec §4.2).
+                // Lookup failed or timed out (incl. the hard WaitAsync bound): treat the whole
+                // batch as misses (spec §4.2).
+                // Tra lỗi hoặc hết 2 s (gồm cả giới cứng WaitAsync): coi toàn bộ lô là miss (spec §4.2).
+                AbandonLookup(lookupTask);
                 _stderr.WriteLine($"warn: cache lookup failed ({ex.Message})");
                 misses = texts;
             }
@@ -302,6 +311,21 @@ public sealed class TranslateCycleSink : ICycleSink
                 foreach (string t in texts) _inFlight.Remove(t);
             }
         }
+    }
+
+    /// <summary>
+    /// Observes a late fault on an abandoned lookup task so it never surfaces as an unobserved
+    /// task exception. Quan sát fault đến muộn của một task lookup bị bỏ dở để nó không bao giờ
+    /// thành unobserved task exception.
+    /// </summary>
+    private static void AbandonLookup(Task<CacheLookupResult>? lookupTask)
+    {
+        if (lookupTask is null) return; // synchronous throw before the task was obtained. ném đồng bộ trước khi có task
+        _ = lookupTask.ContinueWith(
+            static t => { _ = t.Exception; },
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     /// <summary>
