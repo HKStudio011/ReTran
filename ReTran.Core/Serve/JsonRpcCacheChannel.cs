@@ -5,11 +5,12 @@ using ReTran.Core.JsonRpc;
 
 /// <summary>
 /// Production cache channel that talks to the App over the core's JSON-RPC peer:
-/// batch lookup via <c>translate.request_cache</c> (request/response, hard 2 s bound) and
+/// batch lookup via <c>translate.request_cache</c> (request/response, self-cancels after 2 s;
+/// the hard round-trip bound lives in <see cref="TranslateCycleSink"/>) and
 /// best-effort write-back via the <c>translate.put</c> notification.
 /// Kênh cache production trao đổi với App qua JSON-RPC peer của core: tra lô qua
-/// <c>translate.request_cache</c> (request/response, giới cứng 2 s) và ghi best-effort qua
-/// thông báo <c>translate.put</c>.
+/// <c>translate.request_cache</c> (request/response, tự hủy sau 2 s; giới cứng lượt tra nằm ở
+/// <see cref="TranslateCycleSink"/>) và ghi best-effort qua thông báo <c>translate.put</c>.
 /// </summary>
 /// <remarks>
 /// Any failure (timeout, peer error, malformed reply) is thrown so <see cref="TranslateCycleSink"/>
@@ -19,8 +20,9 @@ using ReTran.Core.JsonRpc;
 /// </remarks>
 public sealed class JsonRpcCacheChannel : ICacheChannel
 {
-    /// <summary>Upper bound on one lookup round trip; the sink applies the same 2 s hard bound.
-    /// Giới trên một lượt tra qua lại; sink cũng áp bounds cứng 2 s tương ứng.</summary>
+    /// <summary>Cooperative cancel for one lookup round trip (<c>CancelAfter</c>); the hard 2 s
+    /// bound is enforced by the sink's own timeout. Hủy hợp tác cho một lượt tra
+    /// (<c>CancelAfter</c>); giới cứng 2 s do timeout của sink đảm nhận.</summary>
     private static readonly TimeSpan LookupTimeout = TimeSpan.FromSeconds(2);
 
     private readonly JsonRpcServer _server;
@@ -38,8 +40,12 @@ public sealed class JsonRpcCacheChannel : ICacheChannel
     }
 
     /// <summary>
-    /// Looks up a batch of texts via <c>translate.request_cache</c>, bounded by 2 s plus <paramref name="ct"/>.
-    /// Tra một lô text qua <c>translate.request_cache</c>, bị chặn bởi 2 s và <paramref name="ct"/>.
+    /// Looks up a batch of texts via <c>translate.request_cache</c>. The channel cancels itself
+    /// after 2 s and honors <paramref name="ct"/>; the hard round-trip bound is enforced by the
+    /// caller (<see cref="TranslateCycleSink"/>), not by a wait inside this method.
+    /// Tra một lô text qua <c>translate.request_cache</c>. Kênh tự hủy sau 2 s và tôn trọng
+    /// <paramref name="ct"/>; giới cứng lượt tra do chính caller
+    /// (<see cref="TranslateCycleSink"/>) đảm nhận, không phải bằng một lượt chờ trong method này.
     /// </summary>
     /// <param name="context">Content-context key (e.g. <c>screen:0</c>). Key ngữ cảnh nội dung (vd <c>screen:0</c>).</param>
     /// <param name="src">Source language code, or <c>auto</c>. Mã ngôn ngữ nguồn, hoặc <c>auto</c>.</param>
@@ -49,10 +55,17 @@ public sealed class JsonRpcCacheChannel : ICacheChannel
     /// <returns>The hits/misses partition returned by the App. Phân hoạch hit/miss do App trả về.</returns>
     /// <exception cref="ArgumentNullException">Thrown when any reference parameter is null. Ném khi tham số tham chiếu nào đó là null.</exception>
     /// <exception cref="TimeoutException">
-    /// Thrown when the 2 s bound elapses or the connection closes before a reply arrives.
-    /// Khi hết 2 s hoặc kết nối đóng trước khi có phản hồi.
+    /// Thrown when the connection closes before a reply arrives.
+    /// Khi kết nối đóng trước khi có phản hồi.
     /// </exception>
-    /// <exception cref="TaskCanceledException">Thrown when <paramref name="ct"/> is cancelled. Khi <paramref name="ct"/> bị hủy.</exception>
+    /// <exception cref="TaskCanceledException">
+    /// Thrown when <paramref name="ct"/> is cancelled or the internal 2 s <c>CancelAfter</c>
+    /// elapses — <c>JsonRpcServer.CallAsync</c> cancels its waiter and surfaces this, never a
+    /// <see cref="TimeoutException"/>.
+    /// Khi <paramref name="ct"/> bị hủy hoặc 2 s <c>CancelAfter</c> bên trong hết hạn —
+    /// <c>JsonRpcServer.CallAsync</c> hủy lượt chờ và xuất hiện dạng này, không bao giờ là
+    /// <see cref="TimeoutException"/>.
+    /// </exception>
     /// <exception cref="RpcMethodException">Thrown when the App answers with an error object. Khi App trả về đối tượng lỗi.</exception>
     /// <exception cref="InvalidOperationException">Thrown when the reply is not a <c>{hits, misses}</c> object. Khi phản hồi không phải object <c>{hits, misses}</c>.</exception>
     public async Task<CacheLookupResult> LookupAsync(

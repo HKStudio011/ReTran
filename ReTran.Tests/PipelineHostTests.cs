@@ -4,6 +4,7 @@ using System.Text.Json.Nodes;
 using System.Threading.Channels;
 using ReTran.Core.Capture;
 using ReTran.Core.Cli;
+using ReTran.Core.Config;
 using ReTran.Core.JsonRpc;
 using ReTran.Core.OcrClient;
 using ReTran.Core.Serve;
@@ -176,10 +177,11 @@ public class PipelineHostTests
         TranslatorRegistry registry,
         JsonRpcServer server,
         List<FakeCaptureSource>? sources = null,
-        TextWriter? stderr = null)
+        TextWriter? stderr = null,
+        Func<OcrLoopOptions, ICaptureSource>? sourceFactory = null)
     {
-        Func<OcrLoopOptions, ICaptureSource>? factory = null;
-        if (sources is not null)
+        Func<OcrLoopOptions, ICaptureSource>? factory = sourceFactory;
+        if (factory is null && sources is not null)
         {
             factory = _ =>
             {
@@ -222,6 +224,29 @@ public class PipelineHostTests
             }
             return false;
         }, $"notification {method}");
+        return found;
+    }
+
+    /// <summary>
+    /// Collects every <paramref name="method"/> notification currently on the wire (counting all,
+    /// not just the first) so "exactly once" / "none" can be asserted.
+    /// Thu mọi thông báo <paramref name="method"/> đang có trên wire (đếm tất cả, không chỉ cái
+    /// đầu) để assert được "đúng 1 lần" / "không có".
+    /// </summary>
+    private static List<JsonNode?> NotificationsOf(Peer peer, string method)
+    {
+        var found = new List<JsonNode?>();
+        foreach (string line in peer.Transport.OutSnapshot())
+        {
+            JsonNode? node = JsonRpc.ParseLine(line);
+            if (node?["id"] is null
+                && node?["method"] is JsonValue methodValue
+                && methodValue.TryGetValue<string>(out string? m)
+                && m == method)
+            {
+                found.Add(node["params"]);
+            }
+        }
         return found;
     }
 
@@ -347,5 +372,86 @@ public class PipelineHostTests
         await Task.Delay(400);
         sources[^1].Raise(TinyFrame()); // cycle -> new_texts ["HELLO"] again -> translate
         await WaitUntilAsync(() => translator.Calls >= 1, "session-2 translation (fresh OcrDiff)");
+    }
+
+    [Fact]
+    public async Task Stop_Normal_NoStateNotification()
+    {
+        await using var peer = new Peer();
+        var sources = new List<FakeCaptureSource>();
+        await using var host = CreateHost(
+            new FakeSidecarRpc { NextResult = SpotResult() },
+            RegistryWith(new CountingTranslator()), peer.Server, sources);
+
+        JsonNode? started = await host.StartAsync(StartParams(), CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+        await Task.Delay(400); // queued frame consumed by the first-frame wait; loop now ticking
+
+        JsonNode? stopped = await host.StopAsync(null, CancellationToken.None);
+        Assert.False(stopped!["running"]!.GetValue<bool>());
+
+        await Task.Delay(700); // settle window: a stray fire-and-forget notify would flush here
+        Assert.Empty(NotificationsOf(peer, "pipeline.state"));
+    }
+
+    [Fact]
+    public async Task FatalState_NotifiedExactlyOnce()
+    {
+        await using var peer = new Peer();
+        var sources = new List<FakeCaptureSource>();
+        var rpc = new FakeSidecarRpc { Throw = new SidecarRpcException(-32603, "sidecar exited") };
+        await using var host = CreateHost(rpc, RegistryWith(new CountingTranslator()), peer.Server, sources);
+
+        JsonNode? started = await host.StartAsync(StartParams(), CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+
+        await Task.Delay(400); // queued frame consumed by the first-frame wait
+        sources[^1].Raise(TinyFrame()); // next tick -> SpotAsync -> SidecarRpcException -> fatal
+
+        JsonNode? state = await WaitForNotificationAsync(peer, "pipeline.state");
+        Assert.False(state!["running"]!.GetValue<bool>());
+        await Task.Delay(500); // settle window: a second (buggy) notify would land here
+        JsonNode? only = Assert.Single(NotificationsOf(peer, "pipeline.state"));
+        Assert.Equal("sidecar-exited", only!["reason"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Start_SourceFactoryThrows_RpcInternalError()
+    {
+        await using var host = CreateHost(
+            new FakeSidecarRpc(), RegistryWith(new CountingTranslator()), new JsonRpcServer(),
+            sourceFactory: _ => throw new ArgumentOutOfRangeException("monitor", "no displays"));
+
+        var ex = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(StartParams(), CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InternalError, ex.Code);
+        Assert.Contains("capture source unavailable", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Start_FpsMissing_UsesCoreConfigDefault()
+    {
+        OcrLoopOptions? captured = null;
+        await using var host = CreateHost(
+            new FakeSidecarRpc(), RegistryWith(new CountingTranslator()), new JsonRpcServer(),
+            sourceFactory: opts =>
+            {
+                captured = opts;
+                var source = new FakeCaptureSource();
+                source.Raise(TinyFrame());
+                return source;
+            });
+
+        var parameters = new JsonObject // no ocrFps/captureFps: defaults must come from CoreConfig
+        {
+            ["source"] = new JsonObject { ["kind"] = "screen", ["monitor"] = 0 },
+            ["translate"] = new JsonObject { ["provider"] = "google", ["src"] = "auto", ["dst"] = "vi" },
+        };
+        JsonNode? started = await host.StartAsync(parameters, CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+
+        Assert.NotNull(captured);
+        Assert.Equal(CoreConfig.LoadFrom(CoreConfig.DefaultPath).OcrFps, captured!.Fps);
+        Assert.True(captured.Fps >= 1);
     }
 }
