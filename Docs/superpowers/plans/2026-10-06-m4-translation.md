@@ -29,7 +29,7 @@
 - New publics: bilingual `///` docs (EN câu đầu, VI ngay sau); comment `//` trong code theo style file.
 - Tests: skip-êm bằng early return (không `Assert.Skip`, không fail vì môi trường); không `Console.WriteLine` trong test body; test command: `dotnet test "ReTran.Tests/ReTran.Tests.csproj" -f net10.0-windows10.0.19041.0`.
 - Commit: đúng message từng task, 1 commit/task, stage đúng file của task.
-- Test-count baseline: **C# 79, Python 15** (M4 không đụng Python). Targets: T1 81 · T2 85 · T3 91 · T4 96 · T5 103 · T6 110 · T7 114 · T8 120 · T9 125 · T10 131 · T11 137 · T12 140.
+- Test-count baseline: **C# 79, Python 15** (M4 không đụng Python). Count theo `dotnet test` **Total** (mỗi `[InlineData]` của Theory tính 1 case riêng). Targets: T1 81 · T2 85 · T3 90 · T4 98 · T5 105 · T6 113 · T7 117 · T8 123 · T9 128 · T10 135 · T11 141 · T12 144.
 - Out of scope (spec §10): DeepL/LLM/local provider, game hook, obs-websocket, dịch lại giữa phiên đang chạy, retry/backoff Google.
 
 ## Review Focus
@@ -293,7 +293,7 @@ public class GoogleWebTranslatorTests
   - Parse: ném `HttpRequestException` khi status != 200; body rỗng/sai cấu trúc → `FormatException`; `TaskCanceledException` khi timeout (chưa bị ct của caller hủy) → wrap thành `TimeoutException` (test trên yêu cầu `TimeoutException`).
   - Cancellation thật của `ct` → `OperationCanceledException` giữ nguyên.
 
-- [ ] **Step 4: Chạy verify PASS** — **91** test methods.
+- [ ] **Step 4: Chạy verify PASS** — **90** test cases.
 
 - [ ] **Step 5: Commit** — `feat(core): ITranslator + GoogleWebTranslator (web endpoint, không key) + registry`
 
@@ -369,7 +369,7 @@ public class SpotGeometryTests
   - `FromHwnd`: `GetWindowThreadProcessId(hwnd, out pid)` → `Process.GetProcessById(pid).ProcessName + ".exe"`.ToLowerInvariant(); mọi exception → `"unknown"`.
   - `NormalizeQuad`: cần đúng 4 điểm, mỗi điểm ≥2 số; minX/maxX/minY/maxY từ 8 số; x=minX/W … clamp [0,1]; `frameWidth/Height <= 0` hoặc shape sai → `(0,0,0,0)` (không ném — path hiển thị không được crash).
 
-- [ ] **Step 4: Chạy verify PASS** — **96** test methods.
+- [ ] **Step 4: Chạy verify PASS** — **98** test cases.
 
 - [ ] **Step 5: Commit** — `feat(core): ContextKey (process name / screen:N) + SpotGeometry normalize quad pixel`
 
@@ -587,7 +587,7 @@ public class TranslateCycleSinkTests
   - Mọi异常 trong task nền bắt hết + log stderr — **không** để bay ra ngoài (trừ `OperationCanceledException` khi sink bị dispose/stop).
   - `WhenIdleAsync`: giữ field `Task _bg` (chuỗi task nền, update dưới `_sync`), method await snapshot của `_bg` cho tới khi drain (loop nếu có task mới nối vào trong lúc chờ).
 
-- [ ] **Step 4: Chạy verify PASS** — **103** test methods.
+- [ ] **Step 4: Chạy verify PASS** — **105** test cases.
 
 - [ ] **Step 5: Commit** — `feat(core): TranslateCycleSink — emit frame.translated + cache lookup + dịch nền không block tick`
 
@@ -642,7 +642,7 @@ public class PipelineHostTests
   - `Program.RunServeAsync`: tạo `TranslatorRegistry` (đăng ký `new GoogleWebTranslator()`), `PipelineHost`, `server.Register("core.start"|"core.stop"|"core.list_sources", ...)`; host disposal khi serve thoát.
   - `CaptureCatalog`: move logic liệt kê monitor/window hiện có trong `CaptureCommands` (dữ liệu thuần, không in); `CaptureCommands` giữ nguyên output string.
 
-- [ ] **Step 4: Chạy verify PASS** — **110** test methods; chạy thêm `--filter "OcrCli|Capture"` để chắc CLI list không đổi output.
+- [ ] **Step 4: Chạy verify PASS** — **113** test cases; chạy thêm `--filter "OcrCli|Capture"` để chắc CLI list không đổi output.
 
 - [ ] **Step 5: Commit** — `feat(core): PipelineHost core.start/stop/list_sources + pipeline.state + CaptureCatalog`
 
@@ -714,7 +714,7 @@ public class TranslateCliTests
 
 - [ ] **Step 3: Implement** — parse args thủ công theo style `OcrLoop.TryParse` (unknown arg / thiếu `--dst` → usage, exit 2); chạy `new GoogleWebTranslator()` với timeout 10 s cho CLI; mạng lỗi → stderr + exit 1.
 
-- [ ] **Step 4: Chạy verify PASS** — **114** test methods.
+- [ ] **Step 4: Chạy verify PASS** — **117** test cases.
 
 - [ ] **Step 5: Commit** — `feat(core): CLI translate one-shot (google)`
 
@@ -748,7 +748,7 @@ public class TranslateCliTests
 
 - [ ] **Step 3: Implement** — thêm `_writeLock` (mọi outbound), `_pending`/`_nextId` (đã có `_pending`; id đã string), phân nhánh ReadLoop: (a) có `result`/`error` + id → pending như hiện tại; (b) có `method` + `id` → request → handler → ghi response; (c) có `method`, không id → notification → event. Log exception handler qua `HandlerError` (không nuốt im lặng, không Console.WriteLine).
 
-- [ ] **Step 4: Chạy verify PASS** — **120** test methods (test `JsonRpcServerTests`/App khác không vỡ).
+- [ ] **Step 4: Chạy verify PASS** — **123** test cases (test `JsonRpcServerTests`/App khác không vỡ).
 
 - [ ] **Step 5: Commit** — `feat(app): JsonRpcClient 3 nhánh (response/request/notification) + write-lock`
 
@@ -795,7 +795,7 @@ public class TranslationCacheTests : IDisposable
   - `LookupAsync`: `texts` rỗng → kết quả rỗng ngay; query `Contains` 1 lần; trả hits dict + misses (giữ thứ tự input).
   - `PutAsync`: upsert an toàn (EF: attach theo key + update, hoặc query trước trong transaction).
 
-- [ ] **Step 4: Chạy verify PASS** — **125** test methods; confirm file migration xuất hiện trong `ReTran.App/Migrations/`.
+- [ ] **Step 4: Chạy verify PASS** — **128** test cases; confirm file migration xuất hiện trong `ReTran.App/Migrations/`.
 
 - [ ] **Step 5: Commit** — `feat(app): EF Core translation cache (unique key context+text+src+dst) + migration`
 
@@ -855,7 +855,7 @@ public class PipelineControllerTests
   - `MainPage`: resolve `ICorePeer` từ `IPlatformApplication.Current.Services` thay `new CoreProcessClient()`; `OnStopClicked` gọi `DisposeAsync` của singleton như hiện tại (Start ở Home sẽ auto-restart).
   - Đăng ký handler: làm trong `PipelineController` **lần đầu** `StartAsync`/`ListSourcesAsync` gọi (peer đã started) — idempotent (`_handlersWired` flag).
 
-- [ ] **Step 4: Chạy verify PASS** — **131** test methods; `dotnet build "ReTran Project.slnx"` clean.
+- [ ] **Step 4: Chạy verify PASS** — **135** test cases; `dotnet build "ReTran Project.slnx"` clean.
 
 - [ ] **Step 5: Commit** — `feat(app): AppSettings + PipelineController (core.start/stop, frame.translated→overlay) + DI + drain stderr`
 
@@ -902,7 +902,7 @@ public class SettingsPageTests
   - `NavMenu.razor`: NavLink thứ 2 `href="settings"` icon `&#9881;`.
   - I18nStrings: thêm đủ keys trên, song ngữ, không quên cập nhật 2 chuỗi cũ.
 
-- [ ] **Step 4: Chạy verify PASS** — **137** test methods; `dotnet build "ReTran Project.slnx"` clean; `npm run build` trong `ReTran.App/vite-project` không liên quan (không đụng TS).
+- [ ] **Step 4: Chạy verify PASS** — **141** test cases; `dotnet build "ReTran Project.slnx"` clean; `npm run build` trong `ReTran.App/vite-project` không liên quan (không đụng TS).
 
 - [ ] **Step 5: Commit** — `feat(app): trang Cài đặt + Start/Stop pipeline trên trang điều khiển (i18n vi/en)`
 
@@ -937,7 +937,7 @@ public class SettingsPageTests
 // core.start trả -32603 (thiếu sidecar/máy không có capture) -> early return (skip-êm)
 ```
 
-- [ ] **Step 2: Chạy verify PASS** — **140** test methods (môi trường thiếu exe → skip-êm, không fail).
+- [ ] **Step 2: Chạy verify PASS** — **144** test cases (môi trường thiếu exe → skip-êm, không fail).
 
 - [ ] **Step 3: E2E manual + đo perf (chạy thật, ghi số)**
 
@@ -960,4 +960,4 @@ Checklist (chạy trên máy user, có game/cửa sổ thật):
 - **Box contract đã verify thay spec "bước 0":** `Spot.box` = quad **pixel** (`engine.py:14`) → `SpotGeometry.NormalizeQuad` (T4) — không còn mục chờ verify.
 - **Type consistency:** `CacheLookupResult` định nghĩa 2 bên (Core T5 / App T9) cùng shape — deliberate (không tham chiếu chéo biên App/Core); `NotifyAsync` khớp `IJsonRpcNotifier` T2 ↔ sink T5 ↔ host T6; `SourceSelection` T10 ↔ Home T11.
 - **Proportion:** plan không viết body code ngoài đoạn algorithm thật sự (normalize quad, background chain T5) — phần còn lại là signature + tên test + assertion.
-- **Review pass 2 (2026-10-06):** đã fix inline — thêm `**Spec:**` ở header · ghim box payload `{x,y,w,h,text,translated}` (spec §3.3) · T2 design `FakeTransport` mở rộng + sửa test race (chạy read loop trước khi inject) · T5 viết lại test block thành code C# hợp lệ (+`WhenIdleAsync`, bỏ `sinkEmit_next`/`StderrRef`) · T7 test cụ thể qua `OcrTestSupport.RunDispatcherAsync` (4 test) · T12 thêm test E2E `core.start → frame.translated + translate.request_cache` (spec §9) → counts mới: T7 114 · T8 120 · T9 125 · T10 131 · T11 137 · T12 140.
+- **Review pass 2 (2026-10-06):** đã fix inline — thêm `**Spec:**` ở header · ghim box payload `{x,y,w,h,text,translated}` (spec §3.3) · T2 design `FakeTransport` mở rộng + sửa test race (chạy read loop trước khi inject) · T5 viết lại test block thành code C# hợp lệ (+`WhenIdleAsync`, bỏ `sinkEmit_next`/`StderrRef`) · T7 test cụ thể qua `OcrTestSupport.RunDispatcherAsync` (4 test) · T12 thêm test E2E `core.start → frame.translated + translate.request_cache` (spec §9) → counts mới (pass 3, đếm lại theo brief test code + `dotnet test` Total): T3 90 · T4 98 · T5 105 · T6 113 · T7 117 · T8 123 · T9 128 · T10 135 · T11 141 · T12 144.
