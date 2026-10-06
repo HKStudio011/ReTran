@@ -74,7 +74,7 @@ public class OcrLoopCliTests
             var stderr = new StringWriter();
 
             Task<int> run = Task.Run(() =>
-                OcrLoop.RunAsync(options, source, pipeline, stdout, stderr, CancellationToken.None));
+                OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr, CancellationToken.None));
 
             using var feederCts = new CancellationTokenSource();
             Task feeder = Task.Run(async () =>

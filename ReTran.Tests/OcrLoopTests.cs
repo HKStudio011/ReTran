@@ -101,7 +101,7 @@ public class OcrLoopTests
         var stderr = new StringWriter();
 
         Task<int> run = Task.Run(() =>
-            OcrLoop.RunAsync(options, source, pipeline, stdout, stderr, CancellationToken.None));
+            OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr, CancellationToken.None));
 
         await Task.Delay(400); // first-frame wait polls every 50 ms — A consumed by now
         source.Raise(TinyFrame());
@@ -133,7 +133,7 @@ public class OcrLoopTests
         using var cts = new CancellationTokenSource();
 
         Task<int> run = Task.Run(() =>
-            OcrLoop.RunAsync(options, source, pipeline, stdout, stderr, cts.Token));
+            OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr, cts.Token));
 
         await Task.Delay(1500); // first frame consumed, >=1 tick elapsed with an empty buffer
         Assert.Empty(stdout.Snapshot()); // skipped ticks emit nothing
@@ -150,7 +150,7 @@ public class OcrLoopTests
         var stdout = new SyncTextWriter();
         var stderr = new StringWriter();
 
-        int exit = await OcrLoop.RunAsync(options, source, pipeline, stdout, stderr, CancellationToken.None);
+        int exit = await OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr, CancellationToken.None);
 
         Assert.Equal(1, exit);
         Assert.Contains("timed out", stderr.ToString(), StringComparison.OrdinalIgnoreCase);
@@ -174,7 +174,7 @@ public class OcrLoopTests
         var stderr = new StringWriter();
 
         Task<int> run = Task.Run(() =>
-            OcrLoop.RunAsync(options, source, pipeline, stdout, stderr, CancellationToken.None));
+            OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr, CancellationToken.None));
 
         await Task.Delay(400);   // first frame (A) consumed
         source.Raise(TinyFrame()); // cycle 1 -> times out at ~1.3 s -> warn + skip
@@ -200,7 +200,7 @@ public class OcrLoopTests
         var stderr = new StringWriter();
 
         Task<int> run = Task.Run(() =>
-            OcrLoop.RunAsync(options, source, pipeline, stdout, stderr, CancellationToken.None));
+            OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr, CancellationToken.None));
 
         await Task.Delay(400);
         source.Raise(TinyFrame()); // processed on the first tick -> fatal

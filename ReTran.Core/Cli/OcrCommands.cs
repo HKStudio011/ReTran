@@ -115,7 +115,7 @@ public static class OcrCommands
             }
             await using var sp = await SidecarProcess.StartAsync(python, repoRoot, cts.Token);
             var pipeline = new OcrPipeline(sp, new OcrDiff());
-            return await OcrLoop.RunAsync(options, source, pipeline, Console.Out, Console.Error, cts.Token);
+            return await OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(Console.Out), Console.Error, cts.Token);
         }
         catch (OperationCanceledException) when (cts.IsCancellationRequested)
         {

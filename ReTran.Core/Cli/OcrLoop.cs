@@ -18,8 +18,8 @@ namespace ReTran.Core.Cli;
 public sealed record OcrLoopOptions(bool UseWindow, int Monitor, nint Hwnd, int Fps, int MaxFrames);
 
 /// <summary>
-/// Continuous OCR loop engine: capture buffer -> periodic tick -> pipeline -> JSON lines on stdout.
-/// Engine vòng lặp OCR liên tục: buffer capture -> tick định kỳ -> pipeline -> JSON lines ra stdout.
+/// Continuous OCR loop engine: capture buffer -> periodic tick -> pipeline -> cycle sink.
+/// Engine vòng lặp OCR liên tục: buffer capture -> tick định kỳ -> pipeline -> cycle sink.
 /// </summary>
 public static class OcrLoop
 {
@@ -135,23 +135,29 @@ public static class OcrLoop
     /// <param name="options">Loop options (fps, max-frames). Tùy chọn loop.</param>
     /// <param name="source">Capture source; started and stopped by this method. Capture source; method này Start/Stop.</param>
     /// <param name="pipeline">OCR pipeline shared for the whole run (session-seen diff). Pipeline OCR dùng chung cả lượt.</param>
-    /// <param name="stdout">JSON-lines sink (stdout in production). Nơi ghi JSON lines (stdout khi chạy thật).</param>
+    /// <param name="sink">Receives each completed cycle (JSON lines in the CLI). Nhận mỗi chu kỳ hoàn tất (JSON lines ở CLI).</param>
     /// <param name="stderr">Warnings/errors sink. Nơi ghi cảnh báo/lỗi.</param>
     /// <param name="ct">Cancellation (Ctrl+C). Token hủy (Ctrl+C).</param>
+    /// <param name="onFatal">
+    /// Optional callback with the fatal reason ("capture-error" or "sidecar-exited"),
+    /// invoked right before returning 1. Callback tùy chọn nhận lý do lỗi nghiêm trọng
+    /// ("capture-error" hoặc "sidecar-exited"), gọi ngay trước khi return 1.
+    /// </param>
     /// <returns>0 = clean stop; 1 = first-frame timeout or sidecar lost. 0 = dừng sạch; 1 = hết chờ frame đầu hoặc mất sidecar.</returns>
     /// <exception cref="ArgumentNullException">Thrown when any reference parameter is null.</exception>
     public static async Task<int> RunAsync(
         OcrLoopOptions options,
         ICaptureSource source,
         OcrPipeline pipeline,
-        TextWriter stdout,
+        ICycleSink sink,
         TextWriter stderr,
-        CancellationToken ct)
+        CancellationToken ct,
+        Action<string>? onFatal = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(pipeline);
-        ArgumentNullException.ThrowIfNull(stdout);
+        ArgumentNullException.ThrowIfNull(sink);
         ArgumentNullException.ThrowIfNull(stderr);
 
         using var buffer = new LatestFrameBuffer();
@@ -180,6 +186,7 @@ public static class OcrLoop
             {
                 stderr.WriteLine(
                     $"timed out after {CaptureCommands.FirstFrameTimeoutSeconds}s waiting for first frame.");
+                onFatal?.Invoke("capture-error");
                 return 1;
             }
 
@@ -199,17 +206,7 @@ public static class OcrLoop
                         string b64 = BgraPngEncoder.ToPngBase64(frame);
                         JsonObject result = await pipeline.SpotAsync(b64, ct);
                         seq++;
-                        var line = new JsonObject
-                        {
-                            ["seq"] = seq,
-                            ["at"] = DateTime.UtcNow.ToString(
-                                "yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
-                            ["new_texts"] = result["new_texts"]?.DeepClone() ?? new JsonArray(),
-                            ["spots_count"] = result["spots"] is JsonArray spots ? spots.Count : 0,
-                            ["elapsed_ms"] = result["elapsed_ms"]?.DeepClone() ?? 0,
-                        };
-                        stdout.WriteLine(line.ToJsonString());
-                        stdout.Flush();
+                        await sink.OnCycleAsync(seq, frame.Width, frame.Height, result, ct);
                         if (options.MaxFrames > 0 && seq >= options.MaxFrames)
                             break;
                     }
@@ -237,6 +234,7 @@ public static class OcrLoop
         catch (SidecarRpcException ex)
         {
             stderr.WriteLine($"sidecar lost: {ex.Message}");
+            onFatal?.Invoke("sidecar-exited");
             return 1;
         }
         finally
