@@ -5,6 +5,8 @@ using ReTran.Core.Cli;
 using ReTran.Core.JsonRpc;
 using ReTran.Core.Ocr;
 using ReTran.Core.OcrClient;
+using ReTran.Core.Serve;
+using ReTran.Core.Translate;
 
 namespace ReTran.Core;
 
@@ -75,10 +77,18 @@ public static class Program
         }
         RegisterOcrMethod(server, rpc is null ? null : new OcrPipeline(rpc, new OcrDiff()));
 
+        var registry = new TranslatorRegistry();
+        registry.Register(new GoogleWebTranslator());
+        await using var host = new PipelineHost(rpc, registry, server, Console.Error);
+        server.Register("core.start", p => host.StartAsync(p, CancellationToken.None));
+        server.Register("core.stop", p => host.StopAsync(p, CancellationToken.None));
+        server.Register("core.list_sources", _ => host.ListSourcesAsync(CancellationToken.None));
+
         var transport = new LineJsonRpcTransport(
             new StreamReader(Console.OpenStandardInput()),
             new StreamWriter(Console.OpenStandardOutput()) { NewLine = "\n" });
         await server.RunAsync(transport, CancellationToken.None);
+        await host.DisposeAsync(); // stop the pipeline while the sidecar is still alive
         if (rpc is not null) await rpc.DisposeAsync();
         return 0;
     }

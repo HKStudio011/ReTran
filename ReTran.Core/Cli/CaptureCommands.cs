@@ -92,7 +92,7 @@ public static class CaptureCommands
         IReadOnlyList<MonitorInfo> monitors;
         try
         {
-            monitors = ScreenCaptureSource.EnumerateMonitors();
+            monitors = CaptureCatalog.ListMonitors();
         }
         catch (Exception ex)
         {
@@ -159,7 +159,7 @@ public static class CaptureCommands
         IReadOnlyList<MonitorInfo> monitors;
         try
         {
-            monitors = ScreenCaptureSource.EnumerateMonitors();
+            monitors = CaptureCatalog.ListMonitors();
         }
         catch (Exception ex)
         {
@@ -176,7 +176,7 @@ public static class CaptureCommands
         IReadOnlyList<WindowInfo> windows;
         try
         {
-            windows = WindowCaptureSource.EnumerateWindows();
+            windows = CaptureCatalog.ListWindows();
         }
         catch (Exception ex)
         {

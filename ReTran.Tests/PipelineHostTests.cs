@@ -1,0 +1,351 @@
+using System.Collections.Concurrent;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Threading.Channels;
+using ReTran.Core.Capture;
+using ReTran.Core.Cli;
+using ReTran.Core.JsonRpc;
+using ReTran.Core.OcrClient;
+using ReTran.Core.Serve;
+using ReTran.Core.Translate;
+using Xunit;
+using Frame = ReTran.Core.Capture.Frame;
+
+namespace RetranCore.Tests;
+
+public class PipelineHostTests
+{
+    private sealed class FakeSidecarRpc : ISidecarRpc
+    {
+        public JsonNode? NextResult { get; set; }
+        public Exception? Throw { get; set; }
+
+        public Task<JsonNode?> CallAsync(string method, JsonNode? @params, CancellationToken ct)
+        {
+            if (Throw is not null) throw Throw;
+            return Task.FromResult(NextResult);
+        }
+    }
+
+    /// <summary>Translator stub counting calls per session (Name matches the registry key used by core.start).</summary>
+    private sealed class CountingTranslator : ITranslator
+    {
+        private int _calls;
+
+        public string Name => "google";
+        public int Calls => Volatile.Read(ref _calls);
+        public void Reset() => Interlocked.Exchange(ref _calls, 0);
+
+        public Task<string> TranslateAsync(string text, string src, string dst, CancellationToken ct)
+        {
+            Interlocked.Increment(ref _calls);
+            return Task.FromResult("vi:" + text);
+        }
+    }
+
+    /// <summary>
+    /// Long-lived JSON-RPC transport: blocking read channel, captured writes, and an auto-responder
+    /// that answers translate.request_cache with an all-miss result (no real App in tests).
+    /// Transport JSON-RPC dài hạn: kênh đọc blocking, ghi có capture, và auto-responder trả
+    /// translate.request_cache dạng all-miss (test không cần App thật).
+    /// </summary>
+    private sealed class PeerTransport : IJsonRpcTransport
+    {
+        private readonly Channel<string> _in = Channel.CreateUnbounded<string>();
+        private readonly ConcurrentQueue<string> _out = new();
+
+        public string[] OutSnapshot() => [.. _out];
+
+        public async Task<string?> ReadLineAsync(CancellationToken ct)
+        {
+            while (await _in.Reader.WaitToReadAsync(ct))
+            {
+                if (_in.Reader.TryRead(out string? line)) return line;
+            }
+            return null;
+        }
+
+        public Task WriteLineAsync(string line, CancellationToken ct)
+        {
+            _out.Enqueue(line);
+            AutoRespond(line);
+            return Task.CompletedTask;
+        }
+
+        public void Complete() => _in.Writer.TryComplete();
+
+        private void AutoRespond(string line)
+        {
+            JsonNode? node = JsonRpc.ParseLine(line);
+            if (node?["id"] is not JsonValue idValue || !idValue.TryGetValue<string>(out string? id))
+                return; // notification (no id) -> nothing to answer
+            if (node?["method"] is not JsonValue methodValue || !methodValue.TryGetValue<string>(out string? method))
+                return; // a response line, not a request
+
+            if (method == "translate.request_cache")
+            {
+                var result = new JsonObject
+                {
+                    ["hits"] = new JsonObject(),
+                    ["misses"] = node!["params"]?["texts"] is JsonArray texts
+                        ? texts.DeepClone()
+                        : new JsonArray(),
+                };
+                _in.Writer.TryWrite(JsonRpc.SerializeResponse(new JsonRpcResponse(id, result, null)));
+            }
+            else
+            {
+                _in.Writer.TryWrite(JsonRpc.SerializeResponse(new JsonRpcResponse(id, null,
+                    new JsonRpcError(RpcErrorCodes.MethodNotFound, $"Method not found: {method}"))));
+            }
+        }
+    }
+
+    private sealed class Peer : IAsyncDisposable
+    {
+        public PeerTransport Transport { get; } = new();
+        public JsonRpcServer Server { get; } = new();
+        private readonly CancellationTokenSource _cts = new();
+        private readonly Task _run;
+
+        public Peer() => _run = Server.RunAsync(Transport, _cts.Token);
+
+        public async ValueTask DisposeAsync()
+        {
+            Transport.Complete();
+            try { await _run.WaitAsync(TimeSpan.FromSeconds(5)); }
+            catch { /* read loop may fault on cancellation — test end */ }
+            _cts.Dispose();
+        }
+    }
+
+    private static JsonObject StartParams(
+        string kind = "screen",
+        int monitor = 0,
+        string? hwnd = null,
+        string provider = "google",
+        string src = "auto",
+        string dst = "vi")
+    {
+        var source = new JsonObject { ["kind"] = kind };
+        if (hwnd is not null) source["hwnd"] = hwnd;
+        else source["monitor"] = monitor;
+        return new JsonObject
+        {
+            ["source"] = source,
+            ["translate"] = new JsonObject { ["provider"] = provider, ["src"] = src, ["dst"] = dst },
+            ["ocrFps"] = 10,
+            ["captureFps"] = 10,
+        };
+    }
+
+    private static TranslatorRegistry RegistryWith(ITranslator translator)
+    {
+        var registry = new TranslatorRegistry();
+        registry.Register(translator);
+        return registry;
+    }
+
+    private static Frame TinyFrame() => Frame.FromBgra(2, 2, new byte[16]);
+
+    private static JsonObject SpotResult(params string[] texts)
+    {
+        var spots = new JsonArray();
+        foreach (string t in texts)
+        {
+            spots.Add(new JsonObject
+            {
+                ["box"] = new JsonArray(
+                    new JsonArray(0, 0), new JsonArray(1, 0),
+                    new JsonArray(1, 1), new JsonArray(0, 1)),
+                ["text"] = t,
+                ["score"] = 0.9,
+            });
+        }
+        return new JsonObject { ["spots"] = spots, ["elapsed_ms"] = 5 };
+    }
+
+    /// <summary>
+    /// Builds a host; when <paramref name="sources"/> is given, every start opens a fresh fake
+    /// source with one frame queued (flushed at Start, consumed by the first-frame wait).
+    /// Tạo host; khi truyền <paramref name="sources"/>, mỗi lần start mở source giả mới với 1 frame
+    /// xếp hàng sẵn (phát lúc Start, được bước chờ frame đầu tiêu thụ).
+    /// </summary>
+    private static PipelineHost CreateHost(
+        ISidecarRpc? rpc,
+        TranslatorRegistry registry,
+        JsonRpcServer server,
+        List<FakeCaptureSource>? sources = null,
+        TextWriter? stderr = null)
+    {
+        Func<OcrLoopOptions, ICaptureSource>? factory = null;
+        if (sources is not null)
+        {
+            factory = _ =>
+            {
+                var source = new FakeCaptureSource();
+                source.Raise(TinyFrame());
+                sources.Add(source);
+                return source;
+            };
+        }
+        return new PipelineHost(rpc, registry, server, stderr ?? new StringWriter(), factory);
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition, string what, int timeoutMs = 10_000)
+    {
+        DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (condition()) return;
+            await Task.Delay(50);
+        }
+        Assert.Fail($"timed out waiting for {what}");
+    }
+
+    private static async Task<JsonNode?> WaitForNotificationAsync(Peer peer, string method)
+    {
+        JsonNode? found = null;
+        await WaitUntilAsync(() =>
+        {
+            foreach (string line in peer.Transport.OutSnapshot())
+            {
+                JsonNode? node = JsonRpc.ParseLine(line);
+                if (node?["id"] is null
+                    && node?["method"] is JsonValue methodValue
+                    && methodValue.TryGetValue<string>(out string? m)
+                    && m == method)
+                {
+                    found = node["params"];
+                    return true;
+                }
+            }
+            return false;
+        }, $"notification {method}");
+        return found;
+    }
+
+    [Fact]
+    public async Task Start_InvalidSourceKind_InvalidParams()
+    {
+        await using var host = CreateHost(new FakeSidecarRpc(), RegistryWith(new CountingTranslator()), new JsonRpcServer());
+        var ex = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(StartParams(kind: "bogus"), CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InvalidParams, ex.Code);
+    }
+
+    [Fact]
+    public async Task Start_UnknownProvider_InvalidParams()
+    {
+        await using var host = CreateHost(new FakeSidecarRpc(), RegistryWith(new CountingTranslator()), new JsonRpcServer());
+        var ex = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(StartParams(provider: "deepl"), CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InvalidParams, ex.Code);
+    }
+
+    [Fact]
+    public async Task Start_NoSidecar_InternalError()
+    {
+        await using var host = CreateHost(rpc: null, RegistryWith(new CountingTranslator()), new JsonRpcServer());
+        var ex = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(StartParams(), CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InternalError, ex.Code);
+        Assert.Contains("sidecar", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Start_WhileRunning_InvalidRequest()
+    {
+        var sources = new List<FakeCaptureSource>();
+        await using var host = CreateHost(
+            new FakeSidecarRpc { NextResult = SpotResult() },
+            RegistryWith(new CountingTranslator()), new JsonRpcServer(), sources);
+
+        JsonNode? started = await host.StartAsync(StartParams(), CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+
+        var ex = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(StartParams(), CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InvalidRequest, ex.Code);
+        Assert.Contains("already running", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Stop_BeforeStart_ReturnsFalse()
+    {
+        await using var host = CreateHost(new FakeSidecarRpc(), RegistryWith(new CountingTranslator()), new JsonRpcServer());
+        JsonNode? result = await host.StopAsync(null, CancellationToken.None);
+        Assert.NotNull(result);
+        Assert.False(result!["running"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task ListSources_ReturnsMonitorsAndWindowsShape()
+    {
+        await using var host = CreateHost(new FakeSidecarRpc(), RegistryWith(new CountingTranslator()), new JsonRpcServer());
+        JsonNode? result = await host.ListSourcesAsync(CancellationToken.None);
+        Assert.NotNull(result);
+        Assert.NotNull(result!["monitors"]);
+        Assert.NotNull(result["windows"]);
+
+        JsonArray monitors = result["monitors"]!.AsArray();
+        if (monitors.Count == 0) return; // headless env: shape verified for monitors only when present
+        foreach (JsonNode? m in monitors)
+        {
+            Assert.NotNull(m!["id"]);
+            Assert.Equal(JsonValueKind.Number, m!["id"]!.GetValueKind());
+            Assert.False(string.IsNullOrEmpty(m!["name"]!.GetValue<string>()));
+        }
+        foreach (JsonNode? w in result["windows"]!.AsArray())
+        {
+            Assert.StartsWith("0x", w!["hwnd"]!.GetValue<string>(), StringComparison.OrdinalIgnoreCase);
+            Assert.NotNull(w["title"]);
+            Assert.NotNull(w["process"]);
+        }
+    }
+
+    [Fact]
+    public async Task SidecarLost_NotifiesPipelineState()
+    {
+        await using var peer = new Peer();
+        var sources = new List<FakeCaptureSource>();
+        var rpc = new FakeSidecarRpc { Throw = new SidecarRpcException(-32603, "sidecar exited") };
+        await using var host = CreateHost(rpc, RegistryWith(new CountingTranslator()), peer.Server, sources);
+
+        JsonNode? started = await host.StartAsync(StartParams(), CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+
+        await Task.Delay(400); // queued frame consumed by the first-frame wait
+        sources[^1].Raise(TinyFrame()); // next tick -> SpotAsync -> SidecarRpcException -> fatal
+
+        JsonNode? state = await WaitForNotificationAsync(peer, "pipeline.state");
+        Assert.False(state!["running"]!.GetValue<bool>());
+        Assert.Equal("sidecar-exited", state["reason"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Restart_FreshSession_TranslatesAgain()
+    {
+        await using var peer = new Peer();
+        var sources = new List<FakeCaptureSource>();
+        var translator = new CountingTranslator();
+        var rpc = new FakeSidecarRpc { NextResult = SpotResult("HELLO") };
+        await using var host = CreateHost(rpc, RegistryWith(translator), peer.Server, sources);
+
+        JsonNode? first = await host.StartAsync(StartParams(), CancellationToken.None);
+        Assert.True(first!["running"]!.GetValue<bool>());
+        await Task.Delay(400);
+        sources[^1].Raise(TinyFrame()); // cycle 1 -> new_texts ["HELLO"] -> translate
+        await WaitUntilAsync(() => translator.Calls >= 1, "session-1 translation");
+
+        JsonNode? stopped = await host.StopAsync(null, CancellationToken.None);
+        Assert.False(stopped!["running"]!.GetValue<bool>());
+
+        translator.Reset(); // fresh OcrDiff in session 2 must surface the same text as new again
+        JsonNode? second = await host.StartAsync(StartParams(), CancellationToken.None);
+        Assert.True(second!["running"]!.GetValue<bool>());
+        await Task.Delay(400);
+        sources[^1].Raise(TinyFrame()); // cycle -> new_texts ["HELLO"] again -> translate
+        await WaitUntilAsync(() => translator.Calls >= 1, "session-2 translation (fresh OcrDiff)");
+    }
+}
