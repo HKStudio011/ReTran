@@ -29,7 +29,7 @@
 - New publics: bilingual `///` docs (EN câu đầu, VI ngay sau); comment `//` trong code theo style file.
 - Tests: skip-êm bằng early return (không `Assert.Skip`, không fail vì môi trường); không `Console.WriteLine` trong test body; test command: `dotnet test "ReTran.Tests/ReTran.Tests.csproj" -f net10.0-windows10.0.19041.0`.
 - Commit: đúng message từng task, 1 commit/task, stage đúng file của task.
-- Test-count baseline: **C# 79, Python 15** (M4 không đụng Python). Count theo `dotnet test` **Total** (mỗi `[InlineData]` của Theory tính 1 case riêng). Targets: T1 81 · T2 85 · T3 90 · T4 98 · T5 106 · T6 118 · T7 122 · T8 128 · T9 133 · T10 140 · T11 146 · T12 149. Fix round T6 (reviewer Important: +4 tests cover stop-silent/exactly-once/source-fail/fps-default + sửa doc JsonRpcCacheChannel) → T6 118 · T7 122 · T8 128 · T9 133 · T10 140 · T11 146 · T12 149. (T5 +1 so với bản gốc: fix round 2 thêm test lookup treo.)
+- Test-count baseline: **C# 79, Python 15** (M4 không đụng Python). Count theo `dotnet test` **Total** (mỗi `[InlineData]` của Theory tính 1 case riêng). Targets: T1 81 · T2 85 · T3 90 · T4 98 · T5 106 · T6 118 · T7 122 · T8 128 · T9 133 · T10 140 · T11 146 · T12 149. (T5 +1 so với bản gốc: fix round 2 thêm test lookup treo.)
 - Out of scope (spec §10): DeepL/LLM/local provider, game hook, obs-websocket, dịch lại giữa phiên đang chạy, retry/backoff Google.
 
 ## Review Focus
