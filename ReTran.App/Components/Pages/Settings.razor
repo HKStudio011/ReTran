@@ -15,9 +15,9 @@
         <label class="flex flex-col gap-1.5 text-sm text-surface">
             @(L["settings.label.provider"])
             <select @bind="_model.Provider" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
-                <option value="google">Google</option>
-                <option value="deepl" disabled>DeepL (@(L["settings.opt.comingSoon"]))</option>
-                <option value="llm" disabled>LLM (@(L["settings.opt.comingSoon"]))</option>
+                <option value="google">@(L["settings.provider.google"])</option>
+                <option value="deepl" disabled>@(L["settings.provider.deepl"]) (@(L["settings.opt.comingSoon"]))</option>
+                <option value="llm" disabled>@(L["settings.provider.llm"]) (@(L["settings.opt.comingSoon"]))</option>
             </select>
         </label>
         <label class="flex flex-col gap-1.5 text-sm text-surface">
@@ -33,7 +33,7 @@
             <select @bind="_model.Src" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
                 @foreach (string lang in _srcOptions)
                 {
-                    <option value="@lang">@(lang == "auto" ? L["settings.opt.auto"] : lang)</option>
+                    <option value="@lang">@(lang == "auto" ? L["settings.opt.auto"] : I18nStrings.LanguageName(lang))</option>
                 }
             </select>
         </label>
@@ -42,7 +42,7 @@
             <select @bind="_model.Dst" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
                 @foreach (string lang in _dstOptions)
                 {
-                    <option value="@lang">@lang</option>
+                    <option value="@lang">@(I18nStrings.LanguageName(lang))</option>
                 }
             </select>
         </label>

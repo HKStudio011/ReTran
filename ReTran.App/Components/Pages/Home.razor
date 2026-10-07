@@ -20,10 +20,6 @@
     <Card Title="@(L["home.card.pipeline"])">
         <div class="flex items-center gap-3 flex-wrap">
             <span class="px-2 py-1 rounded border text-sm font-medium @(BadgeClass)">@BadgeSymbol @BadgeText</span>
-            @if (_pipelineError is not null)
-            {
-                <span class="text-sm text-danger">@_pipelineError</span>
-            }
         </div>
 
         <label class="flex flex-col gap-1.5 text-sm text-surface">
@@ -35,10 +31,10 @@
                 }
                 else
                 {
-                    @foreach (MonitorInfo m in _monitors)
-                    {
-                        <option value="@m.Id">@m.Name</option>
-                    }
+                @foreach (MonitorInfo m in _monitors)
+                {
+                    <option value="@m.Id">@(L.Fmt("home.opt.monitorFormat", m.Id))</option>
+                }
                 }
             </select>
         </label>
@@ -49,7 +45,7 @@
                 <option value="">@(L["home.opt.pickWindow"])</option>
                 @foreach (WindowInfo w in _windows)
                 {
-                    <option value="@w.Hwnd">@w.Title (@w.Process)</option>
+                    <option value="@w.Hwnd">@(L.Fmt("home.opt.windowFormat", w.Title, w.Process))</option>
                 }
             </select>
         </label>
@@ -60,6 +56,11 @@
             <button class="btn btn-outline-secondary" @onclick="StopPipelineAsync">@(L["home.btn.stop"])</button>
         </div>
 
+        @if (_pipelineError is not null)
+        {
+            <p class="text-sm text-danger">@_pipelineError</p>
+        }
+
         <p class="text-sm text-secondary">@(L["home.note.capture"])</p>
     </Card>
 
@@ -69,7 +70,7 @@
             <select @bind="_quickDst" @bind:after="SaveQuickDst" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
                 @foreach (string lang in _dstOptions)
                 {
-                    <option value="@lang">@lang</option>
+                    <option value="@lang">@(I18nStrings.LanguageName(lang))</option>
                 }
             </select>
         </label>

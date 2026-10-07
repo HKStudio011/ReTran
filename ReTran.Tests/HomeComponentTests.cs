@@ -145,6 +145,13 @@ public class HomeComponentTests : BunitContext, IDisposable
         var cut = Render<ReTran_App.Components.Pages.Home>();
         await cut.WaitForAssertionAsync(() => Assert.Contains("Notepad", cut.Markup)); // nguồn đã nạp
 
+        // Spec §6.1: nhãn option nguồn đúng format i18n — "Màn hình — Monitor N" / "Cửa sổ — <title> (process)".
+        Assert.Contains("Màn hình — Monitor 0", cut.Markup);
+        Assert.Contains("Màn hình — Monitor 1", cut.Markup);
+        Assert.Contains("Cửa sổ — Notepad (notepad.exe)", cut.Markup);
+        // Spec §6.2: quick-dst hiển thị tên native, value vẫn là code.
+        Assert.Contains(">Tiếng Việt</option>", cut.Markup);
+
         // Start phải dừng DemoFeed trước khi gửi core.start (plan: tránh 2 nguồn publish cùng overlay).
         ButtonByText(cut, "Bắt đầu Demo").Click();
         cut.WaitForAssertion(() => Assert.Contains("đang chạy", cut.Markup));

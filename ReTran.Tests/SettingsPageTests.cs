@@ -44,6 +44,20 @@ public class SettingsPageTests : BunitContext, IDisposable
         Assert.True(options[2].HasAttribute("disabled")); // llm — chưa có
         Assert.Contains("sắp có", providerSelect.TextContent);
 
+        // Spec §6.2: label provider đầy đủ (không rút gọn) + 2 option disabled kèm nhãn "sắp có".
+        Assert.Contains("Google (web, không cần key)", providerSelect.TextContent);
+        Assert.Contains("DeepL", providerSelect.TextContent);
+        Assert.Contains("LLM (OpenAI-compatible)", providerSelect.TextContent);
+
+        // Spec §6.2: nhãn = tên ngôn ngữ (native), src có "Tự động (auto)"; value giữ code.
+        IHtmlSelectElement srcSelect = (IHtmlSelectElement)cut.FindAll("select")[1];
+        IHtmlSelectElement dstSelect = (IHtmlSelectElement)cut.FindAll("select")[2];
+        Assert.Contains("Tự động (auto)", srcSelect.TextContent);
+        Assert.Contains("日本語", srcSelect.TextContent);
+        Assert.Contains("Tiếng Việt", dstSelect.TextContent);
+        Assert.Contains("English", dstSelect.TextContent);
+        Assert.Equal("vi", dstSelect.Value); // value vẫn là code, không phải tên hiển thị
+
         // Google web không cần key → input api-key bị disabled.
         Assert.True(cut.Find("input").HasAttribute("disabled"));
     }

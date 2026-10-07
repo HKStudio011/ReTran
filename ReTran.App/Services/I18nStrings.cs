@@ -52,6 +52,8 @@ public static class I18nStrings
         ["home.label.window"] = "Cửa sổ:",
         ["home.opt.pickWindow"] = "Chọn cửa sổ…",
         ["home.label.quickDst"] = "Dịch sang:",
+        ["home.opt.monitorFormat"] = "Màn hình — Monitor {0}",
+        ["home.opt.windowFormat"] = "Cửa sổ — {0} ({1})",
         ["home.status.startFailed"] = "Khởi động thất bại: {0}",
         ["home.status.stopFailed"] = "Dừng thất bại: {0}",
         ["nav.control"] = "Điều khiển",
@@ -63,6 +65,9 @@ public static class I18nStrings
         ["settings.label.src"] = "Ngôn ngữ gốc:",
         ["settings.label.dst"] = "Ngôn ngữ đích:",
         ["settings.label.apiKey"] = "API key:",
+        ["settings.provider.google"] = "Google (web, không cần key)",
+        ["settings.provider.deepl"] = "DeepL",
+        ["settings.provider.llm"] = "LLM (OpenAI-compatible)",
         ["settings.opt.auto"] = "Tự động (auto)",
         ["settings.opt.comingSoon"] = "sắp có",
         ["settings.btn.save"] = "Lưu cài đặt",
@@ -123,6 +128,8 @@ public static class I18nStrings
         ["home.label.window"] = "Window:",
         ["home.opt.pickWindow"] = "Pick a window…",
         ["home.label.quickDst"] = "Translate to:",
+        ["home.opt.monitorFormat"] = "Screen — Monitor {0}",
+        ["home.opt.windowFormat"] = "Window — {0} ({1})",
         ["home.status.startFailed"] = "Start failed: {0}",
         ["home.status.stopFailed"] = "Stop failed: {0}",
         ["nav.control"] = "Control",
@@ -134,6 +141,9 @@ public static class I18nStrings
         ["settings.label.src"] = "Source language:",
         ["settings.label.dst"] = "Target language:",
         ["settings.label.apiKey"] = "API key:",
+        ["settings.provider.google"] = "Google (web, no key needed)",
+        ["settings.provider.deepl"] = "DeepL",
+        ["settings.provider.llm"] = "LLM (OpenAI-compatible)",
         ["settings.opt.auto"] = "Auto",
         ["settings.opt.comingSoon"] = "coming soon",
         ["settings.btn.save"] = "Save settings",
@@ -147,4 +157,30 @@ public static class I18nStrings
         ["core.status.started"] = "Core: started",
         ["core.status.startFailed"] = "Core not found / failed to start: {0}",
     };
+
+    /// <summary>
+    /// Native display names for language codes, shown as-is instead of translated (spec §6.2).
+    /// Tên hiển thị native theo mã ngôn ngữ, hiển thị nguyên bản thay vì dịch (spec §6.2).
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, string> LanguageNames = new Dictionary<string, string>
+    {
+        ["vi"] = "Tiếng Việt",
+        ["en"] = "English",
+        ["ja"] = "日本語",
+        ["ko"] = "한국어",
+        ["zh"] = "中文",
+        ["ru"] = "Русский",
+        ["fr"] = "Français",
+        ["de"] = "Deutsch",
+        ["es"] = "Español",
+    };
+
+    /// <summary>
+    /// Resolves the display name for a language code, falling back to the raw code.
+    /// Truy xuất tên hiển thị của mã ngôn ngữ, mã chưa có trong bảng thì dùng nguyên mã.
+    /// </summary>
+    /// <param name="code">Language code such as "vi" or "ja". Mã ngôn ngữ, ví dụ "vi", "ja".</param>
+    /// <returns>The native name, or <paramref name="code"/> when the code is unknown.</returns>
+    public static string LanguageName(string code) =>
+        LanguageNames.TryGetValue(code, out string? name) ? name : code;
 }
