@@ -57,7 +57,7 @@ public class ServeM4IntegrationTests
     [Fact]
     public async Task Serve_PingStopListSources_Roundtrip_SkipEamWithoutExe()
     {
-if (CoreLocator.FindCoreExe() is not string coreExe)
+        if (CoreLocator.FindCoreExe() is not string coreExe)
         {
             SkipEnv("ReTran.Core.exe not built/RETRAN_CORE_EXE unset");
             return;
@@ -77,7 +77,7 @@ if (CoreLocator.FindCoreExe() is not string coreExe)
         {
             sources = await peer.CallAsync("core.list_sources", null);
         }
-catch (RpcException ex) when (ex.Code == RpcErrorCodes.InternalError)
+        catch (RpcException ex) when (ex.Code == RpcErrorCodes.InternalError)
         {
             SkipEnv($"core.list_sources returned -32603 (display/window enumeration failed): {ex.Message}");
             return;
@@ -112,7 +112,7 @@ catch (RpcException ex) when (ex.Code == RpcErrorCodes.InternalError)
     [Fact]
     public async Task Serve_StartWithBogusProvider_Rejects_SkipEamWithoutExe()
     {
-if (CoreLocator.FindCoreExe() is not string coreExe)
+        if (CoreLocator.FindCoreExe() is not string coreExe)
         {
             SkipEnv("ReTran.Core.exe not built/RETRAN_CORE_EXE unset");
             return;
@@ -133,7 +133,7 @@ if (CoreLocator.FindCoreExe() is not string coreExe)
     [Fact]
     public async Task Serve_Start_EmitsFrameTranslated_AndRequestsCache_SkipEam()
     {
-if (CoreLocator.FindCoreExe() is not string coreExe)
+        if (CoreLocator.FindCoreExe() is not string coreExe)
         {
             SkipEnv("ReTran.Core.exe not built/RETRAN_CORE_EXE unset");
             return;
@@ -151,22 +151,21 @@ if (CoreLocator.FindCoreExe() is not string coreExe)
                 ["translate"] = new JsonObject { ["provider"] = "google", ["src"] = "auto", ["dst"] = "vi" },
             });
         }
-catch (RpcException ex) when (ex.Code == RpcErrorCodes.InternalError)
+        catch (RpcException ex) when (ex.Code == RpcErrorCodes.InternalError)
         {
             SkipEnv($"core.start -32603 (no sidecar / capture source unavailable): {ex.Message}");
             return;
         }
 
-        // A start that answered without running:true is an environment skip; anything else is a
-        // contract failure and must fail below.
-        // Start trả về mà không running:true là skip môi trường; mọi trường hợp khác là vi phạm
-        // hợp đồng và phải fail ở dưới.
-Assert.True(started?["running"]?.GetValue<bool>() == true,
+        // A start that answered without running:true breaks the spec §3.1 contract — it is a hard
+        // assertion, not an environment skip.
+        // Start trả về mà không running:true là vi phạm hợp đồng spec §3.1 — assert cứng, không
+        // phải skip môi trường.
+        Assert.True(started?["running"]?.GetValue<bool>() == true,
             $"core.start returned {started?.ToJsonString() ?? "null"} instead of {{\"running\":true}}");
 
-
-FrameWaitResult first = await peer.WaitForFirstFrameAsync(FirstFrameTimeout);
-        if (first.Outcome == FrameWaitOutcome.PipelineStopped)
+        FrameWaitResult first = await peer.WaitForFirstFrameAsync(FirstFrameTimeout);
+        if (first.Outcome == FrameWaitOutcome.EnvironmentStopped)
         {
             SkipEnv(first.Detail);
             return;
@@ -184,7 +183,11 @@ FrameWaitResult first = await peer.WaitForFirstFrameAsync(FirstFrameTimeout);
         {
             JsonObject box = Assert.IsType<JsonObject>(node);
             string text = box["text"]!.GetValue<string>();
-            if (text.Length > 0) observedTexts.Add(text);
+            // Core drops whitespace-only texts (OcrDiff / TranslateCycleSink use IsNullOrWhiteSpace),
+            // so only texts that survive that filter can appear in the cache batch.
+            // Core loại text chỉ khoảng trắng (OcrDiff / TranslateCycleSink dùng IsNullOrWhiteSpace),
+            // nên chỉ text qua bộ lọc đó mới có thể xuất hiện trong lô cache.
+            if (!string.IsNullOrWhiteSpace(text)) observedTexts.Add(text);
             Assert.True(box.ContainsKey("translated")); // tường minh null khi chưa dịch (spec §3.3)
             foreach (string key in (string[])["x", "y", "w", "h"])
                 Assert.InRange(box[key]!.GetValue<double>(), 0d, 1d);
@@ -217,16 +220,20 @@ FrameWaitResult first = await peer.WaitForFirstFrameAsync(FirstFrameTimeout);
         // never blocks the tick).
         // Frame kế tiếp chứng minh reply cache không làm nghẽn loop (spec §4.1: dịch không bao giờ
         // block tick).
-FrameWaitResult next = await peer.WaitForNextFrameAsync(seq, NextFrameTimeout);
-        if (next.Outcome == FrameWaitOutcome.PipelineStopped)
+        FrameWaitResult next = await peer.WaitForNextFrameAsync(seq, NextFrameTimeout);
+        if (next.Outcome == FrameWaitOutcome.EnvironmentStopped)
         {
-            SkipEnv(next.Detail);
+            // The frame assertions above already ran, so this is a partial run: a neutral marker,
+            // not the SKIPPED (env) marker that means "asserted nothing".
+            // Các assert frame ở trên đã chạy, nên đây là lần chạy một phần: dùng marker trung tính,
+            // không dùng marker SKIPPED (env) vốn mang nghĩa "assert 0 lần".
+            _output.WriteLine($"ENV NOTE: {next.Detail}");
             return;
         }
         Assert.True(next.Outcome == FrameWaitOutcome.Received, next.Detail);
     }
 
-/// <summary>
+    /// <summary>
     /// Records an environment-driven early return through the output helper, so a run that asserted
     /// nothing still leaves a visible <c>SKIPPED (env): …</c> line in the test output.
     /// Ghi một nhánh early return vì môi trường qua output helper, để lần chạy assert 0 lần vẫn
@@ -234,7 +241,6 @@ FrameWaitResult next = await peer.WaitForNextFrameAsync(seq, NextFrameTimeout);
     /// </summary>
     /// <param name="reason">Why the environment cannot host this assertion. Vì sao môi trường không chạy được assertion này.</param>
     private void SkipEnv(string reason) => _output.WriteLine($"SKIPPED (env): {reason}");
-
 
     /// <summary>
     /// Reads a JSON node as a string, yielding an empty string when it is absent or not a string.
@@ -250,12 +256,23 @@ FrameWaitResult next = await peer.WaitForNextFrameAsync(seq, NextFrameTimeout);
         Received,
 
         /// <summary>
-        /// The pipeline reported <c>pipeline.state {running:false}</c> first — the environment
-        /// cannot produce frames (capture source died, sidecar gone). Skip, not a regression.
-        /// Pipeline báo <c>pipeline.state {running:false}</c> trước — môi trường không lấy được
-        /// frame. Skip, không phải regression.
+        /// The pipeline reported <c>pipeline.state {running:false}</c> with an environment reason
+        /// (<c>capture-error</c> / <c>sidecar-exited</c>) — the machine cannot produce frames.
+        /// Skip, not a regression.
+        /// Pipeline báo <c>pipeline.state {running:false}</c> với lý do môi trường
+        /// (<c>capture-error</c> / <c>sidecar-exited</c>) — máy không lấy được frame. Skip, không
+        /// phải regression.
         /// </summary>
-        PipelineStopped,
+        EnvironmentStopped,
+
+        /// <summary>
+        /// The pipeline reported <c>pipeline.state {running:false}</c> with <c>internal</c> or any
+        /// unknown reason — the loop died on its own, which is a crash, not an environment limit.
+        /// Must fail.
+        /// Pipeline báo <c>pipeline.state {running:false}</c> với <c>internal</c> hoặc lý do lạ —
+        /// loop tự chết, đây là crash chứ không phải giới hạn môi trường. Phải fail.
+        /// </summary>
+        PipelineCrashed,
 
         /// <summary>
         /// The bound elapsed with no frame and no stop signal — the pipeline is alive but not
@@ -317,14 +334,17 @@ FrameWaitResult next = await peer.WaitForNextFrameAsync(seq, NextFrameTimeout);
         }
 
         /// <summary>
-        /// Waits for the first <c>frame.translated</c>. Returns <see cref="FrameWaitOutcome.PipelineStopped"/>
-        /// when <c>pipeline.state {running:false}</c> arrives first (environment skip) and
-        /// <see cref="FrameWaitOutcome.TimedOut"/> when the bound elapses with the pipeline still alive
-        /// (real regression — the caller must fail).
-        /// Chờ <c>frame.translated</c> đầu tiên. Trả <see cref="FrameWaitOutcome.PipelineStopped"/> khi
-        /// <c>pipeline.state {running:false}</c> tới trước (skip môi trường) và
-        /// <see cref="FrameWaitOutcome.TimedOut"/> khi hết giờ mà pipeline vẫn sống (regression thật —
-        /// caller phải fail).
+        /// Waits for the first <c>frame.translated</c>. Returns
+        /// <see cref="FrameWaitOutcome.EnvironmentStopped"/> when <c>pipeline.state {running:false}</c>
+        /// arrives first with an environment reason, <see cref="FrameWaitOutcome.PipelineCrashed"/>
+        /// when it arrives with <c>internal</c>/unknown, and <see cref="FrameWaitOutcome.TimedOut"/>
+        /// when the bound elapses with the pipeline still alive — the last two are real regressions
+        /// the caller must fail on.
+        /// Chờ <c>frame.translated</c> đầu tiên. Trả
+        /// <see cref="FrameWaitOutcome.EnvironmentStopped"/> khi <c>pipeline.state {running:false}</c>
+        /// tới trước với lý do môi trường, <see cref="FrameWaitOutcome.PipelineCrashed"/> khi tới
+        /// với <c>internal</c>/lý do lạ, và <see cref="FrameWaitOutcome.TimedOut"/> khi hết giờ mà
+        /// pipeline vẫn sống — hai cái sau là regression thật, caller phải fail.
         /// </summary>
         public Task<FrameWaitResult> WaitForFirstFrameAsync(TimeSpan timeout) =>
             WaitForFrameAsync(timeout, null);
@@ -393,9 +413,20 @@ FrameWaitResult next = await peer.WaitForNextFrameAsync(seq, NextFrameTimeout);
                             && p?["running"] is JsonValue running && running.TryGetValue<bool>(out bool isRunning)
                             && !isRunning)
                         {
-                            return new FrameWaitResult(FrameWaitOutcome.PipelineStopped, null,
-                                $"pipeline.state {{running:false, reason:\"{ReadString(p["reason"])}\"}} before any frame "
-                                + "— the capture source or sidecar died in this environment");
+                            string reason = ReadString(p["reason"]);
+                            // Only a dead capture source or a dead sidecar is an environment limit;
+                            // reason "internal" (loop crashed on an exception) must fail the test.
+                            // Chỉ capture source chết hoặc sidecar chết mới là giới hạn môi trường;
+                            // reason "internal" (loop crash do exception) phải làm test fail.
+                            bool environment = reason is "capture-error" or "sidecar-exited";
+                            return new FrameWaitResult(
+                                environment ? FrameWaitOutcome.EnvironmentStopped : FrameWaitOutcome.PipelineCrashed,
+                                null,
+                                environment
+                                    ? $"pipeline.state {{running:false, reason:\"{reason}\"}} before any frame "
+                                      + "— the capture source or sidecar died in this environment"
+                                    : $"pipeline.state {{running:false, reason:\"{reason}\"}} before any frame "
+                                      + "— the pipeline loop died on its own (crash, not an environment limit)");
                         }
                         if (method != "frame.translated") continue;
                         if (afterSeq is null) return new FrameWaitResult(FrameWaitOutcome.Received, p, "");
@@ -474,4 +505,3 @@ FrameWaitResult next = await peer.WaitForNextFrameAsync(seq, NextFrameTimeout);
         }
     }
 }
-
