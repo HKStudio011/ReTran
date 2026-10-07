@@ -301,6 +301,200 @@ Get-CimInstance Win32_Processor; Get-CimInstance Win32_ComputerSystem; Get-CimIn
 
 ---
 
+## M4 translation (2026-10-07)
+
+### Máy đo
+
+| Thành phần | Giá trị | Nguồn |
+|---|---|---|
+| CPU | Intel Core i5-13400F, 10 cores / 16 logical processors | `Get-CimInstance Win32_Processor` |
+| RAM | 68.475.105.280 bytes (~63,8 GiB) | `Get-CimInstance Win32_ComputerSystem.TotalPhysicalMemory` |
+| GPU | NVIDIA GeForce RTX 5060 Ti — **không dùng trong measurement này** | `Get-CimInstance Win32_VideoController` |
+
+Backend giống M2/M3: `paddlepaddle` **CPU build** → VRAM 0. Không có GPU path trong M4 (chưa làm).
+
+**Nguồn capture dùng được để đo:** `--hwnd` (cửa sổ thật). `screen`/`monitor 0` **không** dùng được trên máy này — DXGI không frame nào (đúng lỗi HDR đã ghi ở M3): `core.start` vẫn trả `{"running":true}`, loop chết sau ~5 s với `pipeline.state {"running":false,"reason":"capture-error"}`. Vì vậy test integration `ServeM4IntegrationTests.Serve_Start_EmitsFrameTranslated_AndRequestsCache_SkipEam` (ghim `screen`/monitor 0 theo spec) **skip-êm trên máy này**; đường `frame.translated` + `translate.request_cache` được verify bằng probe `--hwnd` (bên dưới) và bằng chính test đó khi tạm trỏ sang nguồn cửa sổ.
+
+### Bối cảnh đo (background load)
+
+Máy **không idle** trong window đo (không tắt được process của user — measurement-only).
+
+| Timepoint | Machine CPU % (`Get-Counter '\Processor(_Total)\% Processor Time'`) |
+|---|---|
+| Trước khi bật pipeline (baseline) | 14,45 · 14,72 · 13,91 · 19,56 · 11,09 |
+| Trong lúc probe serve `--hwnd` (run 1) | 80,44 · 83,63 · 78,15 |
+| Trong lúc pipeline chạy từ UI App (App+Core+sidecar) | 86,35 · 85,28 · 83,92 |
+| Trong lúc App+Core idle (không pipeline) | 44,42 · 34,02 · 44,88 |
+| Sau khi dọn pipeline | 27,01 · 21,42 · 24,39 · 23,74 · 30,53 |
+
+→ Wall-clock latency dưới đây **bị kéo dài bởi contention** (coi như upper-bound-ish). Attribution CPU dùng **per-process** (`Get-Process .CPU` delta / wall) như M2/M3; `% 1 core` = delta/wall×100, `% 16 luồng` = delta/wall/16×100.
+
+### Số liệu — pipeline serve (`--hwnd`, cửa sổ thật), scripted stdio
+
+Probe: spawn `ReTran.Core.exe --serve`, `core.ping` → `core.start {source:{kind:"window",hwnd}, translate:{provider:"google",src:"auto",dst:"vi"}}`, trả lời `translate.request_cache` bằng all-miss như App sẽ làm, chạy ~90–99 s rồi `core.stop`. **Hai run độc lập** (R1, R2).
+
+| Metric | R1 | R2 |
+|---|---|---|
+| Spawn → `core.ping` → `"pong"` | **111,6 ms** | **99,6 ms** |
+| `core.start` → `{"running":true}` | 125,6 ms (tức thời) | 115,0 ms |
+| **`core.start` → `frame.translated` đầu tiên** | **13,07 s** | **12,87 s** |
+| Số frame trong cửa sổ đo | 12 (92,81 s) | 12 (99,06 s) |
+| fps đạt được (wall) | **0,129 fps** | **0,121 fps** |
+| Chu kỳ steady (frame 2→12) | median ~7,13 s · min 7,03 s · max 7,76 s (mean 7,24 s) | median ~7,96 s · min 7,12 s · max 8,15 s (mean 7,84 s) |
+| Boxes / frame | 31 (30 có text) | 31→33 (30→32 có text) |
+| `translate.request_cache` | **1 request** (27 text, lúc 13,116 s) | **2 request** (27 text lúc 12,913 s; 13 text lúc 43,538 s) |
+| `translate.put` | **0** | **0** |
+| `core.stop` round-trip | 39,3 ms | 44,5 ms |
+
+Đọc số trên:
+
+- **Diff-based hoạt động:** nội dung cửa sổ không đổi ⇒ **không** request cache nào thêm trong ~80 s tiếp theo (R1). R2 có request thứ 2 vì nội dung cửa sổ **thật sự đổi** giữa chừng (Notepad đổi CRLF→LF, tiêu đề tab đổi) → chỉ 13 text mới được tra, không re-tra 30 text cũ.
+- **Dịch không bao giờ block tick:** cả 27 text đều **dịch fail** (Google HTTP 429, xem dưới) nhưng chu kỳ vẫn đều ~7,1–7,8 s ⇒ `warn: translate failed ...` chỉ ghi stderr, tick không đứng. Đây là bằng chứng thực nghiệm cho spec §4.1/§4.2.
+- Frame đầu 12,9–13,1 s = cold OCR (init model + inference đầu). Sidecar không warm-up riêng; model đã cache (stderr: `Model files already exist. Using cached files.`).
+
+### Số liệu — CPU / RAM
+
+**A. Pipeline chạy, điều khiển từ UI App thật** (`Bắt đầu` trên trang Điều khiển; nguồn = cửa sổ `ReTran App (msedgewebview2.exe)`; sample **50,5 s** giữa lúc pipeline đang chạy; App khởi động với `PYTHONUTF8=1`, xem disclosure 5):
+
+| PID | Name | CPU Δ | % 1 core | % 16 luồng | RSS (MB) | Peak WS (MB) | Vai trò |
+|---|---|---|---|---|---|---|---|
+| 51984 | ReTran.App.exe | 0,36 CPU-s | 0,7% | **0,04%** | 220,9 | 221,7 | **App (UI + WebView + cache EF)** |
+| 38568 | ReTran.Core.exe | 2,19 CPU-s | 4,3% | **0,27%** | 102,7 | 156,3 | **Core (capture + PNG + RPC)** |
+| 21624 | python.exe | 0,00 CPU-s | 0,0% | 0,00% | 4,0 | 4,0 | sidecar parent proxy |
+| 18560 | python.exe | 484,39 CPU-s | 959,5% | **59,97%** | 346,5 | 532,7 | **sidecar worker (OCR)** |
+| — | **Tổng pipeline** | **486,94 CPU-s** | 964,5% | **60,28%** | **RSS sum 674,1** | **peak sum 914,7** | |
+
+**B. Pipeline chạy, scripted stdio, không có App** (probe R2; sample **50,6 s**):
+
+| PID | Name | CPU Δ | % 1 core | % 16 luồng | RSS (MB) | Peak WS (MB) |
+|---|---|---|---|---|---|---|
+| 46000 | ReTran.Core.exe | 3,66 CPU-s | 7,2% | 0,45% | 91,0 | 128,1 |
+| 48652 | python.exe | 0,00 CPU-s | 0,0% | 0,00% | 4,0 | 4,1 |
+| 2320 | python.exe | 441,94 CPU-s | 872,6% | 54,54% | 335,7 | 551,2 |
+| — | **Tổng** | **445,6 CPU-s** | 879,8% | **55,0%** | **RSS sum 430,7** | **peak sum 683,4** |
+
+**C. App + Core idle (Core đã spawn, sidecar đã lên, pipeline CHƯA start)** — sample **50,5 s**:
+
+| PID | Name | CPU Δ | % 1 core | RSS (MB) | Peak WS (MB) |
+|---|---|---|---|---|---|
+| 7764 | ReTran.App.exe | 0,08 CPU-s | 0,2% | 200,4 | 206,3 |
+| 6832 | ReTran.Core.exe | 0,00 CPU-s | 0,0% | 34,8 | 34,9 |
+| 33172 | python.exe (sidecar parent) | 0,00 CPU-s | 0,0% | 4,0 | 4,1 |
+| 5616 | python.exe (sidecar worker, chưa OCR) | 0,00 CPU-s | 0,0% | 31,6 | 31,7 |
+| — | **Tổng** | **0,08 CPU-s** | **0,2%** | **RSS sum 270,8** | **peak sum 277,0** |
+
+**D. Overlay/OBS feed (App đang chạy pipeline, `curl -N http://127.0.0.1:17863/events`)**:
+
+| Metric | Giá trị |
+|---|---|
+| Số event `data:` trong 45 s | 8 (2 event đầu = snapshot bắt kịp) |
+| Nhịp steady | 5,5–6,0 s / khung (median ~5,6 s ⇒ **~0,17 fps**) |
+| Kích thước payload | **2.550 byte/khung** (`{"boxes":[{x,y,w,h,t}...]}`, toạ độ đã normalize 0–1) |
+
+### Số liệu — latency dịch (Google)
+
+**Không đo được latency dịch thành công**: endpoint `translate.googleapis.com` trả **HTTP 429 (Too Many Requests)** cho mọi request từ IP máy này trong suốt phiên đo. `ReTran.Core translate "hello world" --dst vi --src en` ×10 (cách nhau 3 s): **10/10 exit 1**, đều in `translate failed: Google translate endpoint returned HTTP 429.` Wall **491,7 / 574,3 (median) / 595,6 (mean) / 733 ms** (10 giá trị: 574,3 · 491,7 · 733,0 · 666,2 · 578,5 · 523,8 · 661,1 · 691,6 · 540,2 · 495,1) — đây là **latency nhánh lỗi** (gồm spawn process), **không phải** latency dịch thành công.
+
+Hệ quả trực tiếp trên số đo: `translated` của mọi box là `null` (hiển thị text gốc — đúng nhánh fail của spec §7), `translate.put` = 0, cache DB không có dòng nào ⇒ **không đo được** chi phí "cache hit = 0 network call" và **không đo được** latency dịch thực.
+
+### E2E thật qua UI (không scripted)
+
+| Bước | Kết quả |
+|---|---|
+| Mở App → badge `Core: …` | Core child được spawn tự động, `ReTran.Core.exe` + sidecar python lên |
+| Trang Điều khiển render | Pipeline card (badge, dropdown Màn hình/Cửa sổ, `Làm mới danh sách`/`Bắt đầu`/`Dừng`), card Dịch, nav `Cài đặt` — tiếng Việt, đúng spec §6.1 |
+| `core.list_sources` → dropdown Cửa sổ | Liệt kê cửa sổ thật kèm process: `Cửa sổ — m4-perf-fixture.txt - Notepad (notepad.exe)`, `… ReTran App (msedgewebview2.exe)`, `… Chat - Unsloth - Brave (brave.exe)`, … |
+| Bấm `Bắt đầu` | badge → **● Đang chạy**; `frame.translated` về App; overlay SSE `/events` phát khung có text thật (`ReTran`, `Điều khiển`, …) |
+| Overlay/OBS | `GET http://127.0.0.1:17863/overlay` → HTTP 200; `GET /events` (SSE) → 8 khung/45 s, 2.550 B/khung |
+| Bấm `Dừng` | badge → **■ Đang dừng**; Core RSS 102,7 → 84 MB |
+| Trang Cài đặt + `Lưu cài đặt` | Ghi `%LOCALAPPDATA%\ReTran\settings.json` = `{"provider":"google","src":"auto","dst":"vi","apiKey":null}` |
+| Bấm `Bắt đầu` lại (phiên mới) | **không verify được** cache hit — cache rỗng vì Google 429 (xem "cần đo thật") |
+
+### Đối chiếu budget (AGENTS.md)
+
+| Budget row | Budget | Measured (M4) | Verdict |
+|---|---|---|---|
+| Capture CPU | < 2% CPU | Core tổng (capture + PNG + RPC) **4,3% của 1 core = 0,27% tổng 16 luồng** (UI-driven) / **7,2% 1 core = 0,45%** (scripted). Chưa tách được riêng phần capture | **provisional BREACH** nếu đọc budget theo %1 core (4,3–7,2% > 2%); **PASS** nếu theo %16 luồng. Cùng cách đọc như M3 (Core tổng, capture chưa tách) |
+| OCR throughput | ~3 fps (≤ ~333 ms/lượt) | steady **~7,1–8,0 s/lượt ⇒ 0,12–0,14 fps**; cold 12,9–13,1 s | **BREACH ~22–25×** (provisional — cùng nguyên nhân M3: paddle CPU build, contention nền 80–86%) |
+| OCR VRAM | < 1 GB | **0** (paddle CPU build) | **PASS** |
+| UI/overlay update | 10–15 fps | SSE overlay **~0,17 fps** nhưng **đây là nhịp bị giới hạn bởi OCR** (mỗi khung = 1 chu kỳ OCR), không phải giới hạn render; App CPU khi pipeline chạy chỉ 0,04% 16 luồng | **không kết luận** (thiếu số đo khi OCR nhanh — xem "cần đo thật") |
+| OBS export | ~10 fps | Cùng feed `/events`, payload 2.550 B/khung; chưa nối OBS thật | **N/A** (chưa có OBS Browser Source thật trong phiên đo) |
+| Translation | diff-based, không block pipeline, cache hit = 0 network call | diff-based **PASS** (1 request/27 text rồi im 80 s; nội dung đổi → chỉ 13 text mới). Không block **PASS** (27 dịch fail, tick vẫn ~7,1 s). **Cache hit chưa đo được** (Google 429) | **PASS một phần / chưa đo phần cache-hit** |
+| Tổng CPU (khi gaming+streaming) | < 8% | Pipeline chạy: **60,28% tổng 16 luồng** (App 0,04% · Core 0,27% · **sidecar worker 59,97%**). Idle (chưa start): **0,2% 1 core** | **BREACH** (do OCR CPU; App+Core tự thân chỉ 0,31% — cùng verdict M3) |
+| Tổng RAM | < 500 MB | Pipeline chạy: **RSS sum 674,1 MB** (App 220,9 · Core 102,7 · sidecar 350,5); **peak sum 914,7 MB**. Idle: RSS sum 270,8 MB / peak 277,0 MB | **BREACH khi chạy** (RSS + peak) / **PASS khi idle** (cùng caveat M2/M3: `peak_wset` theo tree không tách được từng tầng) |
+
+### Cần đo thật (placeholder — chưa có số ở M4)
+
+| # | Cần đo | Vì sao chưa có |
+|---|---|---|
+| 1 | Latency dịch Google **thành công** (p50/p95) | Endpoint trả **HTTP 429** từ IP máy này suốt phiên đo (10/10 lần, cả probe lẫn CLI) |
+| 2 | **Cache hit = 0 network call** (đo số request mạng khi bắt đầu lại phiên) | Cache DB rỗng vì (1) ⇒ không có dòng nào để hit |
+| 3 | Budget CPU/RAM **khi gaming + streaming thật** (game + OBS) | Phiên đo không có game/OBS; chỉ có cửa sổ văn phòng. Số ở đây là **provisional** |
+| 4 | **OCR trên GPU** (VRAM < 1 GB, ~3 fps) | `paddlepaddle` trên máy này là **CPU build** (`is_compiled_with_cuda() → False`); chưa cài bản GPU |
+| 5 | Nguồn `screen` / full-screen capture | DXGI không frame nào trên máy này (lỗi HDR, xem M3) ⇒ mọi số capture đo bằng nguồn `window` |
+| 6 | `frame.translated` ở tần 10–15 fps | Tần khung bị chi phối bởi OCR (~7 s/lượt); cần máy có GPU OCR để đo nhịp thật của tầng UI/overlay |
+
+### Ghi chú / hạn chế đo (đọc trước khi dùng số)
+
+1. **Background 78–86% CPU** suốt window pipeline (bảng Bối cảnh) → wall-clock = upper-bound-ish; verdict throughput/CPU **provisional**. Baseline *trước* khi bật pipeline chỉ 11–19,6%, phần chênh còn lại là tiến trình khác của user + chính pipeline.
+2. **Google 429 là blocker của số đo M4** — mọi nhánh "dịch thành công / cache hit" đều không đo được. Nhánh fail đo rất tốt (không block tick).
+3. **Hai hệ capture khác nhau** cho hai bảng số: probe scripted dùng cửa sổ Notepad 1161×714 (27–33 box), UI-driven dùng cửa sổ App 1424×635 (~2.550 B/khung). Không so chéo tuyệt đối giữa hai bảng.
+4. **Sidecar là 2 process** (parent proxy ~4 MB + worker làm OCR) — footprint đo cả tree như M2/M3; `peak_wset` sum theo tree không tách được peak từng tầng.
+5. **`PYTHONUTF8=1` là workaround env, không sửa code:** sidecar in ra stdout bằng cp1252 và **crash** (`UnicodeEncodeError: '≡'`) khi OCR đọc được ký tự ngoài cp1252 (icon hamburger `≡` của Notepad, hoặc text tiếng Việt). Đã tái hiện: chạy pipeline cửa sổ Notepad từ UI App **không** set env → badge **"Lỗi core: sidecar-exited"**; set `PYTHONUTF8=1` rồi chạy lại → chạy bình thường, khung về đều. Đây là **bug thật còn tồn tại** (M2 note 4 / M3 note 2), chưa fix trong production ⇒ cần fix encoding stdout của sidecar (hoặc ép UTF-8 trong `SidecarProcess`).
+6. **Test integration chính skip-êm trên máy này:** `Serve_Start_EmitsFrameTranslated_AndRequestsCache_SkipEam` ghim `screen`/monitor 0 nên không có frame nào để assert (xem mục nguồn capture). Đường assert đó **đã** verify bằng 2 mutation trên bản test tạm trỏ nguồn cửa sổ: (a) đổi `seq` trong `frame.translated` thành string → test FAIL tại parse `seq`; (b) cho `JsonRpcCacheChannel.LookupAsync` bỏ request `translate.request_cache` → test FAIL tại `Assert.NotEmpty(CacheLookups)`. Cả 2 mutation đã revert.
+7. **Số CPU ghi bằng `Get-Process .CPU` delta** (tổng CPU-seconds của process) thay vì `psutil.cpu_percent` của M3 — ít nhạy contention hơn, nhưng là giá trị trung bình cửa sổ 50 s, không phải mẫu tức thời.
+8. **Cleanup sau đo:** App, Core, sidecar, Notepad đã đóng hết (0 tiến trình ReTran còn lại).
+
+### Lệnh reproduce
+
+```powershell
+# --- 0. Build + fixture cửa sổ thật
+dotnet build "ReTran Project.slnx"
+Set-Content "$env:TEMP\m4-perf-fixture.txt" -Value @(
+  'RETRAN M4 PERF FIXTURE'
+  'The quick brown fox jumps over the lazy dog.'
+  'Hello world, this is a translation pipeline test.'
+  'Overlay annotation line three.'
+)
+Start-Process notepad "$env:TEMP\m4-perf-fixture.txt"
+$hwnd = '0x{0:X}' -f (Get-Process notepad | Select-Object -First 1).MainWindowHandle   # session-specific, derive lại
+
+# --- 1. Bối cảnh: background CPU (confounder)
+$s = (Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 2 -MaxSamples 5).CounterSamples | ForEach-Object { $_.CookedValue }
+"bg CPU: $($s -join ', ') %"
+
+# --- 2. Latency CLI `translate` (Google) x10
+$exe = "ReTran.Core\bin\Debug\net10.0-windows\ReTran.Core.exe"
+1..10 | ForEach-Object { $sw=[Diagnostics.Stopwatch]::StartNew(); & $exe translate "hello world" --dst vi --src en; $sw.Stop(); "$([math]::Round($sw.Elapsed.TotalMilliseconds,1)) ms" ; Start-Sleep 3 }
+
+# --- 3. Pipeline serve scripted (probe tương đương %TEMP%\m4-perf-serve.ps1 trong báo cáo task)
+#     spawn --serve, core.ping, core.start {source:{kind:"window",hwnd},translate:{provider:"google",src:"auto",dst:"vi"}},
+#     reply translate.request_cache = {hits:{},misses:[texts]}, ghi timestamp mọi frame/request/put, cuối cùng core.stop.
+#     $env:PYTHONUTF8 = '1'   # BẮT BUỘC — xem ghi chú 5
+#     => ping ~100 ms · core.start→frame đầu ~12,9-13,1 s · chu kỳ ~7,1-8,0 s · 0-2 request cache
+
+# --- 4. CPU/RAM khi pipeline chạy (per-process, 50 s)
+#     m4-perf-cpu.ps1: Get-CimInstance Win32_Process lọc ReTran.Core.exe + python.exe có cmdline 'retran_core',
+#     Get-Process .CPU / WorkingSet64 / PeakWorkingSet64 trước & sau 50 s
+Get-Process ReTran.Core, python -ErrorAction SilentlyContinue | Select-Object Id, ProcessName, CPU, WorkingSet64, PeakWorkingSet64
+
+# --- 5. E2E qua UI thật (App phải chạy với PYTHONUTF8=1, xem ghi chú 5)
+$env:PYTHONUTF8 = '1'
+Start-Process "ReTran.App\bin\Debug\net10.0-windows10.0.19041.0\win-x64\ReTran.App.exe"
+# trang Điều khiển: chọn nguồn (Màn hình / Cửa sổ) -> Bắt đầu -> badge "● Đang chạy" -> Dừng -> badge "■ Đang dừng"
+# overlay/OBS feed:
+curl.exe -sN --max-time 45 http://127.0.0.1:17863/events    # SSE {"boxes":[{x,y,w,h,t}...]}
+Invoke-WebRequest http://127.0.0.1:17863/overlay -UseBasicParsing | Select-Object StatusCode
+# trang Cài đặt -> Lưu cài đặt -> kiểm tra file:
+Get-Content "$env:LOCALAPPDATA\ReTran\settings.json"
+# dọn: Stop-Process ReTran.App, ReTran.Core, notepad + python sidecar
+
+# --- Machine info
+Get-CimInstance Win32_Processor; Get-CimInstance Win32_ComputerSystem; Get-CimInstance Win32_VideoController
+```
+
+---
+
 ## M1 capture baseline
 
 (chưa đo — ghi tại milestone có capture loop chạy thật)
