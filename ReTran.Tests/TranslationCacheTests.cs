@@ -105,12 +105,45 @@ public class TranslationCacheTests : IDisposable
             new[] { ("hello", "こんにちは") }, CancellationToken.None);
         await cache.PutAsync("notepad.exe", "en", "vi",
             new[] { ("world", "thế giới") }, CancellationToken.None);
+        // Same (Context, Text, Dst) but different Src is a different cache key.
+        await cache.PutAsync("notepad.exe", "ja", "vi",
+            new[] { ("hello", "こんにちは") }, CancellationToken.None);
 
-        Assert.Equal(4, await db.Translations.CountAsync());
+        Assert.Equal(5, await db.Translations.CountAsync());
 
         CacheLookupResult result = await cache.LookupAsync("chrome.exe", "en", "vi",
             new[] { "hello" }, CancellationToken.None);
         Assert.Equal("chào", result.Hits["hello"]);
+
+        CacheLookupResult jaSrc = await cache.LookupAsync("notepad.exe", "ja", "vi",
+            new[] { "hello" }, CancellationToken.None);
+        Assert.Equal("こんにちは", jaSrc.Hits["hello"]);
+    }
+
+    [Fact]
+    public async Task Put_DuplicateKey_Throws_DbUpdateException()
+    {
+        await using var db = new RetranDbContext(_options);
+        await using Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction tx =
+            await db.Database.BeginTransactionAsync();
+
+        static TranslationEntry MakeRow() => new()
+        {
+            Context = "notepad.exe",
+            Text = "hello",
+            Src = "en",
+            Dst = "vi",
+            Translated = "xin chào",
+            CreatedAtUtc = DateTime.UtcNow,
+        };
+
+        // Bypass PutAsync's upsert: two raw rows with the same (Context, Text, Src, Dst)
+        // must be rejected by the unique index.
+        db.Translations.Add(MakeRow());
+        db.Translations.Add(MakeRow());
+        await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
+
+        await tx.RollbackAsync();
     }
 
     [Fact]
