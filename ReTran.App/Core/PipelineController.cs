@@ -1,0 +1,360 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using Microsoft.Extensions.Logging;
+using ReTran_App.Services;
+
+namespace ReTran_App.Core;
+
+/// <summary>
+/// Capture source chosen by the user for one pipeline session.
+/// Nguồn capture do người dùng chọn cho một phiên pipeline.
+/// </summary>
+/// <param name="UseWindow">True to capture a window, false to capture a monitor. True để capture cửa sổ, false để capture màn hình.</param>
+/// <param name="Monitor">Zero-based monitor index used when <paramref name="UseWindow"/> is false. Chỉ số màn hình (bắt đầu từ 0) dùng khi <paramref name="UseWindow"/> là false.</param>
+/// <param name="HwndHex">Window handle as a hex string (<c>0x…</c>) used when <paramref name="UseWindow"/> is true. Handle cửa sổ dạng chuỗi hex (<c>0x…</c>) dùng khi <paramref name="UseWindow"/> là true.</param>
+public sealed record SourceSelection(bool UseWindow, int Monitor, string? HwndHex);
+
+/// <summary>
+/// One display monitor offered as a capture source. Một màn hình được liệt kê làm nguồn capture.
+/// </summary>
+/// <param name="Id">Zero-based monitor index. Chỉ số màn hình (bắt đầu từ 0).</param>
+/// <param name="Name">Human-readable monitor name. Tên hiển thị của màn hình.</param>
+public sealed record MonitorInfo(int Id, string Name);
+
+/// <summary>
+/// One capturable top-level window. Một cửa sổ cấp cao có thể capture.
+/// </summary>
+/// <param name="Hwnd">Window handle as a hex string (<c>0x…</c>). Handle cửa sổ dạng chuỗi hex (<c>0x…</c>).</param>
+/// <param name="Title">Window title. Tiêu đề cửa sổ.</param>
+/// <param name="Process">Owning process file name. Tên tệp tiến trình sở hữu.</param>
+public sealed record WindowInfo(string Hwnd, string Title, string Process);
+
+/// <summary>
+/// App-side orchestrator over <see cref="ICorePeer"/>: starts/stops the Core pipeline
+/// (<c>core.start</c>/<c>core.stop</c>/<c>core.list_sources</c>), answers Core's cache
+/// requests from the SQLite translation cache, and turns Core notifications into
+/// <see cref="OverlayState"/> frames and <see cref="PipelineStateChanged"/>.
+/// Bộ điều phối phía App trên <see cref="ICorePeer"/>: start/dừng pipeline của Core
+/// (<c>core.start</c>/<c>core.stop</c>/<c>core.list_sources</c>), trả lời yêu cầu cache của Core
+/// từ cache dịch thuật SQLite, và biến thông báo của Core thành khung <see cref="OverlayState"/>
+/// cùng <see cref="PipelineStateChanged"/>.
+/// </summary>
+public sealed class PipelineController
+{
+    private readonly ICorePeer _peer;
+    private readonly AppSettingsService _settings;
+    private readonly TranslationCache _cache;
+    private readonly OverlayState _overlay;
+    private readonly ILogger<PipelineController> _log;
+    private readonly SemaphoreSlim _cacheGate = new(1, 1);
+    private bool _handlersWired;
+
+    /// <summary>
+    /// Creates a controller bound to the given peer, settings store, cache and overlay.
+    /// Tạo bộ điều phối gắn với peer, kho cài đặt, cache và overlay đã cho.
+    /// </summary>
+    /// <param name="peer">Core connection used for every RPC. Kết nối Core dùng cho mọi RPC.</param>
+    /// <param name="settings">Settings store read on every start. Kho cài đặt đọc mỗi lần start.</param>
+    /// <param name="cache">Translation cache backing <c>translate.request_cache</c>/<c>translate.put</c>. Cache dịch thuật chống lưng <c>translate.request_cache</c>/<c>translate.put</c>.</param>
+    /// <param name="overlay">Overlay state published from <c>frame.translated</c>. Trạng thái overlay được xuất bản từ <c>frame.translated</c>.</param>
+    /// <param name="log">Logger for best-effort failures. Logger cho các lỗi best-effort.</param>
+    /// <exception cref="ArgumentNullException">Thrown when any reference parameter is null. Ném khi tham số tham chiếu nào đó là null.</exception>
+    public PipelineController(
+        ICorePeer peer,
+        AppSettingsService settings,
+        TranslationCache cache,
+        OverlayState overlay,
+        ILogger<PipelineController> log)
+    {
+        _peer = peer ?? throw new ArgumentNullException(nameof(peer));
+        _settings = settings ?? throw new ArgumentNullException(nameof(settings));
+        _cache = cache ?? throw new ArgumentNullException(nameof(cache));
+        _overlay = overlay ?? throw new ArgumentNullException(nameof(overlay));
+        _log = log ?? throw new ArgumentNullException(nameof(log));
+    }
+
+    /// <summary>
+    /// Raised when Core pushes <c>pipeline.state</c> after the loop stops unexpectedly
+    /// (sidecar died, capture error, internal error). Start/stop results do not raise it.
+    /// Ném lên khi Core đẩy <c>pipeline.state</c> sau khi loop dừng đột xuất (sidecar chết, lỗi
+    /// capture, lỗi nội bộ). Kết quả start/dừng bình thường không kích hoạt event này.
+    /// </summary>
+    /// <param name="running">Whether the pipeline is still running. Pipeline còn đang chạy hay không.</param>
+    /// <param name="reason">Short stop reason code (e.g. <c>sidecar-exited</c>), or <see langword="null"/>. Mã lý do dừng ngắn (ví dụ <c>sidecar-exited</c>), hoặc <see langword="null"/>.</param>
+    public event Action<bool, string?>? PipelineStateChanged;
+
+    /// <summary>
+    /// Ensures the core is running, wires the Core→App handlers once, then sends
+    /// <c>core.start</c> built from the persisted settings (via <see cref="AppSettingsService.Load"/>)
+    /// and the given source. <c>ocrFps</c>/<c>captureFps</c> are omitted so Core applies its defaults.
+    /// Đảm bảo core đang chạy, gắn handler Core→App một lần, rồi gửi <c>core.start</c> dựng từ
+    /// cài đặt đã lưu (qua <see cref="AppSettingsService.Load"/>) và nguồn đã cho. <c>ocrFps</c>/
+    /// <c>captureFps</c> được bỏ qua để Core dùng mặc định của nó.
+    /// </summary>
+    /// <param name="source">Capture source for the session. Nguồn capture cho phiên.</param>
+    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <returns>A task that completes once Core acknowledges the start. Task hoàn tất khi Core xác nhận start.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="source"/> is null. Ném khi <paramref name="source"/> là null.</exception>
+    /// <exception cref="RpcException">
+    /// Propagated unchanged from Core for invalid params, unknown provider or a session already
+    /// running, so the UI can show the exact error. Được đẩy ra nguyên vẹn từ Core khi tham số
+    /// sai, provider lạ hoặc phiên đang chạy, để UI hiển thị lỗi chính xác.
+    /// </exception>
+    public async Task StartAsync(SourceSelection source, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
+        EnsureHandlersWired();
+
+        AppSettings settings = _settings.Load();
+        var @params = new JsonObject
+        {
+            ["source"] = source.UseWindow
+                ? new JsonObject { ["kind"] = "window", ["hwnd"] = source.HwndHex ?? string.Empty }
+                : new JsonObject { ["kind"] = "screen", ["monitor"] = source.Monitor },
+            ["translate"] = new JsonObject
+            {
+                ["provider"] = settings.Provider,
+                ["src"] = settings.Src,
+                ["dst"] = settings.Dst,
+            },
+        };
+        await _peer.CallAsync("core.start", @params, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sends <c>core.stop</c> to end the current session; Core treats it as idempotent.
+    /// Gửi <c>core.stop</c> để kết thúc phiên hiện tại; Core coi lệnh này là idempotent.
+    /// </summary>
+    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <returns>A task that completes once Core acknowledges the stop. Task hoàn tất khi Core xác nhận dừng.</returns>
+    public async Task StopAsync(CancellationToken ct)
+    {
+        await _peer.CallAsync("core.stop", null, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Ensures the core is running, wires the Core→App handlers once, then asks Core for the
+    /// capturable monitors and windows (<c>core.list_sources</c>).
+    /// Đảm bảo core đang chạy, gắn handler Core→App một lần, rồi hỏi Core về các màn hình và
+    /// cửa sổ có thể capture (<c>core.list_sources</c>).
+    /// </summary>
+    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <returns>The monitors and windows reported by Core. Các màn hình và cửa sổ do Core báo lại.</returns>
+    public async Task<(IReadOnlyList<MonitorInfo> Monitors, IReadOnlyList<WindowInfo> Windows)> ListSourcesAsync(
+        CancellationToken ct)
+    {
+        await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
+        EnsureHandlersWired();
+
+        JsonNode? result = await _peer.CallAsync("core.list_sources", null, ct).ConfigureAwait(false);
+        var monitors = new List<MonitorInfo>();
+        var windows = new List<WindowInfo>();
+        if (result?["monitors"] is JsonArray monitorArray)
+        {
+            foreach (JsonNode? node in monitorArray)
+            {
+                if (node is JsonObject monitor)
+                {
+                    monitors.Add(new MonitorInfo(
+                        ReadInt(monitor, "id", -1),
+                        ReadString(monitor, "name")));
+                }
+            }
+        }
+        if (result?["windows"] is JsonArray windowArray)
+        {
+            foreach (JsonNode? node in windowArray)
+            {
+                if (node is JsonObject window)
+                {
+                    windows.Add(new WindowInfo(
+                        ReadString(window, "hwnd"),
+                        ReadString(window, "title"),
+                        ReadString(window, "process")));
+                }
+            }
+        }
+        return (monitors, windows);
+    }
+
+    private async Task EnsureCoreStartedAsync(CancellationToken ct)
+    {
+        if (!_peer.IsStarted) await _peer.StartCoreAsync(ct).ConfigureAwait(false);
+    }
+
+    private void EnsureHandlersWired()
+    {
+        if (_handlersWired) return;
+        _peer.SetRequestHandler(HandleRequestAsync);
+        _peer.NotificationReceived += HandleNotification;
+        _peer.HandlerError += HandlePeerHandlerError;
+        _handlersWired = true;
+    }
+
+    private void HandlePeerHandlerError(Exception ex)
+        => _log.LogWarning(ex, "Core->App message handler failed.");
+
+    private async Task<JsonNode?> HandleRequestAsync(string method, JsonNode? @params)
+    {
+        if (method != "translate.request_cache")
+        {
+            throw new InvalidOperationException($"Unsupported request from core: {method}");
+        }
+        if (@params is not JsonObject p)
+        {
+            throw new InvalidOperationException("translate.request_cache params must be an object.");
+        }
+
+        string context = ReadString(p, "context");
+        string src = ReadString(p, "src");
+        string dst = ReadString(p, "dst");
+        var texts = new List<string>();
+        if (p["texts"] is JsonArray textArray)
+        {
+            foreach (JsonNode? node in textArray)
+            {
+                if (node is JsonValue value && value.GetValueKind() == JsonValueKind.String)
+                {
+                    texts.Add(value.GetValue<string>());
+                }
+            }
+        }
+
+        await _cacheGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            CacheLookupResult result =
+                await _cache.LookupAsync(context, src, dst, texts, CancellationToken.None).ConfigureAwait(false);
+            var hits = new JsonObject();
+            foreach ((string text, string translated) in result.Hits) hits[text] = translated;
+            var misses = new JsonArray();
+            foreach (string text in result.Misses) misses.Add(text);
+            return new JsonObject { ["hits"] = hits, ["misses"] = misses };
+        }
+        finally
+        {
+            _cacheGate.Release();
+        }
+    }
+
+    private void HandleNotification(string method, JsonNode? @params)
+    {
+        switch (method)
+        {
+            case "frame.translated":
+                HandleFrameTranslated(@params);
+                break;
+            case "pipeline.state":
+                HandlePipelineState(@params);
+                break;
+            case "translate.put":
+                HandleTranslatePut(@params);
+                break;
+        }
+    }
+
+    private void HandleFrameTranslated(JsonNode? @params)
+    {
+        if (@params is not JsonObject p) return;
+        var boxes = new List<OverlayBox>();
+        if (p["boxes"] is JsonArray boxArray)
+        {
+            foreach (JsonNode? node in boxArray)
+            {
+                if (node is not JsonObject box) continue;
+                string text = ReadString(box, "text");
+                string translated = ReadString(box, "translated", text);
+                boxes.Add(new OverlayBox(
+                    ReadDouble(box, "x"),
+                    ReadDouble(box, "y"),
+                    ReadDouble(box, "w"),
+                    ReadDouble(box, "h"),
+                    text,
+                    translated));
+            }
+        }
+        _overlay.Publish(new OverlayFrame(
+            ReadInt(p, "w"),
+            ReadInt(p, "h"),
+            DateTime.UtcNow,
+            boxes));
+    }
+
+    private void HandlePipelineState(JsonNode? @params)
+    {
+        if (@params is not JsonObject p) return;
+        bool running = p["running"] is JsonValue value && value.GetValueKind() == JsonValueKind.True;
+        string? reason = p["reason"] is JsonValue reasonValue
+            && reasonValue.GetValueKind() == JsonValueKind.String
+            ? reasonValue.GetValue<string>()
+            : null;
+        PipelineStateChanged?.Invoke(running, reason);
+    }
+
+    private void HandleTranslatePut(JsonNode? @params)
+    {
+        if (@params is not JsonObject p)
+        {
+            _log.LogWarning("translate.put ignored: params must be an object.");
+            return;
+        }
+
+        string context = ReadString(p, "context");
+        string src = ReadString(p, "src");
+        string dst = ReadString(p, "dst");
+        var entries = new List<(string Text, string Translated)>();
+        if (p["entries"] is JsonArray entryArray)
+        {
+            foreach (JsonNode? node in entryArray)
+            {
+                if (node is not JsonObject entry) continue;
+                string text = ReadString(entry, "text");
+                if (text.Length == 0) continue;
+                entries.Add((text, ReadString(entry, "translated")));
+            }
+        }
+
+        _ = PutAsync(context, src, dst, entries);
+    }
+
+    private async Task PutAsync(
+        string context, string src, string dst, IReadOnlyList<(string Text, string Translated)> entries)
+    {
+        try
+        {
+            await _cacheGate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                await _cache.PutAsync(context, src, dst, entries, CancellationToken.None).ConfigureAwait(false);
+            }
+            finally
+            {
+                _cacheGate.Release();
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "translate.put failed; the cache write was skipped.");
+        }
+    }
+
+    private static string ReadString(JsonObject o, string key, string fallback = "")
+        => o[key] is JsonValue value && value.GetValueKind() == JsonValueKind.String
+            ? value.GetValue<string>() ?? fallback
+            : fallback;
+
+    private static int ReadInt(JsonObject o, string key, int fallback = 0)
+        => o[key] is JsonValue value
+            && value.GetValueKind() == JsonValueKind.Number
+            && value.TryGetValue<int>(out int parsed)
+            ? parsed
+            : fallback;
+
+    private static double ReadDouble(JsonObject o, string key, double fallback = 0)
+        => o[key] is JsonValue value
+            && value.GetValueKind() == JsonValueKind.Number
+            && value.TryGetValue<double>(out double parsed)
+            ? parsed
+            : fallback;
+}

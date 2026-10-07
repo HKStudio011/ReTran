@@ -6,7 +6,7 @@ namespace ReTran_App
 {
     public partial class MainPage : ContentPage
     {
-        private CoreProcessClient? _core;
+        private ICorePeer? _core;
         // Overlay feed server: single DI instance serving the DI OverlayState to OBS.
         // Started once with the app window, disposed on exit. DemoFeed itself is
         // started/stopped only by the control page buttons, never here.
@@ -95,13 +95,11 @@ namespace ReTran_App
 
         private async void OnStartCoreClicked(object? sender, EventArgs e)
         {
-            if (_core is not null) return;
+            _core ??= IPlatformApplication.Current?.Services?.GetService(typeof(ICorePeer)) as ICorePeer;
+            if (_core is null || _core.IsStarted) return;
             try
             {
-                string exe = CoreLocator.FindCoreExe()
-                    ?? throw new FileNotFoundException("ReTran.Core.exe not found. Build it first or set RETRAN_CORE_EXE.");
-                _core = new CoreProcessClient();
-                await _core.StartAsync(exe, CancellationToken.None);
+                await _core.StartCoreAsync(CancellationToken.None);
                 SetStatus("started");
                 PingButton.IsEnabled = true;
                 StopButton.IsEnabled = true;
@@ -116,10 +114,10 @@ namespace ReTran_App
 
         private async void OnPingClicked(object? sender, EventArgs e)
         {
-            if (_core is null) return;
+            if (_core is not { IsStarted: true }) return;
             try
             {
-                var result = await _core.PingAsync(CancellationToken.None);
+                var result = await _core.CallAsync("core.ping", null, CancellationToken.None);
                 SetStatus("raw", $"Ping: {result}");
             }
             catch (Exception ex)
@@ -130,9 +128,9 @@ namespace ReTran_App
 
         private async void OnStopClicked(object? sender, EventArgs e)
         {
-            if (_core is null) return;
-            await _core.DisposeAsync();
-            _core = null;
+            if (_core is not { IsStarted: true }) return;
+            // Dispose the DI singleton; the next start (page or pipeline) re-launches the core.
+            if (_core is IAsyncDisposable disposable) await disposable.DisposeAsync();
             SetStatus("stopped");
             PingButton.IsEnabled = false;
             StopButton.IsEnabled = false;
@@ -142,10 +140,9 @@ namespace ReTran_App
         protected override void OnDisappearing()
         {
             base.OnDisappearing();
-            if (_core is not null)
+            if (_core is IAsyncDisposable disposable)
             {
-                _core.DisposeAsync().AsTask().GetAwaiter().GetResult();
-                _core = null;
+                disposable.DisposeAsync().AsTask().GetAwaiter().GetResult();
             }
             if (_feedServer is not null)
             {

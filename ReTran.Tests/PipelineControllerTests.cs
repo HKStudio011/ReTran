@@ -1,0 +1,237 @@
+using System.Text.Json.Nodes;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
+using ReTran_App.Core;
+using ReTran_App.Data;
+using ReTran_App.Services;
+
+public class PipelineControllerTests : IDisposable
+{
+    private readonly string _dbPath;
+    private readonly string _settingsPath;
+    private readonly DbContextOptions<RetranDbContext> _options;
+    private RetranDbContext? _controllerDb;
+
+    public PipelineControllerTests()
+    {
+        _dbPath = Path.Combine(Path.GetTempPath(), $"retran-pipeline-{Guid.NewGuid():N}.db");
+        _settingsPath = Path.Combine(Path.GetTempPath(), $"retran-pipeline-{Guid.NewGuid():N}.json");
+        _options = new DbContextOptionsBuilder<RetranDbContext>()
+            .UseSqlite($"Data Source={_dbPath};Pooling=False")
+            .Options;
+        using var db = new RetranDbContext(_options);
+        db.Database.Migrate();
+    }
+
+    public void Dispose()
+    {
+        _controllerDb?.Dispose();
+        foreach (string path in new[] { _dbPath, _settingsPath })
+        {
+            foreach (string suffix in new[] { "", "-wal", "-shm" })
+            {
+                try { File.Delete(path + suffix); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
+    }
+
+    private PipelineController CreateController(FakeCorePeer peer, OverlayState overlay)
+    {
+        _controllerDb = new RetranDbContext(_options);
+        return new PipelineController(
+            peer,
+            new AppSettingsService(_settingsPath),
+            new TranslationCache(_controllerDb),
+            overlay,
+            NullLogger<PipelineController>.Instance);
+    }
+
+    [Fact]
+    public async Task Start_BuildsCoreStartParams_FromSettingsAndSelection()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        new AppSettingsService(_settingsPath).Save(new AppSettings("google", "auto", "vi", null));
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 1, HwndHex: null),
+            CancellationToken.None);
+
+        (string Method, JsonNode? Params) call = Assert.Single(peer.Calls);
+        Assert.Equal("core.start", call.Method);
+        Assert.NotNull(call.Params);
+        Assert.Null(peer.CallsAtStartCore); // core already running — no auto-start needed
+
+        JsonObject source = call.Params!["source"]!.AsObject();
+        Assert.Equal("screen", source["kind"]!.GetValue<string>());
+        Assert.Equal(1, source["monitor"]!.GetValue<int>());
+
+        JsonObject translate = call.Params!["translate"]!.AsObject();
+        Assert.Equal("google", translate["provider"]!.GetValue<string>());
+        Assert.Equal("auto", translate["src"]!.GetValue<string>());
+        Assert.Equal("vi", translate["dst"]!.GetValue<string>());
+
+        Assert.Null(call.Params["ocrFps"]);
+        Assert.Null(call.Params["captureFps"]);
+    }
+
+    [Fact]
+    public async Task Start_CoreNotRunning_AutoStartsFirst()
+    {
+        var peer = new FakeCorePeer { IsStarted = false };
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+
+        Assert.True(peer.StartCoreCalled);
+        Assert.True(peer.IsStarted);
+        Assert.Equal(0, peer.CallsAtStartCore); // StartCoreAsync ran before the first CallAsync
+        Assert.Equal("core.start", Assert.Single(peer.Calls).Method);
+    }
+
+    [Fact]
+    public async Task FrameTranslated_Notification_PublishesOverlay()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        var overlay = new OverlayState();
+        PipelineController controller = CreateController(peer, overlay);
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+
+        peer.RaiseNotification("frame.translated", new JsonObject
+        {
+            ["seq"] = 1,
+            ["w"] = 1920,
+            ["h"] = 1080,
+            ["boxes"] = new JsonArray(
+                new JsonObject
+                {
+                    ["x"] = 0.10, ["y"] = 0.20, ["w"] = 0.30, ["h"] = 0.05,
+                    ["text"] = "HELLO", ["translated"] = "Xin chào",
+                },
+                new JsonObject
+                {
+                    ["x"] = 0.50, ["y"] = 0.60, ["w"] = 0.20, ["h"] = 0.10,
+                    ["text"] = "PENDING", ["translated"] = null,
+                }),
+        });
+
+        OverlayFrame? frame = overlay.Latest;
+        Assert.NotNull(frame);
+        Assert.Equal(1920, frame!.FrameWidth);
+        Assert.Equal(1080, frame.FrameHeight);
+        Assert.Equal(2, frame.Boxes.Count);
+        Assert.Equal("HELLO", frame.Boxes[0].Text);
+        Assert.Equal("Xin chào", frame.Boxes[0].Translated);
+        // translated:null keeps the source text so UI/OBS always have something to show.
+        Assert.Equal("PENDING", frame.Boxes[1].Translated);
+    }
+
+    [Fact]
+    public async Task PipelineState_Notification_RaisesEvent()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        PipelineController controller = CreateController(peer, new OverlayState());
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+
+        bool? running = null;
+        string? reason = "not-raised";
+        controller.PipelineStateChanged += (r, arg) => { running = r; reason = arg; };
+
+        peer.RaiseNotification("pipeline.state", new JsonObject
+        {
+            ["running"] = false,
+            ["reason"] = "sidecar-exited",
+        });
+
+        Assert.False(running);
+        Assert.Equal("sidecar-exited", reason);
+    }
+
+    [Fact]
+    public async Task Put_Notification_WritesCacheUpert()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        PipelineController controller = CreateController(peer, new OverlayState());
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+
+        peer.RaiseNotification("translate.put", new JsonObject
+        {
+            ["context"] = "screen:0",
+            ["src"] = "auto",
+            ["dst"] = "vi",
+            ["entries"] = new JsonArray(
+                new JsonObject { ["text"] = "HELLO", ["translated"] = "Xin chào" }),
+        });
+
+        // translate.put writes fire-and-forget — poll until the row lands in the temp DB.
+        DateTime deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline)
+        {
+            try
+            {
+                if (await _controllerDb!.Translations
+                        .AnyAsync(e => e.Context == "screen:0" && e.Text == "HELLO"))
+                {
+                    break;
+                }
+            }
+            catch (SqliteException ex) when (ex.SqliteErrorCode is 5 or 6) // BUSY/LOCKED vs. the concurrent writer
+            {
+            }
+            await Task.Delay(50);
+        }
+
+        TranslationEntry row = await _controllerDb!.Translations.SingleAsync(e => e.Text == "HELLO");
+        Assert.Equal("Xin chào", row.Translated);
+        Assert.Equal("auto", row.Src);
+        Assert.Equal("vi", row.Dst);
+    }
+
+    private sealed class FakeCorePeer : ICorePeer
+    {
+        public bool IsStarted { get; set; }
+        public bool StartCoreCalled { get; private set; }
+        public int? CallsAtStartCore { get; private set; }
+        public List<(string Method, JsonNode? Params)> Calls { get; } = new();
+        public Func<string, JsonNode?, Task<JsonNode?>>? RequestHandler { get; private set; }
+
+        public event Action<string, JsonNode?>? NotificationReceived;
+        public event Action<Exception>? HandlerError;
+
+        public Task StartCoreAsync(CancellationToken ct)
+        {
+            StartCoreCalled = true;
+            CallsAtStartCore = Calls.Count;
+            IsStarted = true;
+            return Task.CompletedTask;
+        }
+
+        public Task<JsonNode?> CallAsync(string method, JsonNode? @params, CancellationToken ct)
+        {
+            Calls.Add((method, @params));
+            JsonNode? result = method == "core.start"
+                ? new JsonObject { ["running"] = true }
+                : new JsonObject { ["running"] = false };
+            return Task.FromResult<JsonNode?>(result);
+        }
+
+        public void SetRequestHandler(Func<string, JsonNode?, Task<JsonNode?>> handler)
+            => RequestHandler = handler;
+
+        public void RaiseNotification(string method, JsonNode? @params)
+            => NotificationReceived?.Invoke(method, @params);
+
+        public void RaiseHandlerError(Exception ex) => HandlerError?.Invoke(ex);
+    }
+}
