@@ -367,6 +367,6 @@ public class JsonRpcClientTests
         var pending = (System.Collections.IDictionary)typeof(JsonRpcClient)
             .GetField("_pending", BindingFlags.NonPublic | BindingFlags.Instance)!
             .GetValue(client)!;
-        Assert.Equal(0, pending.Count);
+        Assert.Empty(pending);
     }
 }
