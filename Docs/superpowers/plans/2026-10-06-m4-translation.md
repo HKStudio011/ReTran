@@ -29,7 +29,7 @@
 - New publics: bilingual `///` docs (EN câu đầu, VI ngay sau); comment `//` trong code theo style file.
 - Tests: skip-êm bằng early return (không `Assert.Skip`, không fail vì môi trường); không `Console.WriteLine` trong test body; test command: `dotnet test "ReTran.Tests/ReTran.Tests.csproj" -f net10.0-windows10.0.19041.0`.
 - Commit: đúng message từng task, 1 commit/task, stage đúng file của task.
-- Test-count baseline: **C# 79, Python 15** (M4 không đụng Python). Count theo `dotnet test` **Total** (mỗi `[InlineData]` của Theory tính 1 case riêng). Targets: T1 81 · T2 85 · T3 90 · T4 98 · T5 106 · T6 118 · T7 122 · T8 128 · T9 133 · T10 140 · T11 146 · T12 149. (T5 +1 so với bản gốc: fix round 2 thêm test lookup treo.)
+- Test-count baseline: **C# 79, Python 15** (M4 không đụng Python). Count theo `dotnet test` **Total** (mỗi `[InlineData]` của Theory tính 1 case riêng). Targets: T1 81 · T2 85 · T3 90 · T4 98 · T5 106 · T6 118 · T7 122 · T8 131 · T9 136 · T10 143 · T11 149 · T12 152. (T5 +1 so với bản gốc: fix round 2 thêm test lookup treo.)
 - Out of scope (spec §10): DeepL/LLM/local provider, game hook, obs-websocket, dịch lại giữa phiên đang chạy, retry/backoff Google.
 
 ## Review Focus
@@ -748,7 +748,7 @@ public class TranslateCliTests
 
 - [ ] **Step 3: Implement** — thêm `_writeLock` (mọi outbound), `_pending`/`_nextId` (đã có `_pending`; id đã string), phân nhánh ReadLoop: (a) có `result`/`error` + id → pending như hiện tại; (b) có `method` + `id` → request → handler → ghi response; (c) có `method`, không id → notification → event. Log exception handler qua `HandlerError` (không nuốt im lặng, không Console.WriteLine).
 
-- [ ] **Step 4: Chạy verify PASS** — **128** test cases (test `JsonRpcServerTests`/App khác không vỡ).
+- [ ] **Step 4: Chạy verify PASS** — **131** test cases (test `JsonRpcServerTests`/App khác không vỡ).
 
 - [ ] **Step 5: Commit** — `feat(app): JsonRpcClient 3 nhánh (response/request/notification) + write-lock`
 
@@ -795,7 +795,7 @@ public class TranslationCacheTests : IDisposable
   - `LookupAsync`: `texts` rỗng → kết quả rỗng ngay; query `Contains` 1 lần; trả hits dict + misses (giữ thứ tự input).
   - `PutAsync`: upsert an toàn (EF: attach theo key + update, hoặc query trước trong transaction).
 
-- [ ] **Step 4: Chạy verify PASS** — **133** test cases; confirm file migration xuất hiện trong `ReTran.App/Migrations/`.
+- [ ] **Step 4: Chạy verify PASS** — **136** test cases; confirm file migration xuất hiện trong `ReTran.App/Migrations/`.
 
 - [ ] **Step 5: Commit** — `feat(app): EF Core translation cache (unique key context+text+src+dst) + migration`
 
@@ -855,7 +855,7 @@ public class PipelineControllerTests
   - `MainPage`: resolve `ICorePeer` từ `IPlatformApplication.Current.Services` thay `new CoreProcessClient()`; `OnStopClicked` gọi `DisposeAsync` của singleton như hiện tại (Start ở Home sẽ auto-restart).
   - Đăng ký handler: làm trong `PipelineController` **lần đầu** `StartAsync`/`ListSourcesAsync` gọi (peer đã started) — idempotent (`_handlersWired` flag).
 
-- [ ] **Step 4: Chạy verify PASS** — **140** test cases; `dotnet build "ReTran Project.slnx"` clean.
+- [ ] **Step 4: Chạy verify PASS** — **143** test cases; `dotnet build "ReTran Project.slnx"` clean.
 
 - [ ] **Step 5: Commit** — `feat(app): AppSettings + PipelineController (core.start/stop, frame.translated→overlay) + DI + drain stderr`
 
@@ -902,7 +902,7 @@ public class SettingsPageTests
   - `NavMenu.razor`: NavLink thứ 2 `href="settings"` icon `&#9881;`.
   - I18nStrings: thêm đủ keys trên, song ngữ, không quên cập nhật 2 chuỗi cũ.
 
-- [ ] **Step 4: Chạy verify PASS** — **146** test cases; `dotnet build "ReTran Project.slnx"` clean; `npm run build` trong `ReTran.App/vite-project` không liên quan (không đụng TS).
+- [ ] **Step 4: Chạy verify PASS** — **149** test cases; `dotnet build "ReTran Project.slnx"` clean; `npm run build` trong `ReTran.App/vite-project` không liên quan (không đụng TS).
 
 - [ ] **Step 5: Commit** — `feat(app): trang Cài đặt + Start/Stop pipeline trên trang điều khiển (i18n vi/en)`
 
@@ -937,7 +937,7 @@ public class SettingsPageTests
 // core.start trả -32603 (thiếu sidecar/máy không có capture) -> early return (skip-êm)
 ```
 
-- [ ] **Step 2: Chạy verify PASS** — **149** test cases (môi trường thiếu exe → skip-êm, không fail).
+- [ ] **Step 2: Chạy verify PASS** — **152** test cases (môi trường thiếu exe → skip-êm, không fail).
 
 - [ ] **Step 3: E2E manual + đo perf (chạy thật, ghi số)**
 
@@ -960,4 +960,4 @@ Checklist (chạy trên máy user, có game/cửa sổ thật):
 - **Box contract đã verify thay spec "bước 0":** `Spot.box` = quad **pixel** (`engine.py:14`) → `SpotGeometry.NormalizeQuad` (T4) — không còn mục chờ verify.
 - **Type consistency:** `CacheLookupResult` định nghĩa 2 bên (Core T5 / App T9) cùng shape — deliberate (không tham chiếu chéo biên App/Core); `NotifyAsync` khớp `IJsonRpcNotifier` T2 ↔ sink T5 ↔ host T6; `SourceSelection` T10 ↔ Home T11.
 - **Proportion:** plan không viết body code ngoài đoạn algorithm thật sự (normalize quad, background chain T5) — phần còn lại là signature + tên test + assertion.
-- **Review pass 2 (2026-10-06):** đã fix inline — thêm `**Spec:**` ở header · ghim box payload `{x,y,w,h,text,translated}` (spec §3.3) · T2 design `FakeTransport` mở rộng + sửa test race (chạy read loop trước khi inject) · T5 viết lại test block thành code C# hợp lệ (+`WhenIdleAsync`, bỏ `sinkEmit_next`/`StderrRef`) · T7 test cụ thể qua `OcrTestSupport.RunDispatcherAsync` (4 test) · T12 thêm test E2E `core.start → frame.translated + translate.request_cache` (spec §9) → counts mới (pass 3, đếm lại theo brief test code + `dotnet test` Total): T3 90 · T4 98 · T5 105 · T6 113 · T7 117 · T8 123 · T9 128 · T10 135 · T11 141 · T12 144. Fix round 2 T5 (reviewer Important #1: hard-bound lookup 2s + test lookup treo) → counts T5 106 · T6 118 · T7 122 · T8 128 · T9 133 · T10 140 · T11 146 · T12 149. Fix round T6 (reviewer Important: +4 tests cover stop-silent/exactly-once/source-fail/fps-default + sửa doc JsonRpcCacheChannel) → T6 118 · T7 122 · T8 128 · T9 133 · T10 140 · T11 146 · T12 149.
+- **Review pass 2 (2026-10-06):** đã fix inline — thêm `**Spec:**` ở header · ghim box payload `{x,y,w,h,text,translated}` (spec §3.3) · T2 design `FakeTransport` mở rộng + sửa test race (chạy read loop trước khi inject) · T5 viết lại test block thành code C# hợp lệ (+`WhenIdleAsync`, bỏ `sinkEmit_next`/`StderrRef`) · T7 test cụ thể qua `OcrTestSupport.RunDispatcherAsync` (4 test) · T12 thêm test E2E `core.start → frame.translated + translate.request_cache` (spec §9) → counts mới (pass 3, đếm lại theo brief test code + `dotnet test` Total): T3 90 · T4 98 · T5 105 · T6 113 · T7 117 · T8 123 · T9 128 · T10 135 · T11 141 · T12 144. Fix round 2 T5 (reviewer Important #1: hard-bound lookup 2s + test lookup treo) → counts T5 106 · T6 118 · T7 122 · T8 128 · T9 133 · T10 140 · T11 146 · T12 149. Fix round T6 (reviewer Important: +4 tests cover stop-silent/exactly-once/source-fail/fps-default + sửa doc JsonRpcCacheChannel) → T6 118 · T7 122 · T8 128 · T9 133 · T10 140 · T11 146 · T12 149. Fix round T8 (reviewer Important: FailAllPending EOF/dispose + dọn pending khi write fail; +3 tests) → T8 131 · T9 136 · T10 143 · T11 149 · T12 152.
