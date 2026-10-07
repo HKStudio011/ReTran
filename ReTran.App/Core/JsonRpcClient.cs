@@ -80,8 +80,16 @@ public sealed class JsonRpcClient : IAsyncDisposable
         };
         string line = request.ToJsonString();
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _cts.Token);
-        await WriteLineAsync(line, linked.Token);
-        return await tcs.Task.WaitAsync(ct);
+        try
+        {
+            await WriteLineAsync(line, linked.Token);
+            return await tcs.Task.WaitAsync(ct);
+        }
+        catch
+        {
+            lock (_pendingGate) _pending.Remove(id);
+            throw;
+        }
     }
 
     private async Task ReadLoopAsync()
@@ -129,9 +137,10 @@ public sealed class JsonRpcClient : IAsyncDisposable
             }
         }
         catch (OperationCanceledException) { /* shutting down */ }
-        catch (Exception)
+        catch (Exception) { /* stream closed/disposed — peer went away */ }
+        finally
         {
-            // Stream closed/disposed — peer went away; fail any outstanding calls instead of hanging.
+            // Every exit path (EOF, cancel on dispose, error) must complete outstanding calls instead of hanging.
             FailAllPending();
         }
     }

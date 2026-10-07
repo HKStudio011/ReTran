@@ -1,4 +1,5 @@
 using System.IO.Pipes;
+using System.Reflection;
 using System.Text;
 using System.Text.Json.Nodes;
 using ReTran_App.Core;
@@ -81,20 +82,27 @@ public class JsonRpcClientTests
     /// <summary>
     /// In-memory reader that blocks until a line is enqueued, so tests control exactly when the
     /// client's read loop sees each message (StringReader would race: pre-fed lines can be consumed
-    /// before CallAsync registers its pending id).
+    /// before CallAsync registers its pending id). <see cref="Complete"/> signals clean EOF.
     /// Reader trong bộ nhớ chặn cho tới khi một dòng được nạp vào, để test kiểm soát chính xác
     /// thời điểm vòng lặp đọc của client thấy từng tin (StringReader sẽ race: dòng nạp sẵn có thể
-    /// bị tiêu thụ trước khi CallAsync đăng ký id pending).
+    /// bị tiêu thụ trước khi CallAsync đăng ký id pending). <see cref="Complete"/> báo EOF sạch.
     /// </summary>
     private sealed class BlockingTextReader : TextReader
     {
         private readonly Queue<string> _lines = new();
         private readonly SemaphoreSlim _signal = new(0);
         private readonly object _gate = new();
+        private bool _eof;
 
         public void Enqueue(string line)
         {
             lock (_gate) _lines.Enqueue(line);
+            _signal.Release();
+        }
+
+        public void Complete()
+        {
+            lock (_gate) _eof = true;
             _signal.Release();
         }
 
@@ -105,6 +113,7 @@ public class JsonRpcClientTests
                 lock (_gate)
                 {
                     if (_lines.Count > 0) return _lines.Dequeue();
+                    if (_eof) return null;
                 }
                 await _signal.WaitAsync(cancellationToken);
             }
@@ -162,6 +171,18 @@ public class JsonRpcClientTests
                 await Task.Delay(10);
             }
         }
+    }
+
+    /// <summary>
+    /// Writer that fails every write, simulating a broken pipe to the peer process.
+    /// Bộ nhớ ghi luôn thất bại, mô phỏng pipe hỏng tới tiến trình đối tác.
+    /// </summary>
+    private sealed class FailingWriter : TextWriter
+    {
+        public override Encoding Encoding => Encoding.UTF8;
+
+        public override Task WriteAsync(ReadOnlyMemory<char> buffer, CancellationToken cancellationToken = default)
+            => throw new IOException("pipe broken");
     }
 
     [Fact]
@@ -298,5 +319,54 @@ public class JsonRpcClientTests
         JsonNode?[] results = await Task.WhenAll(call1, call2);
         Assert.All(results, r => Assert.Equal("ok", r!.GetValue<string>()));
         Assert.Equal(2, output.Lines.Count);
+    }
+
+    [Fact]
+    public async Task ReadLoop_Eof_CompletesPendingCalls()
+    {
+        var input = new BlockingTextReader();
+        var output = new RecordingWriter();
+        await using var client = new JsonRpcClient(input, output);
+
+        Task<JsonNode?> call = client.CallAsync("core.ping", null, CancellationToken.None);
+        await output.WaitForLinesAsync(1);
+
+        input.Complete();
+
+        await Assert.ThrowsAsync<TaskCanceledException>(
+            () => call.WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
+    public async Task ReadLoop_Dispose_CompletesPendingCalls()
+    {
+        var input = new BlockingTextReader();
+        var output = new RecordingWriter();
+        await using var client = new JsonRpcClient(input, output);
+
+        Task<JsonNode?> call = client.CallAsync("core.ping", null, CancellationToken.None);
+        await output.WaitForLinesAsync(1);
+
+        await client.DisposeAsync();
+
+        await Assert.ThrowsAsync<TaskCanceledException>(
+            () => call.WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
+    public async Task CallAsync_WriteFailure_RemovesPendingEntry()
+    {
+        var input = new BlockingTextReader();
+        var output = new FailingWriter();
+        await using var client = new JsonRpcClient(input, output);
+
+        IOException ex = await Assert.ThrowsAsync<IOException>(
+            () => client.CallAsync("core.ping", null, CancellationToken.None));
+        Assert.Equal("pipe broken", ex.Message);
+
+        var pending = (System.Collections.IDictionary)typeof(JsonRpcClient)
+            .GetField("_pending", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(client)!;
+        Assert.Equal(0, pending.Count);
     }
 }
