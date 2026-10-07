@@ -47,6 +47,8 @@ public sealed class PipelineController
     private readonly OverlayState _overlay;
     private readonly ILogger<PipelineController> _log;
     private readonly SemaphoreSlim _cacheGate = new(1, 1);
+    // Giữ handler trong bounds của read-loop: gate wait + lookup tối đa 2 s rồi coi hết là miss.
+    private static readonly TimeSpan CacheLookupTimeout = TimeSpan.FromSeconds(2);
     private bool _handlersWired;
 
     /// <summary>
@@ -134,10 +136,14 @@ public sealed class PipelineController
     }
 
     /// <summary>
-    /// Ensures the core is running, wires the Core→App handlers once, then asks Core for the
-    /// capturable monitors and windows (<c>core.list_sources</c>).
-    /// Đảm bảo core đang chạy, gắn handler Core→App một lần, rồi hỏi Core về các màn hình và
-    /// cửa sổ có thể capture (<c>core.list_sources</c>).
+    /// Ensures the core <b>process</b> is running (spawning it when needed — this starts the
+    /// process only, never the pipeline: <c>core.start</c> is sent exclusively by
+    /// <see cref="StartAsync"/> on the user's command), wires the Core→App handlers once, then
+    /// asks Core for the capturable monitors and windows (<c>core.list_sources</c>).
+    /// Đảm bảo <b>tiến trình</b> core đang chạy (tự khởi tạo nếu cần — method này chỉ khởi động
+    /// tiến trình, KHÔNG khởi động pipeline: <c>core.start</c> chỉ do <see cref="StartAsync"/> gửi
+    /// khi người dùng bấm), gắn handler Core→App một lần, rồi hỏi Core về các màn hình và cửa sổ
+    /// có thể capture (<c>core.list_sources</c>).
     /// </summary>
     /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
     /// <returns>The monitors and windows reported by Core. Các màn hình và cửa sổ do Core báo lại.</returns>
@@ -221,21 +227,47 @@ public sealed class PipelineController
             }
         }
 
-        await _cacheGate.WaitAsync().ConfigureAwait(false);
+        using var timeoutCts = new CancellationTokenSource(CacheLookupTimeout);
+        try
+        {
+            await _cacheGate.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            _log.LogWarning(
+                "translate.request_cache could not take the cache gate within {Timeout}; returning every text as a miss.",
+                CacheLookupTimeout);
+            return AllMisses(texts);
+        }
+
         try
         {
             CacheLookupResult result =
-                await _cache.LookupAsync(context, src, dst, texts, CancellationToken.None).ConfigureAwait(false);
+                await _cache.LookupAsync(context, src, dst, texts, timeoutCts.Token).ConfigureAwait(false);
             var hits = new JsonObject();
             foreach ((string text, string translated) in result.Hits) hits[text] = translated;
             var misses = new JsonArray();
             foreach (string text in result.Misses) misses.Add(text);
             return new JsonObject { ["hits"] = hits, ["misses"] = misses };
         }
+        catch (OperationCanceledException)
+        {
+            _log.LogWarning(
+                "translate.request_cache gave up after {Timeout}; returning every text as a miss.",
+                CacheLookupTimeout);
+            return AllMisses(texts);
+        }
         finally
         {
             _cacheGate.Release();
         }
+    }
+
+    private static JsonNode AllMisses(IReadOnlyList<string> texts)
+    {
+        var misses = new JsonArray();
+        foreach (string text in texts) misses.Add(text);
+        return new JsonObject { ["hits"] = new JsonObject(), ["misses"] = misses };
     }
 
     private void HandleNotification(string method, JsonNode? @params)

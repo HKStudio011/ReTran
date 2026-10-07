@@ -24,6 +24,8 @@ namespace ReTran_App
         protected override async void OnAppearing()
         {
             base.OnAppearing();
+            // Home có thể đã tự spawn core (list_sources) trong khi label vẫn hiển thị "stopped" cũ.
+            SyncCoreStatus();
             if (_feedServerStarted) return;
             _feedServerStarted = true;
 
@@ -93,17 +95,30 @@ namespace ReTran_App
             };
         }
 
+        // Đồng bộ label + nút với IsStarted thật của singleton ICorePeer (nguồn sự thật).
+        private void SyncCoreStatus()
+        {
+            _core ??= IPlatformApplication.Current?.Services?.GetService(typeof(ICorePeer)) as ICorePeer;
+            bool started = _core?.IsStarted == true;
+            SetStatus(started ? "started" : "stopped");
+            PingButton.IsEnabled = started;
+            StopButton.IsEnabled = started;
+            StartCoreButton.IsEnabled = !started;
+        }
+
         private async void OnStartCoreClicked(object? sender, EventArgs e)
         {
             _core ??= IPlatformApplication.Current?.Services?.GetService(typeof(ICorePeer)) as ICorePeer;
-            if (_core is null || _core.IsStarted) return;
+            if (_core is null) return;
+            if (_core.IsStarted)
+            {
+                SyncCoreStatus(); // core đã chạy (vd Home list_sources) → refresh UI, không spawn lại
+                return;
+            }
             try
             {
                 await _core.StartCoreAsync(CancellationToken.None);
-                SetStatus("started");
-                PingButton.IsEnabled = true;
-                StopButton.IsEnabled = true;
-                StartCoreButton.IsEnabled = false;
+                SyncCoreStatus();
             }
             catch (Exception ex)
             {
@@ -131,10 +146,7 @@ namespace ReTran_App
             if (_core is not { IsStarted: true }) return;
             // Dispose the DI singleton; the next start (page or pipeline) re-launches the core.
             if (_core is IAsyncDisposable disposable) await disposable.DisposeAsync();
-            SetStatus("stopped");
-            PingButton.IsEnabled = false;
-            StopButton.IsEnabled = false;
-            StartCoreButton.IsEnabled = true;
+            SyncCoreStatus();
         }
 
         protected override void OnDisappearing()
