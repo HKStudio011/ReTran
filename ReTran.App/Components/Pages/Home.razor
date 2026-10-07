@@ -1,8 +1,12 @@
 ﻿@page "/"
+@using ReTran_App.Core
+@using ReTran_App.Services
 @inject ReTran_App.Core.OverlayState State
 @inject ReTran_App.Services.OverlayFeedServer FeedServer
 @inject ReTran_App.Services.JsInteropService Js
 @inject ReTran_App.Services.I18nService L
+@inject ReTran_App.Services.AppSettingsService Settings
+@inject ReTran_App.Core.PipelineController Pipeline
 @inject IJSRuntime JS
 @implements IDisposable
 
@@ -13,35 +17,63 @@
 </div>
 
 <div class="space-y-4">
-    <Card Title="@(L["home.card.capture"])">
+    <Card Title="@(L["home.card.pipeline"])">
+        <div class="flex items-center gap-3 flex-wrap">
+            <span class="px-2 py-1 rounded border text-sm font-medium @(BadgeClass)">@BadgeSymbol @BadgeText</span>
+            @if (_pipelineError is not null)
+            {
+                <span class="text-sm text-danger">@_pipelineError</span>
+            }
+        </div>
+
         <label class="flex flex-col gap-1.5 text-sm text-surface">
-            @(L["home.label.source"])
-            <select @bind="_source" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
-                <option value="screen:0">@(L["home.opt.screen0"])</option>
-                <option value="screen:1">@(L["home.opt.screen1"])</option>
-                <option value="window">@(L["home.opt.window"])</option>
+            @(L["home.label.screen"])
+            <select @bind="_monitorId" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
+                @if (_monitors.Count == 0)
+                {
+                    <option value="">…</option>
+                }
+                else
+                {
+                    @foreach (MonitorInfo m in _monitors)
+                    {
+                        <option value="@m.Id">@m.Name</option>
+                    }
+                }
             </select>
         </label>
-        @if (_source == "window")
-        {
-            <label class="flex flex-col gap-1.5 text-sm text-surface">
-                @(L["home.label.hwnd"])
-                <input @bind="_hwnd" placeholder="@(L["home.hwnd.placeholder"])" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary" />
-            </label>
-        }
+
+        <label class="flex flex-col gap-1.5 text-sm text-surface">
+            @(L["home.label.window"])
+            <select @bind="_windowHwnd" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
+                <option value="">@(L["home.opt.pickWindow"])</option>
+                @foreach (WindowInfo w in _windows)
+                {
+                    <option value="@w.Hwnd">@w.Title (@w.Process)</option>
+                }
+            </select>
+        </label>
+
+        <div class="flex gap-2 flex-wrap">
+            <button class="btn btn-outline-secondary" @onclick="RefreshSources">@(L["home.btn.refreshSources"])</button>
+            <button class="btn btn-primary" @onclick="StartPipelineAsync">@(L["home.btn.start"])</button>
+            <button class="btn btn-outline-secondary" @onclick="StopPipelineAsync">@(L["home.btn.stop"])</button>
+        </div>
+
         <p class="text-sm text-secondary">@(L["home.note.capture"])</p>
     </Card>
 
     <Card Title="@(L["home.card.translation"])">
         <label class="flex flex-col gap-1.5 text-sm text-surface">
-            @(L["home.label.provider"])
-            <select @bind="_provider" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
-                <option>Google</option>
-                <option>DeepL</option>
-                <option>Local</option>
-                <option>LLM</option>
+            @(L["home.label.quickDst"])
+            <select @bind="_quickDst" @bind:after="SaveQuickDst" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
+                @foreach (string lang in _dstOptions)
+                {
+                    <option value="@lang">@lang</option>
+                }
             </select>
         </label>
+        <p class="text-sm text-secondary">@(L["settings.note.srcNextStart"])</p>
     </Card>
 
     <Card Title="Demo pipeline">
@@ -94,9 +126,17 @@
 </div>
 
 @code {
-    private string _source = "screen:0";
-    private string _hwnd = string.Empty;
-    private string _provider = "Google";
+    private static readonly string[] DefaultDstOptions = ["vi", "en", "ja", "ko", "zh", "ru", "fr", "de", "es"];
+
+    private IReadOnlyList<MonitorInfo> _monitors = Array.Empty<MonitorInfo>();
+    private IReadOnlyList<WindowInfo> _windows = Array.Empty<WindowInfo>();
+    private string _monitorId = "0";
+    private string _windowHwnd = string.Empty;
+    private string _quickDst = "vi";
+    private string[] _dstOptions = DefaultDstOptions;
+    private string _pipelineState = "stopped"; // "stopped" | "running" | "coreError"
+    private string? _coreReason;
+    private string? _pipelineError;
     private ReTran_App.Core.DemoFeed? _feed;
     private bool _running;
     private string? _copyState;      // "copied" | "failed" | null
@@ -104,6 +144,23 @@
     private string? _themeStateValue;
 
     private string ObsUrl => $"http://127.0.0.1:{FeedServer.Port}/overlay";
+
+    private string BadgeSymbol => _pipelineState == "running" ? "●" : "■";
+
+    // Trạng thái tính từ _pipelineState + L → tự đổi ngôn ngữ khi L.Changed.
+    private string BadgeText => _pipelineState switch
+    {
+        "running" => L["home.status.running"],
+        "coreError" => L.Fmt("home.status.coreError", _coreReason ?? string.Empty),
+        _ => L["home.status.stopped"],
+    };
+
+    private string BadgeClass => _pipelineState switch
+    {
+        "running" => "text-primary",
+        "coreError" => "text-danger",
+        _ => "text-secondary",
+    };
 
     // Trạng thái tính từ state + L → tự đổi ngôn ngữ khi L.Changed.
     private string StatusText => _running
@@ -132,6 +189,12 @@
     protected override void OnInitialized()
     {
         L.Changed += OnLangChanged;
+        Pipeline.PipelineStateChanged += OnPipelineStateChanged;
+        AppSettings current = Settings.Load();
+        _quickDst = current.Dst;
+        // File ghi tay có thể chứa dst ngoài danh sách — thêm vào để select không bị trống.
+        if (Array.IndexOf(_dstOptions, _quickDst) < 0) _dstOptions = [_quickDst, .. _dstOptions];
+        _ = LoadSourcesAsync();
         base.OnInitialized();
     }
 
@@ -162,6 +225,85 @@
         {
             // JS/storage unavailable → keep the OS-culture default.
             // Không đọc được JS/storage → giữ mặc định theo culture OS.
+        }
+    }
+
+    // Nạp danh sách màn hình/cửa sổ từ Core; lỗi → giữ placeholder, không crash UI.
+    private async Task LoadSourcesAsync()
+    {
+        try
+        {
+            (IReadOnlyList<MonitorInfo> monitors, IReadOnlyList<WindowInfo> windows) =
+                await Pipeline.ListSourcesAsync(CancellationToken.None);
+            _monitors = monitors;
+            _windows = windows;
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception)
+        {
+            // Core chưa sẵn sàng → dropdown giữ placeholder, bấm Làm mới thử lại sau.
+        }
+    }
+
+    private void RefreshSources() => _ = LoadSourcesAsync();
+
+    private SourceSelection BuildSelection() => !string.IsNullOrEmpty(_windowHwnd)
+        ? new SourceSelection(UseWindow: true, Monitor: 0, HwndHex: _windowHwnd)
+        : new SourceSelection(
+            UseWindow: false,
+            Monitor: int.TryParse(_monitorId, out int monitor) ? monitor : 0,
+            HwndHex: null);
+
+    private async Task StartPipelineAsync()
+    {
+        if (_running) StopDemo(); // tránh 2 nguồn publish cùng OverlayState (plan M4)
+        _pipelineError = null;
+        try
+        {
+            await Pipeline.StartAsync(BuildSelection(), CancellationToken.None);
+            _pipelineState = "running";
+            _coreReason = null;
+        }
+        catch (Exception ex)
+        {
+            _pipelineError = L.Fmt("home.status.startFailed", ex.Message);
+        }
+    }
+
+    private async Task StopPipelineAsync()
+    {
+        _pipelineError = null;
+        try
+        {
+            await Pipeline.StopAsync(CancellationToken.None);
+            _pipelineState = "stopped";
+            _coreReason = null;
+        }
+        catch (Exception ex) // core chưa start → ICorePeer.CallAsync ném InvalidOperationException
+        {
+            _pipelineError = L.Fmt("home.status.stopFailed", ex.Message);
+        }
+    }
+
+    // PipelineStateChanged nổ trên read-loop thread của peer → marshal về renderer trước khi re-render.
+    private void OnPipelineStateChanged(bool running, string? reason) =>
+        _ = InvokeAsync(() =>
+        {
+            _pipelineState = running ? "running" : reason is null ? "stopped" : "coreError";
+            _coreReason = reason;
+            StateHasChanged();
+        });
+
+    // Ghi ngay dst mới vào settings.json — áp dụng cho lần start kế tiếp.
+    private void SaveQuickDst()
+    {
+        try
+        {
+            Settings.Save(Settings.Load() with { Dst = _quickDst });
+        }
+        catch (Exception)
+        {
+            // Ghi file fail không được phá UI — dst giữ trong RAM cho lần start sau.
         }
     }
 
@@ -198,9 +340,9 @@
         _running = false;
     }
 
-    private string SourceLabel() => _source == "window" && !string.IsNullOrWhiteSpace(_hwnd)
-        ? $"Window ({_hwnd})"
-        : _source;
+    private string SourceLabel() => !string.IsNullOrEmpty(_windowHwnd)
+        ? $"Window ({_windowHwnd})"
+        : $"screen:{(int.TryParse(_monitorId, out int monitor) ? monitor : 0)}";
 
     private async Task CopyUrlAsync()
     {
@@ -218,6 +360,7 @@
     public void Dispose()
     {
         L.Changed -= OnLangChanged;
+        Pipeline.PipelineStateChanged -= OnPipelineStateChanged;
         if (_feed is not null)
         {
             _feed.Stop();

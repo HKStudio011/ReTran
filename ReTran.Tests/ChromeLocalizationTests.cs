@@ -26,6 +26,20 @@ public class ChromeLocalizationTests : BunitContext
     }
 
     [Fact]
+    public void NavMenu_ShowsSettingsLink_InCurrentLang()
+    {
+        var i18n = NewLang("vi");
+        Services.AddSingleton(i18n);
+        var cut = Render<ReTran_App.Components.Layout.NavMenu>();
+        Assert.Contains("Cài đặt", cut.Markup);
+        Assert.NotNull(cut.Find("a[href='settings']")); // link ⚙ trỏ đúng route
+
+        i18n.Set("en");
+        cut.WaitForAssertion(() => Assert.Contains("Settings", cut.Markup));
+        Assert.DoesNotContain("Cài đặt", cut.Markup); // không còn chuỗi vi khi đã sang en
+    }
+
+    [Fact]
     public void NotFound_ShowsVietnamese_WhenVi()
     {
         Services.AddSingleton(NewLang("vi"));
