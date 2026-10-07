@@ -29,7 +29,7 @@ public static class Program
         dispatcher.Register("version", _ => Task.FromResult(WriteStdout(Version)));
         CaptureCommands.Register(dispatcher);
         OcrCommands.Register(dispatcher);
-        // translate handler lands in M4.
+        TranslateCommands.Register(dispatcher);
         return await dispatcher.DispatchAsync(args);
     }
 
