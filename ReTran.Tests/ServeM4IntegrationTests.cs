@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json.Nodes;
 using ReTran.Core.JsonRpc;
 using ReTran_App.Core;
+using Xunit.Abstractions;
 
 namespace RetranCore.Tests;
 
@@ -17,10 +18,14 @@ namespace RetranCore.Tests;
 /// kiểm tra end-to-end.
 /// </summary>
 /// <remarks>
-/// Every test skips silently (early return) when the environment cannot host the flow: no built
-/// Core exe, no sidecar/capture source, or a machine whose screen capture cannot produce frames.
-/// Mỗi test skip-êm (early return) khi môi trường không chạy được: không có exe Core đã build,
-/// không có sidecar/capture source, hoặc máy không lấy được frame từ màn hình.
+/// xUnit v2 cannot skip a test dynamically, so every environment-driven early return writes a
+/// <c>SKIPPED (env): …</c> line through <see cref="ITestOutputHelper"/> before returning — a run
+/// that asserts nothing is visible instead of silent. A wait that times out while the pipeline is
+/// still alive is NOT an environment skip: it fails.
+/// xUnit v2 không skip động được, nên mọi nhánh early return vì môi trường in một dòng
+/// <c>SKIPPED (env): …</c> qua <see cref="ITestOutputHelper"/> rồi mới return — lần chạy assert
+/// 0 lần sẽ thấy được thay vì im lặng. Lượt chờ hết giờ trong khi pipeline vẫn sống KHÔNG phải
+/// skip môi trường: test fail.
 /// </remarks>
 public class ServeM4IntegrationTests
 {
@@ -34,12 +39,29 @@ public class ServeM4IntegrationTests
 
     /// <summary>Bound for the next cycle's frame, i.e. the "reply did not stall the loop" check.
     /// Giới cho frame của chu kỳ kế tiếp — tức kiểm tra "reply không làm nghẽn loop".</summary>
-    private static readonly TimeSpan NextFrameTimeout = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan NextFrameTimeout = TimeSpan.FromSeconds(60);
+
+    /// <summary>Bound for Core to ask the App for the cache after the first frame (spec §4.2).
+    /// Giới cho Core hỏi App cache sau frame đầu (spec §4.2).</summary>
+    private static readonly TimeSpan CacheLookupTimeout = TimeSpan.FromSeconds(30);
+
+    private readonly ITestOutputHelper _output;
+
+    /// <summary>
+    /// Creates the fixture and captures the output helper used to report environment skips.
+    /// Tạo fixture và lấy output helper dùng để báo các nhánh skip vì môi trường.
+    /// </summary>
+    /// <param name="output">xUnit output helper. Output helper của xUnit.</param>
+    public ServeM4IntegrationTests(ITestOutputHelper output) => _output = output;
 
     [Fact]
     public async Task Serve_PingStopListSources_Roundtrip_SkipEamWithoutExe()
     {
-        if (CoreLocator.FindCoreExe() is not string coreExe) return; // Core chưa build -> skip-êm
+if (CoreLocator.FindCoreExe() is not string coreExe)
+        {
+            SkipEnv("ReTran.Core.exe not built/RETRAN_CORE_EXE unset");
+            return;
+        }
 
         await using var peer = new ServePeer();
         await peer.StartAsync(coreExe);
@@ -50,24 +72,34 @@ public class ServeM4IntegrationTests
         var stopped = await peer.CallAsync("core.stop", null);
         Assert.False(stopped!["running"]!.GetValue<bool>());
 
-JsonNode? sources;
-try
-{
-    sources = await peer.CallAsync("core.list_sources", null);
-}
-catch (RpcException ex) when (ex.Code == RpcErrorCodes.InternalError)
-{
-    return; // -32603: enumeration display/window failed (headless session) -> skip-êm
-}
-
-var monitors = Assert.IsType<JsonArray>(sources!["monitors"]);
-if (monitors.Count == 0) return; // máy không có màn hình nào để assert -> skip-êm
-        foreach (JsonNode? monitor in monitors)
+        JsonNode? sources;
+        try
         {
-            JsonObject m = Assert.IsType<JsonObject>(monitor);
-            Assert.True(m["id"]!.GetValue<int>() >= 0);
-            Assert.False(string.IsNullOrWhiteSpace(m["name"]!.GetValue<string>()));
+            sources = await peer.CallAsync("core.list_sources", null);
         }
+catch (RpcException ex) when (ex.Code == RpcErrorCodes.InternalError)
+        {
+            SkipEnv($"core.list_sources returned -32603 (display/window enumeration failed): {ex.Message}");
+            return;
+        }
+
+        var monitors = Assert.IsType<JsonArray>(sources!["monitors"]);
+        if (monitors.Count == 0)
+        {
+            // Only the monitor half is unassertable here — the window list is still asserted below.
+            // Chỉ nửa monitor không assert được — danh sách cửa sổ vẫn assert ở dưới.
+            _output.WriteLine("SKIPPED (env): core.list_sources returned no monitors — monitor assertions skipped");
+        }
+        else
+        {
+            foreach (JsonNode? monitor in monitors)
+            {
+                JsonObject m = Assert.IsType<JsonObject>(monitor);
+                Assert.True(m["id"]!.GetValue<int>() >= 0);
+                Assert.False(string.IsNullOrWhiteSpace(m["name"]!.GetValue<string>()));
+            }
+        }
+
         var windows = Assert.IsType<JsonArray>(sources["windows"]);
         foreach (JsonNode? window in windows)
         {
@@ -80,7 +112,11 @@ if (monitors.Count == 0) return; // máy không có màn hình nào để assert
     [Fact]
     public async Task Serve_StartWithBogusProvider_Rejects_SkipEamWithoutExe()
     {
-        if (CoreLocator.FindCoreExe() is not string coreExe) return; // Core chưa build -> skip-êm
+if (CoreLocator.FindCoreExe() is not string coreExe)
+        {
+            SkipEnv("ReTran.Core.exe not built/RETRAN_CORE_EXE unset");
+            return;
+        }
 
         await using var peer = new ServePeer();
         await peer.StartAsync(coreExe);
@@ -97,54 +133,150 @@ if (monitors.Count == 0) return; // máy không có màn hình nào để assert
     [Fact]
     public async Task Serve_Start_EmitsFrameTranslated_AndRequestsCache_SkipEam()
     {
-        if (CoreLocator.FindCoreExe() is not string coreExe) return; // Core chưa build -> skip-êm
+if (CoreLocator.FindCoreExe() is not string coreExe)
+        {
+            SkipEnv("ReTran.Core.exe not built/RETRAN_CORE_EXE unset");
+            return;
+        }
 
         await using var peer = new ServePeer();
         await peer.StartAsync(coreExe);
 
-        var started = await peer.CallAsync("core.start", new JsonObject
+        JsonNode? started;
+        try
         {
-            ["source"] = new JsonObject { ["kind"] = "screen", ["monitor"] = 0 },
-            ["translate"] = new JsonObject { ["provider"] = "google", ["src"] = "auto", ["dst"] = "vi" },
-        });
-        // -32603 (no sidecar / capture cannot be opened) throws instead of returning -> the
-        // environment cannot host the pipeline: skip-êm rather than fail.
-        // -32603 (không sidecar / không mở được capture) ném thay vì trả -> môi trường không
-        // chạy được pipeline: skip-êm chứ không fail.
-        if (started?["running"]?.GetValue<bool>() != true) return;
+            started = await peer.CallAsync("core.start", new JsonObject
+            {
+                ["source"] = new JsonObject { ["kind"] = "screen", ["monitor"] = 0 },
+                ["translate"] = new JsonObject { ["provider"] = "google", ["src"] = "auto", ["dst"] = "vi" },
+            });
+        }
+catch (RpcException ex) when (ex.Code == RpcErrorCodes.InternalError)
+        {
+            SkipEnv($"core.start -32603 (no sidecar / capture source unavailable): {ex.Message}");
+            return;
+        }
 
-        JsonObject? frame = await peer.WaitForFirstFrameAsync(FirstFrameTimeout);
-        // The loop died before its first frame (e.g. this machine's DXGI screen source never
-        // delivers a frame) -> no assertion is possible: skip-êm.
-        // Loop chết trước frame đầu (vd DXGI screen source của máy này không frame nào) ->
-        // không có gì để assert: skip-êm.
-        if (frame is null) return;
+        // A start that answered without running:true is an environment skip; anything else is a
+        // contract failure and must fail below.
+        // Start trả về mà không running:true là skip môi trường; mọi trường hợp khác là vi phạm
+        // hợp đồng và phải fail ở dưới.
+Assert.True(started?["running"]?.GetValue<bool>() == true,
+            $"core.start returned {started?.ToJsonString() ?? "null"} instead of {{\"running\":true}}");
+
+
+FrameWaitResult first = await peer.WaitForFirstFrameAsync(FirstFrameTimeout);
+        if (first.Outcome == FrameWaitOutcome.PipelineStopped)
+        {
+            SkipEnv(first.Detail);
+            return;
+        }
+        Assert.True(first.Outcome == FrameWaitOutcome.Received, first.Detail);
+        JsonObject frame = first.Frame!;
 
         long seq = frame["seq"]!.GetValue<long>();
         Assert.True(seq >= 1);
         Assert.True(frame["w"]!.GetValue<int>() > 0);
         Assert.True(frame["h"]!.GetValue<int>() > 0);
         var boxes = Assert.IsType<JsonArray>(frame["boxes"]); // boxes:[] cũng phải parse được
-        bool hasText = false;
+        var observedTexts = new List<string>();
         foreach (JsonNode? node in boxes)
         {
             JsonObject box = Assert.IsType<JsonObject>(node);
             string text = box["text"]!.GetValue<string>();
-            if (text.Length > 0) hasText = true;
+            if (text.Length > 0) observedTexts.Add(text);
             Assert.True(box.ContainsKey("translated")); // tường minh null khi chưa dịch (spec §3.3)
             foreach (string key in (string[])["x", "y", "w", "h"])
                 Assert.InRange(box[key]!.GetValue<double>(), 0d, 1d);
         }
 
-        // Boxes with text mean Core must ask the App for the cache before translating; the peer
-        // handler already replied {hits:{}, misses:[...]} — a second frame proves the reply did
-        // not stall the loop (spec §4.1: translation never blocks the tick).
-        // Box có text nghĩa là Core phải hỏi App cache trước khi dịch; handler của peer đã trả
-        // {hits:{}, misses:[...]} — frame kế tiếp chứng minh reply không làm nghẽn loop
-        // (spec §4.1: dịch không bao giờ block tick).
-        if (hasText) Assert.NotEmpty(peer.CacheLookups);
-        Assert.NotNull(await peer.WaitForNextFrameAsync(seq, NextFrameTimeout));
+        // Boxes with text mean Core must ask the App for the cache before translating. The lookup
+        // is a background hop that can lag the frame it follows, so wait for it with its own bound
+        // instead of sampling once; then assert the batch shape and that our all-miss reply carried
+        // a text we actually saw on the frame.
+        // Box có text nghĩa là Core phải hỏi App cache trước khi dịch. Lượt tra là hop nền có thể
+        // trễ sau frame, nên chờ bằng giới riêng thay vì lấy một lần; rồi assert shape của lô và
+        // rằng reply all-miss có chứa text ta thật sự thấy trên frame.
+        if (observedTexts.Count > 0)
+        {
+            IReadOnlyList<CacheLookup> lookups = await peer.WaitForCacheLookupsAsync(1, CacheLookupTimeout);
+            Assert.True(lookups.Count > 0,
+                $"no translate.request_cache within {CacheLookupTimeout.TotalSeconds:0}s although the frame carried "
+                + $"{observedTexts.Count} non-empty text(s)");
+            foreach (CacheLookup lookup in lookups)
+            {
+                Assert.False(string.IsNullOrWhiteSpace(ReadString(lookup.Request["context"])));
+                Assert.Equal("auto", ReadString(lookup.Request["src"]));
+                Assert.Equal("vi", ReadString(lookup.Request["dst"]));
+                Assert.NotEmpty(Assert.IsType<JsonArray>(lookup.Request["texts"]));
+            }
+            Assert.Contains(observedTexts[0], lookups.SelectMany(l => l.Misses).Select(ReadString));
+        }
+
+        // A following frame proves the cache reply did not stall the loop (spec §4.1: translation
+        // never blocks the tick).
+        // Frame kế tiếp chứng minh reply cache không làm nghẽn loop (spec §4.1: dịch không bao giờ
+        // block tick).
+FrameWaitResult next = await peer.WaitForNextFrameAsync(seq, NextFrameTimeout);
+        if (next.Outcome == FrameWaitOutcome.PipelineStopped)
+        {
+            SkipEnv(next.Detail);
+            return;
+        }
+        Assert.True(next.Outcome == FrameWaitOutcome.Received, next.Detail);
     }
+
+/// <summary>
+    /// Records an environment-driven early return through the output helper, so a run that asserted
+    /// nothing still leaves a visible <c>SKIPPED (env): …</c> line in the test output.
+    /// Ghi một nhánh early return vì môi trường qua output helper, để lần chạy assert 0 lần vẫn
+    /// để lại dòng <c>SKIPPED (env): …</c> nhìn thấy được trong output của test.
+    /// </summary>
+    /// <param name="reason">Why the environment cannot host this assertion. Vì sao môi trường không chạy được assertion này.</param>
+    private void SkipEnv(string reason) => _output.WriteLine($"SKIPPED (env): {reason}");
+
+
+    /// <summary>
+    /// Reads a JSON node as a string, yielding an empty string when it is absent or not a string.
+    /// Đọc node JSON thành chuỗi, trả chuỗi rỗng khi thiếu hoặc không phải string.
+    /// </summary>
+    private static string ReadString(JsonNode? node) =>
+        node is JsonValue value && value.TryGetValue<string>(out string? text) && text is not null ? text : string.Empty;
+
+    /// <summary>How a wait for a <c>frame.translated</c> ended. Kết quả chờ <c>frame.translated</c>.</summary>
+    private enum FrameWaitOutcome
+    {
+        /// <summary>The awaited frame arrived. Frame mong đợi đã tới.</summary>
+        Received,
+
+        /// <summary>
+        /// The pipeline reported <c>pipeline.state {running:false}</c> first — the environment
+        /// cannot produce frames (capture source died, sidecar gone). Skip, not a regression.
+        /// Pipeline báo <c>pipeline.state {running:false}</c> trước — môi trường không lấy được
+        /// frame. Skip, không phải regression.
+        /// </summary>
+        PipelineStopped,
+
+        /// <summary>
+        /// The bound elapsed with no frame and no stop signal — the pipeline is alive but not
+        /// emitting, which is a real regression. Hết giờ mà không có frame lẫn tín hiệu dừng —
+        /// pipeline còn sống nhưng không emit: đây là regression thật.
+        /// </summary>
+        TimedOut,
+    }
+
+    /// <summary>Outcome of a frame wait plus the frame (when received) and a diagnostic detail.
+    /// Kết quả chờ frame kèm frame (khi có) và một dòng chẩn đoán.</summary>
+    /// <param name="Outcome">How the wait ended. Kết thúc ra sao.</param>
+    /// <param name="Frame">The frame, or null. Frame hoặc null.</param>
+    /// <param name="Detail">Human-readable reason, used as skip text or failure message. Lý do dạng chữ để hiện khi skip hoặc khi fail.</param>
+    private sealed record FrameWaitResult(FrameWaitOutcome Outcome, JsonObject? Frame, string Detail);
+
+    /// <summary>One recorded <c>translate.request_cache</c> call: the request and the misses we replied.
+    /// Một lượt <c>translate.request_cache</c> đã ghi: request và các miss đã trả.</summary>
+    /// <param name="Request">Params Core sent. Params Core gửi.</param>
+    /// <param name="Misses">Texts answered as cache misses. Các text được trả về là cache miss.</param>
+    private sealed record CacheLookup(JsonObject Request, JsonArray Misses);
 
     /// <summary>
     /// App-side stand-in for the MAUI shell: owns one <c>ReTran.Core.exe --serve</c> child, records
@@ -158,17 +290,8 @@ if (monitors.Count == 0) return; // máy không có màn hình nào để assert
     {
         private readonly CoreProcessClient _peer = new();
         private readonly List<(string Method, JsonObject? Params)> _notifications = new();
-        private readonly List<JsonObject> _cacheLookups = new();
+        private readonly List<CacheLookup> _cacheLookups = new();
         private readonly object _sync = new();
-
-        /// <summary>
-        /// Params of every <c>translate.request_cache</c> request Core has sent, in arrival order.
-        /// Tham số của mọi request <c>translate.request_cache</c> Core đã gửi, theo thứ tự tới.
-        /// </summary>
-        public IReadOnlyList<JsonObject> CacheLookups
-        {
-            get { lock (_sync) return _cacheLookups.ToList(); }
-        }
 
         /// <summary>
         /// Starts the Core child process and subscribes to its notifications and requests.
@@ -194,54 +317,42 @@ if (monitors.Count == 0) return; // máy không có màn hình nào để assert
         }
 
         /// <summary>
-        /// Waits for the first <c>frame.translated</c>, returning null when the pipeline reported
-        /// <c>pipeline.state {running:false}</c> (or nothing arrived) before any frame did.
-        /// Chờ <c>frame.translated</c> đầu tiên; trả null khi pipeline báo
-        /// <c>pipeline.state {running:false}</c> (hoặc không có gì tới) trước bất kỳ frame nào.
+        /// Waits for the first <c>frame.translated</c>. Returns <see cref="FrameWaitOutcome.PipelineStopped"/>
+        /// when <c>pipeline.state {running:false}</c> arrives first (environment skip) and
+        /// <see cref="FrameWaitOutcome.TimedOut"/> when the bound elapses with the pipeline still alive
+        /// (real regression — the caller must fail).
+        /// Chờ <c>frame.translated</c> đầu tiên. Trả <see cref="FrameWaitOutcome.PipelineStopped"/> khi
+        /// <c>pipeline.state {running:false}</c> tới trước (skip môi trường) và
+        /// <see cref="FrameWaitOutcome.TimedOut"/> khi hết giờ mà pipeline vẫn sống (regression thật —
+        /// caller phải fail).
         /// </summary>
-        public async Task<JsonObject?> WaitForFirstFrameAsync(TimeSpan timeout)
-        {
-            var sw = Stopwatch.StartNew();
-            while (sw.Elapsed < timeout)
-            {
-                lock (_sync)
-                {
-                    foreach ((string method, JsonObject? p) in _notifications)
-                    {
-                        if (method == "frame.translated") return p;
-                        if (method == "pipeline.state"
-                            && p?["running"] is JsonValue running && running.TryGetValue<bool>(out bool isRunning)
-                            && !isRunning)
-                            return null;
-                    }
-                }
-                await Task.Delay(100);
-            }
-            return null;
-        }
+        public Task<FrameWaitResult> WaitForFirstFrameAsync(TimeSpan timeout) =>
+            WaitForFrameAsync(timeout, null);
 
         /// <summary>
-        /// Waits for the first <c>frame.translated</c> whose <c>seq</c> is past <paramref name="afterSeq"/>.
-        /// Chờ <c>frame.translated</c> đầu tiên có <c>seq</c> lớn hơn <paramref name="afterSeq"/>.
+        /// Waits for the next <c>frame.translated</c>, i.e. one whose <c>seq</c> is past
+        /// <paramref name="afterSeq"/>, with the same stop/timeout semantics as
+        /// <see cref="WaitForFirstFrameAsync"/>.
+        /// Chờ <c>frame.translated</c> kế tiếp (seq lớn hơn <paramref name="afterSeq"/>), cùng ngữ
+        /// nghĩa stop/timeout như <see cref="WaitForFirstFrameAsync"/>.
         /// </summary>
-        public async Task<JsonObject?> WaitForNextFrameAsync(long afterSeq, TimeSpan timeout)
+        public Task<FrameWaitResult> WaitForNextFrameAsync(long afterSeq, TimeSpan timeout) =>
+            WaitForFrameAsync(timeout, afterSeq);
+
+        /// <summary>
+        /// Waits until Core has asked for the cache at least <paramref name="count"/> times.
+        /// Chờ tới khi Core hỏi cache ít nhất <paramref name="count"/> lần.
+        /// </summary>
+        public async Task<IReadOnlyList<CacheLookup>> WaitForCacheLookupsAsync(int count, TimeSpan timeout)
         {
             var sw = Stopwatch.StartNew();
-            while (sw.Elapsed < timeout)
+            while (true)
             {
-                lock (_sync)
-                {
-                    foreach ((string method, JsonObject? p) in _notifications)
-                    {
-                        if (method == "frame.translated"
-                            && p?["seq"] is JsonValue seq && seq.TryGetValue<long>(out long value)
-                            && value > afterSeq)
-                            return p;
-                    }
-                }
+                IReadOnlyList<CacheLookup> snapshot = CacheLookups();
+                if (snapshot.Count >= count) return snapshot;
+                if (sw.Elapsed >= timeout) return snapshot;
                 await Task.Delay(100);
             }
-            return null;
         }
 
         /// <summary>
@@ -264,6 +375,70 @@ if (monitors.Count == 0) return; // máy không có màn hình nào để assert
         }
 
         /// <summary>
+        /// Polls recorded notifications until a matching frame arrives, the pipeline reports it
+        /// stopped, or the bound elapses. <paramref name="afterSeq"/> of null means "any frame".
+        /// Quét notification đã ghi tới khi có frame khớp, pipeline báo đã dừng, hoặc hết giờ.
+        /// <paramref name="afterSeq"/> null nghĩa là "bất kỳ frame nào".
+        /// </summary>
+        private async Task<FrameWaitResult> WaitForFrameAsync(TimeSpan timeout, long? afterSeq)
+        {
+            var sw = Stopwatch.StartNew();
+            while (true)
+            {
+                lock (_sync)
+                {
+                    foreach ((string method, JsonObject? p) in _notifications)
+                    {
+                        if (method == "pipeline.state"
+                            && p?["running"] is JsonValue running && running.TryGetValue<bool>(out bool isRunning)
+                            && !isRunning)
+                        {
+                            return new FrameWaitResult(FrameWaitOutcome.PipelineStopped, null,
+                                $"pipeline.state {{running:false, reason:\"{ReadString(p["reason"])}\"}} before any frame "
+                                + "— the capture source or sidecar died in this environment");
+                        }
+                        if (method != "frame.translated") continue;
+                        if (afterSeq is null) return new FrameWaitResult(FrameWaitOutcome.Received, p, "");
+                        if (p?["seq"] is JsonValue seq && seq.TryGetValue<long>(out long value) && value > afterSeq.Value)
+                            return new FrameWaitResult(FrameWaitOutcome.Received, p, "");
+                    }
+                }
+                if (sw.Elapsed >= timeout)
+                {
+                    return new FrameWaitResult(FrameWaitOutcome.TimedOut, null,
+                        $"no frame.translated within {timeout.TotalSeconds:0}s while the pipeline was still alive "
+                        + $"(no pipeline.state stop seen); notifications observed: {NotificationSummary()}");
+                }
+                await Task.Delay(100);
+            }
+        }
+
+        /// <summary>
+        /// Snapshot of the recorded <c>translate.request_cache</c> calls.
+        /// Ảnh chụp các lượt <c>translate.request_cache</c> đã ghi.
+        /// </summary>
+        private IReadOnlyList<CacheLookup> CacheLookups()
+        {
+            lock (_sync) return _cacheLookups.ToList();
+        }
+
+        /// <summary>
+        /// Compact "method=count" summary of the recorded notifications, for failure messages.
+        /// Tóm tắt "method=count" của notification đã ghi, dùng cho message khi fail.
+        /// </summary>
+        private string NotificationSummary()
+        {
+            lock (_sync)
+            {
+                return _notifications.Count == 0
+                    ? "(none)"
+                    : string.Join(", ", _notifications
+                        .GroupBy(n => n.Method)
+                        .Select(g => $"{g.Key}={g.Count()}"));
+            }
+        }
+
+        /// <summary>
         /// Answers Core → App requests: <c>translate.request_cache</c> is recorded and answered as
         /// all-miss (an App with an empty cache); anything else gets a null result.
         /// Trả lời request Core → App: <c>translate.request_cache</c> được ghi lại và trả all-miss
@@ -279,7 +454,7 @@ if (monitors.Count == 0) return; // máy không có màn hình nào để assert
             {
                 var misses = new JsonArray();
                 foreach (JsonNode? text in texts) misses.Add(text?.DeepClone());
-                lock (_sync) _cacheLookups.Add(@params.AsObject());
+                lock (_sync) _cacheLookups.Add(new CacheLookup(@params.AsObject(), misses));
                 return Task.FromResult<JsonNode?>(new JsonObject
                 {
                     ["hits"] = new JsonObject(),
@@ -299,3 +474,4 @@ if (monitors.Count == 0) return; // máy không có màn hình nào để assert
         }
     }
 }
+

@@ -389,11 +389,11 @@ Probe: spawn `ReTran.Core.exe --serve`, `core.ping` → `core.start {source:{kin
 |---|---|
 | Số event `data:` trong 45 s | 8 (2 event đầu = snapshot bắt kịp) |
 | Nhịp steady | 5,5–6,0 s / khung (median ~5,6 s ⇒ **~0,17 fps**) |
-| Kích thước payload | **2.550 byte/khung** (`{"boxes":[{x,y,w,h,t}...]}`, toạ độ đã normalize 0–1) |
+| Kích thước payload | **2.550 byte/khung** (`{"boxes":[{x,y,w,h,t}...]}`, toạ độ đã normalize 0–1) — **n = 1 mẫu duy nhất** (8 event trong cửa sổ 45 s đều dài đúng 2.550 B vì nội dung cửa sổ không đổi); chưa có mẫu đa dạng nội dung |
 
 ### Số liệu — latency dịch (Google)
 
-**Không đo được latency dịch thành công**: endpoint `translate.googleapis.com` trả **HTTP 429 (Too Many Requests)** cho mọi request từ IP máy này trong suốt phiên đo. `ReTran.Core translate "hello world" --dst vi --src en` ×10 (cách nhau 3 s): **10/10 exit 1**, đều in `translate failed: Google translate endpoint returned HTTP 429.` Wall **491,7 / 574,3 (median) / 595,6 (mean) / 733 ms** (10 giá trị: 574,3 · 491,7 · 733,0 · 666,2 · 578,5 · 523,8 · 661,1 · 691,6 · 540,2 · 495,1) — đây là **latency nhánh lỗi** (gồm spawn process), **không phải** latency dịch thành công.
+**Không đo được latency dịch thành công**: endpoint `translate.googleapis.com` trả **HTTP 429 (Too Many Requests)** cho mọi request từ IP máy này trong suốt phiên đo. `ReTran.Core translate "hello world" --dst vi --src en` ×10 (cách nhau 3 s): **10/10 exit 1**, đều in `translate failed: Google translate endpoint returned HTTP 429.` Wall **491,7 / 574,3 (median) / 595,6 (mean) / 733 ms** (10 giá trị: 574,3 · 491,7 · 733,0 · 666,2 · 578,5 · 523,8 · 661,1 · 691,6 · 540,2 · 495,1; median theo quy ước **lower-median** = phần tử thứ 5 của 10 giá trị đã sort — cùng quy ước với M2/M3) — đây là **latency nhánh lỗi** (gồm spawn process), **không phải** latency dịch thành công.
 
 Hệ quả trực tiếp trên số đo: `translated` của mọi box là `null` (hiển thị text gốc — đúng nhánh fail của spec §7), `translate.put` = 0, cache DB không có dòng nào ⇒ **không đo được** chi phí "cache hit = 0 network call" và **không đo được** latency dịch thực.
 
@@ -408,7 +408,8 @@ Hệ quả trực tiếp trên số đo: `translated` của mọi box là `null`
 | Overlay/OBS | `GET http://127.0.0.1:17863/overlay` → HTTP 200; `GET /events` (SSE) → 8 khung/45 s, 2.550 B/khung |
 | Bấm `Dừng` | badge → **■ Đang dừng**; Core RSS 102,7 → 84 MB |
 | Trang Cài đặt + `Lưu cài đặt` | Ghi `%LOCALAPPDATA%\ReTran\settings.json` = `{"provider":"google","src":"auto","dst":"vi","apiKey":null}` |
-| Bấm `Bắt đầu` lại (phiên mới) | **không verify được** cache hit — cache rỗng vì Google 429 (xem "cần đo thật") |
+| Bấm `Bắt đầu` lại (phiên mới) | **không verify được** cache hit — cache rỗng vì Google 429 (xem "cần đo thật" #2) |
+| Đổi `dst` trong Cài đặt → `Lưu cài đặt` → `Bắt đầu` lại → bản dịch đổi ngôn ngữ | **placeholder, chưa verify được** — cần provider trả bản dịch; ở phiên đo mọi lần dịch đều 429 nên không có mốc "bản dịch đổi" để so (xem "cần đo thật" #1). Đường *cấu hình* đã verify: `Lưu cài đặt` ghi `settings.json`, và `PipelineController` đọc `dst` khi start |
 
 ### Đối chiếu budget (AGENTS.md)
 
@@ -433,6 +434,8 @@ Hệ quả trực tiếp trên số đo: `translated` của mọi box là `null`
 | 4 | **OCR trên GPU** (VRAM < 1 GB, ~3 fps) | `paddlepaddle` trên máy này là **CPU build** (`is_compiled_with_cuda() → False`); chưa cài bản GPU |
 | 5 | Nguồn `screen` / full-screen capture | DXGI không frame nào trên máy này (lỗi HDR, xem M3) ⇒ mọi số capture đo bằng nguồn `window` |
 | 6 | `frame.translated` ở tần 10–15 fps | Tần khung bị chi phối bởi OCR (~7 s/lượt); cần máy có GPU OCR để đo nhịp thật của tầng UI/overlay |
+| 7 | **Đổi `dst` → `Lưu cài đặt` → `Bắt đầu` lại → bản dịch đổi ngôn ngữ** | Cần provider trả bản dịch (429 ở toàn bộ phiên đo, xem (1)) ⇒ không có mốc "bản dịch đổi" để so. Đường cấu hình (`Lưu cài đặt` ghi `settings.json`) đã verify |
+| 8 | `translated` hiển thị **song song** với text gốc (overlay/OBS hiện cả hai khi dịch xong) | Ô `translated` chỉ toàn `null` vì dịch luôn fail; chưa quan sát được trạng thái "đã dịch" ngoài đời |
 
 ### Ghi chú / hạn chế đo (đọc trước khi dùng số)
 
@@ -441,7 +444,9 @@ Hệ quả trực tiếp trên số đo: `translated` của mọi box là `null`
 3. **Hai hệ capture khác nhau** cho hai bảng số: probe scripted dùng cửa sổ Notepad 1161×714 (27–33 box), UI-driven dùng cửa sổ App 1424×635 (~2.550 B/khung). Không so chéo tuyệt đối giữa hai bảng.
 4. **Sidecar là 2 process** (parent proxy ~4 MB + worker làm OCR) — footprint đo cả tree như M2/M3; `peak_wset` sum theo tree không tách được peak từng tầng.
 5. **`PYTHONUTF8=1` là workaround env, không sửa code:** sidecar in ra stdout bằng cp1252 và **crash** (`UnicodeEncodeError: '≡'`) khi OCR đọc được ký tự ngoài cp1252 (icon hamburger `≡` của Notepad, hoặc text tiếng Việt). Đã tái hiện: chạy pipeline cửa sổ Notepad từ UI App **không** set env → badge **"Lỗi core: sidecar-exited"**; set `PYTHONUTF8=1` rồi chạy lại → chạy bình thường, khung về đều. Đây là **bug thật còn tồn tại** (M2 note 4 / M3 note 2), chưa fix trong production ⇒ cần fix encoding stdout của sidecar (hoặc ép UTF-8 trong `SidecarProcess`).
-6. **Test integration chính skip-êm trên máy này:** `Serve_Start_EmitsFrameTranslated_AndRequestsCache_SkipEam` ghim `screen`/monitor 0 nên không có frame nào để assert (xem mục nguồn capture). Đường assert đó **đã** verify bằng 2 mutation trên bản test tạm trỏ nguồn cửa sổ: (a) đổi `seq` trong `frame.translated` thành string → test FAIL tại parse `seq`; (b) cho `JsonRpcCacheChannel.LookupAsync` bỏ request `translate.request_cache` → test FAIL tại `Assert.NotEmpty(CacheLookups)`. Cả 2 mutation đã revert.
+6. **Test integration: 2/3 assert thật, 1/3 assert 0 lần trên máy này.** `Serve_PingStopListSources_Roundtrip_SkipEamWithoutExe` và `Serve_StartWithBogusProvider_Rejects_SkipEamWithoutExe` assert thật (PASS). `Serve_Start_EmitsFrameTranslated_AndRequestsCache_SkipEam` ghim `screen`/monitor 0 nên **không có frame nào để assert** ở máy này (xem mục nguồn capture) và **assert 0 lần** — xUnit v2 không skip động được, nên nhánh đó in dòng `SKIPPED (env): …` qua `ITestOutputHelper` (xem `--logger "console;verbosity=detailed"`), output thật của phiên đo:
+   `SKIPPED (env): pipeline.state {running:false, reason:"capture-error"} before any frame — the capture source or sidecar died in this environment`.
+   **Lượt chờ hết giờ mà pipeline còn sống thì FAIL, không skip** (đã verify bằng mutation, xem dưới). Đường assert đó **đã** verify bằng 4 mutation trên bản test tạm trỏ nguồn cửa sổ: (a) đổi `seq` trong `frame.translated` thành string → FAIL tại parse `seq`; (b) cho `JsonRpcCacheChannel.LookupAsync` bỏ request `translate.request_cache` → FAIL tại `Assert.NotEmpty(CacheLookups)`; (c) đổi `src` trong request cache → FAIL tại `Assert.Equal("auto", src)`; (d) đổi tên method notify `frame.translated` → `frame.translated.MUTANT` (loop vẫn sống) → **FAIL sau 90 s** với message `no frame.translated within 90s while the pipeline was still alive …`. Tất cả mutation đã revert.
 7. **Số CPU ghi bằng `Get-Process .CPU` delta** (tổng CPU-seconds của process) thay vì `psutil.cpu_percent` của M3 — ít nhạy contention hơn, nhưng là giá trị trung bình cửa sổ 50 s, không phải mẫu tức thời.
 8. **Cleanup sau đo:** App, Core, sidecar, Notepad đã đóng hết (0 tiến trình ReTran còn lại).
 
