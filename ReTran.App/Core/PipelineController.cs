@@ -249,7 +249,7 @@ public sealed class PipelineController
             }
         }
 
-using var timeoutCts = new CancellationTokenSource(CacheGateTimeout);
+        using var timeoutCts = new CancellationTokenSource(CacheGateTimeout);
         try
         {
             await _cacheGate.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
