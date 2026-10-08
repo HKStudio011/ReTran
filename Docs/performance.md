@@ -424,6 +424,12 @@ Hệ quả trực tiếp trên số đo: `translated` của mọi box là `null`
 | Tổng CPU (khi gaming+streaming) | < 8% | Pipeline chạy: **60,28% tổng 16 luồng** (App 0,04% · Core 0,27% · **sidecar worker 59,97%**). Idle (chưa start): **0,2% 1 core** | **BREACH** (do OCR CPU; App+Core tự thân chỉ 0,31% — cùng verdict M3) |
 | Tổng RAM | < 500 MB | Pipeline chạy: **RSS sum 674,1 MB** (App 220,9 · Core 102,7 · sidecar 350,5); **peak sum 914,7 MB**. Idle: RSS sum 270,8 MB / peak 277,0 MB | **BREACH khi chạy** (RSS + peak) / **PASS khi idle** (cùng caveat M2/M3: `peak_wset` theo tree không tách được từng tầng) |
 
+### Quyết định tradeoff (user-approved, 2026-10-08)
+
+Các số **BREACH** ở bảng trên (OCR throughput, tổng CPU, tổng RAM khi chạy) là **provisional** — đo dưới contention nền 78–86% CPU, chưa có game + OBS thật (placeholder #3), và sidecar vẫn là **paddle CPU build** chưa throttle. **User đã duyệt (2026-10-08) chấp nhận ship M4 với các số provisional này.**
+
+**Điều kiện kèm theo (bắt buộc trước khi coi perf gate đạt):** việc xử lý sidecar OCR là hạng mục **bắt buộc**, gồm (1) chuyển paddle sang **GPU build** (`is_compiled_with_cuda() → False` hiện tại — placeholder #4) và (2) **throttle** OCR về budget ~3 fps (placeholder #6). Cho tới khi hai việc này xong, không verdict BREACH nào được đổi thành PASS do quyết định này — 8 placeholder ở bảng dưới giữ nguyên.
+
 ### Cần đo thật (placeholder — chưa có số ở M4)
 
 | # | Cần đo | Vì sao chưa có |

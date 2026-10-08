@@ -142,5 +142,6 @@ public sealed class TranslationCache(RetranDbContext db)
 
         await _db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
+        _db.ChangeTracker.Clear();
     }
 }

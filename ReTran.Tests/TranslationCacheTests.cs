@@ -93,6 +93,19 @@ public class TranslationCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task Put_ClearsChangeTracker()
+    {
+        await using var db = new RetranDbContext(_options);
+        var cache = new TranslationCache(db);
+        await cache.PutAsync("notepad.exe", "en", "vi",
+            new[] { ("hello", "xin chào") }, CancellationToken.None);
+        await cache.PutAsync("notepad.exe", "en", "vi",
+            new[] { ("hello", "chào bạn") }, CancellationToken.None);
+
+        Assert.Empty(db.ChangeTracker.Entries());
+    }
+
+    [Fact]
     public async Task Put_DifferentKeys_Coexist()
     {
         await using var db = new RetranDbContext(_options);

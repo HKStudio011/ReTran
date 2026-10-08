@@ -254,8 +254,8 @@ public class PipelineControllerTests : IDisposable
             ["dst"] = "vi",
             ["texts"] = new JsonArray(),
         });
-        Assert.Equal(0, empty!["hits"]!.AsObject().Count);
-        Assert.Equal(0, empty!["misses"]!.AsArray().Count);
+        Assert.Empty(empty!["hits"]!.AsObject());
+        Assert.Empty(empty!["misses"]!.AsArray());
 
         JsonNode? unknown = await handler("translate.request_cache", new JsonObject
         {
@@ -264,7 +264,7 @@ public class PipelineControllerTests : IDisposable
             ["dst"] = "vi",
             ["texts"] = new JsonArray("KHÔNG CÓ"),
         });
-        Assert.Equal(0, unknown!["hits"]!.AsObject().Count);
+        Assert.Empty(unknown!["hits"]!.AsObject());
         Assert.Equal("KHÔNG CÓ", unknown!["misses"]!.AsArray()[0]!.GetValue<string>());
     }
 

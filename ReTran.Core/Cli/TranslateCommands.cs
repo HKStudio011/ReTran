@@ -16,18 +16,22 @@ public static class TranslateCommands
         "usage: ReTran.Core translate \"<text>\" --dst <lang> [--src auto] [--provider google]";
 
     /// <summary>
-    /// Registers the <c>translate</c> command on <paramref name="d"/>.
-    /// Đăng ký lệnh <c>translate</c> vào <paramref name="d"/>.
+    /// Registers the <c>translate</c> command on <paramref name="d"/>, optionally with an injected translator.
+    /// Đăng ký lệnh <c>translate</c> vào <paramref name="d"/>, tùy chọn với trình dịch được inject.
     /// </summary>
     /// <param name="d">Dispatcher to register on. Dispatcher cần đăng ký.</param>
-    /// <exception cref="ArgumentNullException">Thrown when <paramref name="d"/> is null.</exception>
-    public static void Register(CommandDispatcher d)
+    /// <param name="translator">
+    /// Translator to resolve by provider name instead of the default Google provider; <see langword="null"/> keeps production behavior.
+    /// Trình dịch được tra theo tên provider thay cho Google mặc định; <see langword="null"/> giữ nguyên hành vi production.
+    /// </param>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="d"/> is null. Ném khi <paramref name="d"/> là null.</exception>
+    public static void Register(CommandDispatcher d, ITranslator? translator = null)
     {
         ArgumentNullException.ThrowIfNull(d);
-        d.Register("translate", RunAsync);
+        d.Register("translate", args => RunAsync(args, translator));
     }
 
-    private static async Task<int> RunAsync(string[] args)
+    private static async Task<int> RunAsync(string[] args, ITranslator? injected)
     {
         if (!TryParse(args, out TranslateOptions? options, out string? error))
         {
@@ -38,7 +42,7 @@ public static class TranslateCommands
         }
 
         var registry = new TranslatorRegistry();
-        registry.Register(new GoogleWebTranslator(timeout: TimeSpan.FromSeconds(10)));
+        registry.Register(injected ?? new GoogleWebTranslator(timeout: TimeSpan.FromSeconds(10)));
         ITranslator? translator = registry.Get(options.Provider);
         if (translator is null)
         {
