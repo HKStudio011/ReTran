@@ -41,14 +41,17 @@ public sealed record WindowInfo(string Hwnd, string Title, string Process);
 /// </summary>
 public sealed class PipelineController
 {
+    /// <summary>Stop reason relayed when the core process ends on its own. Lý do dừng khi tiến trình core tự kết thúc.</summary>
+    public const string CoreExitedReason = "core-exited";
+
     private readonly ICorePeer _peer;
     private readonly AppSettingsService _settings;
     private readonly TranslationCache _cache;
     private readonly OverlayState _overlay;
     private readonly ILogger<PipelineController> _log;
     private readonly SemaphoreSlim _cacheGate = new(1, 1);
-    // Giữ handler trong bounds của read-loop: gate wait + lookup tối đa 2 s rồi coi hết là miss.
-    private static readonly TimeSpan CacheLookupTimeout = TimeSpan.FromSeconds(2);
+    // Giữ handler trong bounds của read-loop: gate wait + truy cập DB tối đa 2 s (lookup và put).
+    private static readonly TimeSpan CacheGateTimeout = TimeSpan.FromSeconds(2);
     private bool _handlersWired;
 
     /// <summary>
@@ -84,6 +87,14 @@ public sealed class PipelineController
     /// <param name="running">Whether the pipeline is still running. Pipeline còn đang chạy hay không.</param>
     /// <param name="reason">Short stop reason code (e.g. <c>sidecar-exited</c>), or <see langword="null"/>. Mã lý do dừng ngắn (ví dụ <c>sidecar-exited</c>), hoặc <see langword="null"/>.</param>
     public event Action<bool, string?>? PipelineStateChanged;
+
+    /// <summary>
+    /// Whether the pipeline was last known to be running. Read by a page on its first render so
+    /// navigating back to the control page shows the real badge instead of a stale "stopped".
+    /// Pipeline có đang chạy theo lần biết cuối hay không. Trang đọc ở render đầu để quay lại trang
+    /// điều khiển thấy badge đúng thay vì "stopped" cũ.
+    /// </summary>
+    public bool IsRunning { get; private set; }
 
     /// <summary>
     /// Ensures the core is running, wires the Core→App handlers once, then sends
@@ -122,6 +133,7 @@ public sealed class PipelineController
             },
         };
         await _peer.CallAsync("core.start", @params, ct).ConfigureAwait(false);
+        IsRunning = true;
     }
 
     /// <summary>
@@ -133,6 +145,7 @@ public sealed class PipelineController
     public async Task StopAsync(CancellationToken ct)
     {
         await _peer.CallAsync("core.stop", null, ct).ConfigureAwait(false);
+        IsRunning = false;
     }
 
     /// <summary>
@@ -195,11 +208,20 @@ public sealed class PipelineController
         _peer.SetRequestHandler(HandleRequestAsync);
         _peer.NotificationReceived += HandleNotification;
         _peer.HandlerError += HandlePeerHandlerError;
+        _peer.Exited += HandleCoreExited;
         _handlersWired = true;
     }
 
     private void HandlePeerHandlerError(Exception ex)
         => _log.LogWarning(ex, "Core->App message handler failed.");
+
+    // Chỉ relay signal — không tự restart core; UI quyết định báo lỗi rồi người dùng bấm lại.
+    private void HandleCoreExited(int exitCode)
+    {
+        _log.LogWarning("Core process exited with code {ExitCode}; the pipeline is gone.", exitCode);
+        IsRunning = false;
+        PipelineStateChanged?.Invoke(false, CoreExitedReason);
+    }
 
     private async Task<JsonNode?> HandleRequestAsync(string method, JsonNode? @params)
     {
@@ -227,7 +249,7 @@ public sealed class PipelineController
             }
         }
 
-        using var timeoutCts = new CancellationTokenSource(CacheLookupTimeout);
+using var timeoutCts = new CancellationTokenSource(CacheGateTimeout);
         try
         {
             await _cacheGate.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
@@ -236,7 +258,7 @@ public sealed class PipelineController
         {
             _log.LogWarning(
                 "translate.request_cache could not take the cache gate within {Timeout}; returning every text as a miss.",
-                CacheLookupTimeout);
+                CacheGateTimeout);
             return AllMisses(texts);
         }
 
@@ -254,7 +276,7 @@ public sealed class PipelineController
         {
             _log.LogWarning(
                 "translate.request_cache gave up after {Timeout}; returning every text as a miss.",
-                CacheLookupTimeout);
+                CacheGateTimeout);
             return AllMisses(texts);
         }
         finally
@@ -321,6 +343,7 @@ public sealed class PipelineController
             && reasonValue.GetValueKind() == JsonValueKind.String
             ? reasonValue.GetValue<string>()
             : null;
+        IsRunning = running;
         PipelineStateChanged?.Invoke(running, reason);
     }
 
@@ -350,24 +373,38 @@ public sealed class PipelineController
         _ = PutAsync(context, src, dst, entries);
     }
 
+    // Best-effort: chờ gate cũng có timeout để SQLite kẹt không làm mọi lookup sau đó all-miss 30 s.
     private async Task PutAsync(
         string context, string src, string dst, IReadOnlyList<(string Text, string Translated)> entries)
     {
+        using var timeoutCts = new CancellationTokenSource(CacheGateTimeout);
         try
         {
-            await _cacheGate.WaitAsync().ConfigureAwait(false);
-            try
-            {
-                await _cache.PutAsync(context, src, dst, entries, CancellationToken.None).ConfigureAwait(false);
-            }
-            finally
-            {
-                _cacheGate.Release();
-            }
+            await _cacheGate.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            _log.LogWarning(
+                "translate.put skipped: cache gate still busy after {Timeout}.", CacheGateTimeout);
+            return;
+        }
+
+        try
+        {
+            await _cache.PutAsync(context, src, dst, entries, timeoutCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            _log.LogWarning(
+                "translate.put gave up after {Timeout}; the cache write was skipped.", CacheGateTimeout);
         }
         catch (Exception ex)
         {
             _log.LogWarning(ex, "translate.put failed; the cache write was skipped.");
+        }
+        finally
+        {
+            _cacheGate.Release();
         }
     }
 

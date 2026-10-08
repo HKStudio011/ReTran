@@ -64,4 +64,13 @@ public interface ICorePeer
     /// Ném lên khi handler của yêu cầu hoặc thông báo ném exception; vòng lặp đọc vẫn chạy tiếp.
     /// </summary>
     event Action<Exception>? HandlerError;
+
+    /// <summary>
+    /// Raised when the core process ends on its own (crash, external kill, sidecar cascade),
+    /// carrying its exit code. The stdio connection is already down when this fires; an intentional
+    /// shutdown by this app does not raise it.
+    /// Ném lên khi tiến trình core tự kết thúc (crash, bị kill từ ngoài, sidecar kéo theo), kèm mã
+    /// thoát. Kết nối stdio đã sập khi event này nổ; app tự tắt core thì không nổ.
+    /// </summary>
+    event Action<int>? Exited;
 }

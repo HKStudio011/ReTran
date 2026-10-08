@@ -143,7 +143,8 @@ public sealed class JsonRpcServer : IJsonRpcNotifier
     /// </summary>
     private async Task DispatchRequestAsync(IJsonRpcTransport transport, JsonNode node, string method, CancellationToken ct)
     {
-        string id = node["id"]?.GetValue<string>() ?? "null";
+        JsonNode? idNode = node["id"];
+        string id = (idNode is null ? null : ExtractId(idNode)) ?? "null";
         JsonNode? @params = node["params"];
 
         if (!_handlers.TryGetValue(method, out var handler))

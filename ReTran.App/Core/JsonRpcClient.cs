@@ -125,8 +125,18 @@ public sealed class JsonRpcClient : IAsyncDisposable
                 {
                     if (node["error"] is { } error)
                     {
-                        int code = error["code"]?.GetValue<int>() ?? 0;
-                        string message = error["message"]?.GetValue<string>() ?? "Unknown RPC error";
+                        // Kind guards: Core gửi error shape lạ (không phải object / code không phải số)
+                        // không được ném từ read loop — mọi nhánh vẫn phải hoàn tất pending call.
+                        JsonObject? errorObject = error as JsonObject;
+                        int code = errorObject?["code"] is JsonValue codeValue
+                            && codeValue.GetValueKind() == JsonValueKind.Number
+                            && codeValue.TryGetValue<int>(out int parsedCode)
+                            ? parsedCode
+                            : 0;
+                        string message = errorObject?["message"] is { } messageNode
+                            && messageNode.GetValueKind() == JsonValueKind.String
+                            ? messageNode.GetValue<string>() ?? "Unknown RPC error"
+                            : "Unknown RPC error";
                         tcs.TrySetException(new RpcException(code, message));
                     }
                     else

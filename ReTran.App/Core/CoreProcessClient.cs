@@ -38,6 +38,14 @@ public sealed class CoreProcessClient : ICorePeer, IAsyncDisposable
     public event Action<Exception>? HandlerError;
 
     /// <summary>
+    /// Raised when the core process ends on its own, carrying its exit code; not raised for the
+    /// shutdown this client performs on disposal.
+    /// Ném lên khi tiến trình core tự kết thúc, kèm mã thoát; không nổ cho lần tắt do client này
+    /// thực hiện lúc dispose.
+    /// </summary>
+    public event Action<int>? Exited;
+
+    /// <summary>
     /// Locates the core executable and launches it with <see cref="StartAsync"/>.
     /// Tìm tệp thực thi của core và khởi chạy nó qua <see cref="StartAsync"/>.
     /// </summary>
@@ -76,6 +84,9 @@ public sealed class CoreProcessClient : ICorePeer, IAsyncDisposable
         // Redirected stderr must be drained or the child blocks once the pipe buffer fills.
         _proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) Trace.WriteLine($"[core] {e.Data}"); };
         _proc.BeginErrorReadLine();
+        // Crash/kill phải báo lên App; đặt handler trước khi bật raising để không bỏ sót exit tức thì.
+        _proc.Exited += OnProcessExited;
+        _proc.EnableRaisingEvents = true;
         _client = new JsonRpcClient(_proc.StandardOutput, _proc.StandardInput);
         if (_requestHandler is not null) _client.SetRequestHandler(_requestHandler);
         _client.NotificationReceived += ForwardNotification;
@@ -127,6 +138,26 @@ public sealed class CoreProcessClient : ICorePeer, IAsyncDisposable
 
     private void ForwardHandlerError(Exception ex) => HandlerError?.Invoke(ex);
 
+    // Event của Process đến trên luồng riêng: lỗi của subscriber không được kéo app xuống.
+    private void OnProcessExited(object? sender, EventArgs e)
+    {
+        int exitCode = sender is Process proc ? SafeExitCode(proc) : -1;
+        try
+        {
+            Exited?.Invoke(exitCode);
+        }
+        catch (Exception ex)
+        {
+            Trace.WriteLine($"[core] Exited handler failed: {ex.Message}");
+        }
+    }
+
+    private static int SafeExitCode(Process proc)
+    {
+        try { return proc.ExitCode; }
+        catch (InvalidOperationException) { return -1; }
+    }
+
     public async ValueTask DisposeAsync()
     {
         JsonRpcClient? client = _client;
@@ -136,6 +167,9 @@ public sealed class CoreProcessClient : ICorePeer, IAsyncDisposable
         _proc = null;
         if (proc is not null)
         {
+            // Tắt raising + bỏ handler trước khi kill: tắt có chủ đích không được báo như crash.
+            proc.Exited -= OnProcessExited;
+            proc.EnableRaisingEvents = false;
             try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { /* best effort */ }
             await proc.WaitForExitAsync().ConfigureAwait(false);
             proc.Dispose();

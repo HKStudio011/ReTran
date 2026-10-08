@@ -198,6 +198,97 @@ public class PipelineControllerTests : IDisposable
         Assert.Equal("vi", row.Dst);
     }
 
+    [Fact]
+    public async Task RequestCacheHandler_HitsAndMisses_WireShape()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        PipelineController controller = CreateController(peer, new OverlayState());
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+
+        var cache = new TranslationCache(_controllerDb!);
+        await cache.PutAsync(
+            "screen:0", "auto", "vi",
+            [("HELLO", "Xin chào"), ("BYE", "Tạm biệt")],
+            CancellationToken.None);
+
+        Func<string, JsonNode?, Task<JsonNode?>> handler = peer.RequestHandler!;
+        JsonNode? reply = await handler("translate.request_cache", new JsonObject
+        {
+            ["context"] = "screen:0",
+            ["src"] = "auto",
+            ["dst"] = "vi",
+            ["texts"] = new JsonArray("HELLO", "CHƯA CÓ", "BYE", "CŨNG CHƯA"),
+        });
+
+        // Core parse đúng shape này: hits là object text→translated, misses là array theo thứ tự input.
+        Assert.NotNull(reply);
+        JsonObject hits = reply!["hits"]!.AsObject();
+        Assert.Equal(2, hits.Count);
+        Assert.Equal("Xin chào", hits["HELLO"]!.GetValue<string>());
+        Assert.Equal("Tạm biệt", hits["BYE"]!.GetValue<string>());
+        Assert.Null(hits["CHƯA CÓ"]); // miss không được lẫn vào hits
+
+        JsonArray misses = reply["misses"]!.AsArray();
+        Assert.Equal(2, misses.Count);
+        Assert.Equal("CHƯA CÓ", misses[0]!.GetValue<string>());
+        Assert.Equal("CŨNG CHƯA", misses[1]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task RequestCacheHandler_EmptyOrUnknown_MissesAll()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        PipelineController controller = CreateController(peer, new OverlayState());
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+
+        Func<string, JsonNode?, Task<JsonNode?>> handler = peer.RequestHandler!;
+
+        JsonNode? empty = await handler("translate.request_cache", new JsonObject
+        {
+            ["context"] = "screen:0",
+            ["src"] = "auto",
+            ["dst"] = "vi",
+            ["texts"] = new JsonArray(),
+        });
+        Assert.Equal(0, empty!["hits"]!.AsObject().Count);
+        Assert.Equal(0, empty!["misses"]!.AsArray().Count);
+
+        JsonNode? unknown = await handler("translate.request_cache", new JsonObject
+        {
+            ["context"] = "screen:0",
+            ["src"] = "auto",
+            ["dst"] = "vi",
+            ["texts"] = new JsonArray("KHÔNG CÓ"),
+        });
+        Assert.Equal(0, unknown!["hits"]!.AsObject().Count);
+        Assert.Equal("KHÔNG CÓ", unknown!["misses"]!.AsArray()[0]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task CoreExited_RaisesPipelineStateChanged_WithCoreExitedReason()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        PipelineController controller = CreateController(peer, new OverlayState());
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+        Assert.True(controller.IsRunning);
+
+        bool? running = null;
+        string? reason = "not-raised";
+        controller.PipelineStateChanged += (r, arg) => { running = r; reason = arg; };
+
+        peer.RaiseExited(0);
+
+        Assert.False(running);
+        Assert.Equal("core-exited", reason);
+        Assert.False(controller.IsRunning); // controller chỉ relay signal, state thành stopped
+    }
+
     private sealed class FakeCorePeer : ICorePeer
     {
         public bool IsStarted { get; set; }
@@ -208,6 +299,7 @@ public class PipelineControllerTests : IDisposable
 
         public event Action<string, JsonNode?>? NotificationReceived;
         public event Action<Exception>? HandlerError;
+        public event Action<int>? Exited;
 
         public Task StartCoreAsync(CancellationToken ct)
         {
@@ -233,5 +325,7 @@ public class PipelineControllerTests : IDisposable
             => NotificationReceived?.Invoke(method, @params);
 
         public void RaiseHandlerError(Exception ex) => HandlerError?.Invoke(ex);
+
+        public void RaiseExited(int exitCode) => Exited?.Invoke(exitCode);
     }
 }

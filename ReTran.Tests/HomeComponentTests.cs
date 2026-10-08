@@ -222,6 +222,24 @@ public class HomeComponentTests : BunitContext, IDisposable
         await cut.WaitForAssertionAsync(() => Assert.Contains("Lỗi core: sidecar-exited", cut.Markup));
     }
 
+    [Fact]
+    public async Task PipelineRunning_ReRenderedHome_SeedsBadgeFromControllerState()
+    {
+        AddHomeServices();
+        var cut = Render<ReTran_App.Components.Pages.Home>();
+        await cut.WaitForAssertionAsync(() => Assert.Contains(_peer.Calls, c => c.Method == "core.list_sources"));
+
+        ButtonExact(cut, "Bắt đầu").Click();
+        await cut.WaitForAssertionAsync(() => Assert.Contains("Đang chạy", cut.Markup));
+
+        // Home → Settings → Home: component mới phải seed badge từ state thật của controller
+        // (trước đây hardcode "stopped" → badge sai và bấm Start ra -32600).
+        cut.Dispose();
+        var revisited = Render<ReTran_App.Components.Pages.Home>();
+        await revisited.WaitForAssertionAsync(() => Assert.Contains("Đang chạy", revisited.Markup));
+        Assert.DoesNotContain("Đang dừng", revisited.Markup);
+    }
+
     private sealed class FakeCorePeer : ICorePeer
     {
         public bool IsStarted { get; set; }
@@ -231,6 +249,7 @@ public class HomeComponentTests : BunitContext, IDisposable
 
         public event Action<string, JsonNode?>? NotificationReceived;
         public event Action<Exception>? HandlerError;
+        public event Action<int>? Exited;
 
         public Task StartCoreAsync(CancellationToken ct)
         {
@@ -268,5 +287,7 @@ public class HomeComponentTests : BunitContext, IDisposable
             => NotificationReceived?.Invoke(method, @params);
 
         public void RaiseHandlerError(Exception ex) => HandlerError?.Invoke(ex);
+
+        public void RaiseExited(int exitCode) => Exited?.Invoke(exitCode);
     }
 }

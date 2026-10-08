@@ -191,6 +191,8 @@
     {
         L.Changed += OnLangChanged;
         Pipeline.PipelineStateChanged += OnPipelineStateChanged;
+        // Quay lại trang này (Home → Settings → Home) phải lấy state thật, không hardcode "stopped".
+        _pipelineState = Pipeline.IsRunning ? "running" : "stopped";
         AppSettings current = Settings.Load();
         _quickDst = current.Dst;
         // File ghi tay có thể chứa dst ngoài danh sách — thêm vào để select không bị trống.
@@ -290,8 +292,17 @@
     private void OnPipelineStateChanged(bool running, string? reason) =>
         _ = InvokeAsync(() =>
         {
-            _pipelineState = running ? "running" : reason is null ? "stopped" : "coreError";
-            _coreReason = reason;
+            if (reason == PipelineController.CoreExitedReason)
+            {
+                // Core chết → badge dừng, lỗi hiện dưới nút (tận dụng "Lỗi core: {0}").
+                _pipelineState = "stopped";
+                _pipelineError = L.Fmt("home.status.coreError", reason);
+            }
+            else
+            {
+                _pipelineState = running ? "running" : reason is null ? "stopped" : "coreError";
+                _coreReason = reason;
+            }
             StateHasChanged();
         });
 
