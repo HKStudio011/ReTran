@@ -22,8 +22,8 @@ public class GitHubAppUpdateServiceTests
     private const string ZipAssetName = "router-balancing-test-payload.zip";
 
     private static GitHubAppUpdateService ServiceWith(HttpMessageHandler handler, string currentVersion = "1.0.0.0",
-        string? publicKeyBase64 = null) =>
-        new(new HttpClient(handler, disposeHandler: false), currentVersion, publicKeyBase64);
+        string? publicKeyBase64 = null, string? appDir = null) =>
+        new(new HttpClient(handler, disposeHandler: false), currentVersion, publicKeyBase64, appDir);
 
     private static ReleaseInfo Release(string tag, params ReleaseAsset[] assets) =>
         new(tag, $"https://github.com/HKStudio011/router-balancing/releases/tag/{tag}", null, [.. assets]);
@@ -218,19 +218,21 @@ public class GitHubAppUpdateServiceTests
     [Fact]
     public async Task InstallUpdateAsync_False_WhenUpdaterMissing()
     {
-        // Sanity: test bin không được có sẵn updater — nếu có thì nhánh "missing" không còn đúng
-        Assert.False(File.Exists(Path.Combine(AppContext.BaseDirectory, "ReTran.Updater.exe")));
-
+        // Task 6 wiring copy ReTran.Updater.exe vào output qua ProjectReference Content — test bin
+        // có thể chứa updater, nên nhánh "missing" được exercise bằng appDir trỏ vào temp rỗng.
         var payload = "PK-zip"u8.ToArray();
         using var key = new TestSigningKey();
         var release = SignedRelease(payload, key, out var signatureBase64);
+        string appDir = Path.Combine(Path.GetTempPath(), $"retran-no-updater-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(appDir);
         var service = ServiceWith(new SignedZipHandler(payload, signatureBase64),
-            publicKeyBase64: key.PublicKeyBase64);
+            publicKeyBase64: key.PublicKeyBase64, appDir: appDir);
         var downloaded = await service.DownloadUpdateAsync(release, null);
 
         try
         {
             Assert.NotNull(downloaded);
+            Assert.False(File.Exists(Path.Combine(appDir, "ReTran.Updater.exe")));
 
             // Signature hợp lệ → vượt qua verify, fail ở bước thiếu updater → false
             Assert.False(await service.InstallUpdateAsync());
@@ -245,6 +247,9 @@ public class GitHubAppUpdateServiceTests
             {
                 File.Delete(service.DownloadedSignaturePath);
             }
+            try { Directory.Delete(appDir, recursive: true); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
     }
 

@@ -25,6 +25,16 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
     /// </summary>
     private readonly string _signingPublicKeyBase64;
 
+    /// <summary>
+    /// Install directory the updater is looked up in — <c>AppContext.BaseDirectory</c> in
+    /// production; tests inject an empty temp dir to exercise the missing-updater branch even
+    /// though the test bin ships ReTran.Updater.exe (ProjectReference Content from Task 6 wiring).
+    /// Thư mục cài đặt mà updater được tìm trong đó — <c>AppContext.BaseDirectory</c> ở production;
+    /// test inject thư mục tạm rỗng để test nhánh thiếu updater dù test bin có sẵn
+    /// ReTran.Updater.exe (ProjectReference Content của wiring Task 6).
+    /// </summary>
+    private readonly string _appDir;
+
     /// <inheritdoc />
     public string CurrentVersion { get; }
 
@@ -50,7 +60,9 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
 
     // Overload nội bộ cho test: Assembly.GetEntryAssembly() trong test host trả về testhost
     // chứ không phải app — không ép được thì mọi assertion về version sẽ phụ thuộc runner.
-    internal GitHubAppUpdateService(HttpClient http, string currentVersion, string? signingPublicKeyBase64 = null)
+    // appDir cho test: test bin giờ chứa sẵn ReTran.Updater.exe (Task 6 wiring) nên nhánh
+    // "thiếu updater" phải chỉ vào thư mục trống thay vì AppContext.BaseDirectory.
+    internal GitHubAppUpdateService(HttpClient http, string currentVersion, string? signingPublicKeyBase64 = null, string? appDir = null)
     {
         ArgumentNullException.ThrowIfNull(http);
         ArgumentNullException.ThrowIfNull(currentVersion);
@@ -58,6 +70,7 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
         _http = http;
         CurrentVersion = currentVersion;
         _signingPublicKeyBase64 = signingPublicKeyBase64 ?? PackageSignatureVerifier.ReleasePublicKeyBase64;
+        _appDir = appDir ?? AppContext.BaseDirectory;
     }
 
     /// <inheritdoc />
@@ -273,7 +286,7 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
 
         try
         {
-            var appDir = AppContext.BaseDirectory;
+            var appDir = _appDir;
             if (FindUpdaterPath(appDir) is null) return Task.FromResult(false);
 
             // Updater phải chạy từ shadow copy ngoài appDir: chạy từ chính appDir thì

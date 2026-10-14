@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using ReTran_App.Core;
 using ReTran_App.Data;
 using ReTran_App.Services;
+using ReTran_App.Services.Update;
 
 namespace ReTran_App
 {
@@ -35,6 +36,15 @@ namespace ReTran_App
             builder.Services.AddSingleton<ICorePeer>(sp => sp.GetRequiredService<CoreProcessClient>());
             builder.Services.AddSingleton<TranslationCache>();
             builder.Services.AddSingleton<PipelineController>();
+
+            builder.Services.AddSingleton(_ => new HttpClient());
+            builder.Services.AddSingleton<GitHubAppUpdateService>();
+            builder.Services.AddSingleton<IAppUpdateService>(sp => sp.GetRequiredService<GitHubAppUpdateService>());
+            builder.Services.AddSingleton<UpdateStopper>();
+            builder.Services.AddSingleton<IUpdateStopper>(sp => sp.GetRequiredService<UpdateStopper>());
+            builder.Services.AddSingleton<UpdateCoordinator>();
+            builder.Services.AddSingleton<UpdateCheckService>();
+            builder.Services.AddSingleton<IAppShutdown, MauiAppShutdown>();
 
 #if DEBUG
     		builder.Services.AddBlazorWebViewDeveloperTools();
