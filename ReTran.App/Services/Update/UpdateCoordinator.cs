@@ -194,12 +194,21 @@ public sealed class UpdateCoordinator : IDisposable
         }
         catch (Exception ex)
         {
-            Fail(UpdateError.DownloadFailed, $"Update download failed: {ex.Message}");
+            // A LATE fault after CancelUpdate/Dispose superseded this run must exit silently —
+            // mirrors the success-path check below; Fail's runId guard is the second line of
+            // defense if the cancel lands between this check and Fail's lock.
+            if (cts.IsCancellationRequested)
+            {
+                return;
+            }
+
+            Fail(UpdateError.DownloadFailed, $"Update download failed: {ex.Message}", runId);
             return;
         }
 
         // CancelUpdate/Dispose won: the canceller already reset the state (Cancelled fired, flags
-        // cleared) — just return. Checked AFTER the await because the download API has no token.
+        // cleared) — just return. Checked AFTER the await because the download API has no token;
+        // the null branch below is therefore never reached for a superseded run.
         if (cts.IsCancellationRequested)
         {
             return;
@@ -207,14 +216,14 @@ public sealed class UpdateCoordinator : IDisposable
 
         if (zipPath is null)
         {
-            Fail(UpdateError.DownloadFailed, "Update download failed: no zip file returned.");
+            Fail(UpdateError.DownloadFailed, "Update download failed: no zip file returned.", runId);
             return;
         }
 
         // Verify BEFORE stopping services — a bad package must not drag the services down with it.
         if (!_updates.VerifyDownloadedPackage())
         {
-            Fail(UpdateError.VerifyFailed, "Update aborted: downloaded package verification failed.");
+            Fail(UpdateError.VerifyFailed, "Update aborted: downloaded package verification failed.", runId);
             return;
         }
 
@@ -240,9 +249,30 @@ public sealed class UpdateCoordinator : IDisposable
             using var stopCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, stopTimeout.Token);
             await _stopper.StopServicesAsync(stopCts.Token);
         }
+        catch (Exception ex) when (cts.IsCancellationRequested)
+        {
+            // The RUN's CTS was cancelled (Dispose won during the stop window — CancelUpdate is a
+            // no-op while finalizing), not the 30s timeout: the app is tearing down, so abort
+            // silently — Warn + reset only, never raise Failed mid-teardown. The run-CTS check
+            // takes precedence over the timeout in the filter (when the run is dead the timeout
+            // is irrelevant).
+            _log.LogWarning("{Message}", $"Update aborted: cancelled while stopping services: {ex.Message}");
+            Reset(runId);
+            return;
+        }
         catch (Exception ex)
         {
-            Fail(UpdateError.StopServicesFailed, $"Update aborted: stop services failed: {ex.Message}");
+            // Timeout-linked token cancelled, or any other exception → a real stop failure.
+            Fail(UpdateError.StopServicesFailed, $"Update aborted: stop services failed: {ex.Message}", runId);
+            return;
+        }
+
+        // Dispose may have cancelled the run while a non-observant stopper completed normally —
+        // the same silent abort applies (there is no Failed to raise from here on either).
+        if (cts.IsCancellationRequested)
+        {
+            _log.LogWarning("{Message}", "Update aborted: cancelled while stopping services.");
+            Reset(runId);
             return;
         }
 
@@ -253,13 +283,13 @@ public sealed class UpdateCoordinator : IDisposable
         }
         catch (Exception ex)
         {
-            Fail(UpdateError.InstallFailed, $"Update aborted: installer launch failed: {ex.Message}");
+            Fail(UpdateError.InstallFailed, $"Update aborted: installer launch failed: {ex.Message}", runId);
             return;
         }
 
         if (!installed)
         {
-            Fail(UpdateError.InstallFailed, "Update aborted: installer launch failed.");
+            Fail(UpdateError.InstallFailed, "Update aborted: installer launch failed.", runId);
             return;
         }
 
@@ -309,12 +339,17 @@ public sealed class UpdateCoordinator : IDisposable
 
     /// <summary>
     /// Teardown: cancels the CTS and releases a pending update (if any). Does NOT fire
-    /// <see cref="Cancelled"/> — this is not a user action. When Dispose runs inside the finalize
-    /// window (stop/install already running) the pipeline still proceeds to Quit — the app is
-    /// tearing down; events may still fire after Dispose.
+    /// <see cref="Cancelled"/> — this is not a user action. Actual behavior per window:
+    /// before finalize (download/verify) the pipeline exits at its next cancellation check and the
+    /// state resets silently; during the stop-services step the run aborts silently (Warn + reset,
+    /// no <see cref="Failed"/>); during install the pipeline still proceeds to launch the updater
+    /// and Quit — the app is tearing down, events may still fire after Dispose.
     /// Teardown: huỷ CTS và giải phóng update đang chờ (nếu có). Không bắn <see cref="Cancelled"/> —
-    /// đây không phải hành động người dùng. Nếu Dispose chạy trong window finalise thì pipeline vẫn
-    /// tiếp tục tới Quit — app đang teardown; event có thể vẫn fire sau Dispose.
+    /// đây không phải hành động người dùng. Hành vi thực tế theo window: trước finalise
+    /// (download/verify) pipeline thoát ở check huỷ kế tiếp và reset im lặng; trong bước dừng
+    /// service, run hủy im lặng (Warn + reset, KHÔNG <see cref="Failed"/>); trong lúc install,
+    /// pipeline vẫn chạy tiếp khởi chạy updater và Quit — app đang teardown; event có thể vẫn
+    /// fire sau Dispose.
     /// </summary>
     public void Dispose()
     {
@@ -335,23 +370,30 @@ public sealed class UpdateCoordinator : IDisposable
 
     /// <summary>
     /// Stops the pipeline on an error: cancels the run's CTS, logs Warn, fires <see cref="Failed"/>,
-    /// then resets the state. The <see cref="Failed"/> handler still sees <see cref="UpdateInProgress"/>
-    /// as <see langword="true"/> — a re-entrant Start without <see cref="Dispose"/> throws; if the
-    /// handler Disposes then Starts a new run, the trailing release behind it is a no-op thanks to the
-    /// <c>runId</c> check.
+    /// then resets the state. A STALE run (<c>runId</c> no longer matching, i.e. CancelUpdate/Dispose
+    /// superseded it and a newer run owns the state) only logs — it never cancels the current run's
+    /// CTS, never fires <see cref="Failed"/> and never resets. The <see cref="Failed"/> handler still
+    /// sees <see cref="UpdateInProgress"/> as <see langword="true"/> — a re-entrant Start without
+    /// <see cref="Dispose"/> throws; if the handler Disposes then Starts a new run, the trailing
+    /// release behind it is a no-op thanks to the <c>runId</c> check.
     /// Dừng update vì lỗi: huỷ CTS của run, log Warn, bắn <see cref="Failed"/>, MỚI reset trạng thái.
-    /// Handler của <see cref="Failed"/> thấy <see cref="UpdateInProgress"/> còn <see langword="true"/> —
-    /// Start lại không qua <see cref="Dispose"/> sẽ throw; nếu handler Dispose rồi Start run mới,
-    /// release trailing phía sau là no-op nhờ check <c>runId</c>.
+    /// Run CŨ (<c>runId</c> không còn khớp — CancelUpdate/Dispose đã thay thế nó và run mới đang sở
+    /// hữu trạng thái) chỉ log — không huỷ CTS của run hiện tại, không bắn <see cref="Failed"/>,
+    /// không reset. Handler của <see cref="Failed"/> thấy <see cref="UpdateInProgress"/> còn
+    /// <see langword="true"/> — Start lại không qua <see cref="Dispose"/> sẽ throw; nếu handler
+    /// Dispose rồi Start run mới, release trailing phía sau là no-op nhờ check <c>runId</c>.
     /// </summary>
-    private void Fail(UpdateError error, string message)
+    /// <param name="error">The failure kind for the UI. Loại lỗi cho UI.</param>
+    /// <param name="message">Warn log message. Thông điệp ghi Warn.</param>
+    /// <param name="runId">The failing pipeline's own run number — never re-read from shared state. Số thứ tự run của chính pipeline đang fail — không đọc lại từ state chung.</param>
+    private void Fail(UpdateError error, string message, int runId)
     {
         bool active;
-        int runId;
         lock (_sync)
         {
-            active = _updateInProgress;
-            runId = _runId;
+            // active only for THIS run: a stale run must not cancel the newer run's CTS, fire a
+            // spurious Failed or reset the newer run's state.
+            active = _updateInProgress && _runId == runId;
             if (active)
             {
                 // Cancel the CTS BEFORE firing Failed: the pipeline checks IsCancellationRequested

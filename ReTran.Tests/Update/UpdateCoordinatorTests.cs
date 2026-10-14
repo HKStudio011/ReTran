@@ -256,6 +256,66 @@ public class UpdateCoordinatorTests
         Assert.Single(failed);
     }
 
+    [Fact]
+    public async Task Dispose_DuringStopServices_AbortsSilentlyWithoutFailed()
+    {
+        // Dispose thắng trong window stop-services (cooperative stopper ném OCE theo token):
+        // abort IM LẶNG — Warn + reset, KHÔNG Failed giữa lúc app đang teardown.
+        using var fx = CreateFixtures();
+        var failed = new List<UpdateError>();
+        fx.Coordinator.Failed += failed.Add;
+        fx.Updates.DownloadTcs.SetResult(Path.Combine(Path.GetTempPath(), "retran-9.9.9.zip"));
+        fx.Stopper.BlockStop();
+
+        var startTask = fx.Coordinator.StartUpdateAsync(Release());
+        await WaitUntilAsync(() => fx.Coordinator.IsFinalizing, "pipeline phải vào finalise");
+
+        fx.Coordinator.Dispose();
+        await startTask; // thoát im lặng, không ném exception
+
+        Assert.Empty(failed);
+        Assert.False(fx.Coordinator.UpdateInProgress);
+        Assert.False(fx.Coordinator.IsFinalizing);
+        Assert.DoesNotContain("install", fx.Calls);
+        Assert.DoesNotContain("quit", fx.Calls);
+        Assert.Contains(fx.Log.Warnings, w =>
+            w.Contains("stopping services", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task StartUpdateAsync_StaleRunDownloadFault_DoesNotClobberNewRun()
+    {
+        // Run 1 fault download SAU khi CancelUpdate + run 2 đã start: catch của run 1 phải thoát
+        // im lặng — không bắn Failed, không huỷ CTS/reset trạng thái của run 2.
+        using var fx = CreateFixtures();
+        var failed = new List<UpdateError>();
+        fx.Coordinator.Failed += failed.Add;
+        var run1Tcs = fx.Updates.DownloadTcs;
+
+        var startRun1 = fx.Coordinator.StartUpdateAsync(Release());
+        await WaitUntilAsync(() => fx.Calls.Contains("download"), "run 1 download phải bắt đầu");
+
+        fx.Coordinator.CancelUpdate();
+        fx.Updates.DownloadTcs =
+            new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var startRun2 = fx.Coordinator.StartUpdateAsync(Release());
+        await WaitUntilAsync(
+            () => fx.Calls.Count(c => c == "download") == 2, "run 2 download phải bắt đầu");
+
+        run1Tcs.SetException(new InvalidOperationException("late download fault"));
+        await startRun1; // run 1 thoát im lặng
+
+        Assert.Empty(failed);
+        Assert.True(fx.Coordinator.UpdateInProgress, "run 2 không được bị reset bởi Fail của run 1");
+        Assert.False(fx.Stopper.StopCalled);
+
+        fx.Updates.DownloadTcs.SetResult(Path.Combine(Path.GetTempPath(), "retran-9.9.9.zip"));
+        await startRun2;
+
+        Assert.Equal(["download", "download", "verify", "stop", "install", "quit"], fx.Calls);
+        Assert.Empty(failed);
+    }
+
     // ===== Test doubles =====
 
     private sealed record Fixtures(
@@ -334,10 +394,13 @@ public class UpdateCoordinatorTests
                 throw ThrowOnStop;
             }
 
+            // Quan sát token: Dispose/timeout huỷ trong lúc chặn → ném OCE (cooperative stopper)
             if (StopBlock is not null)
             {
-                await StopBlock.Task;
+                await StopBlock.Task.WaitAsync(ct);
             }
+
+            ct.ThrowIfCancellationRequested();
         }
     }
 
