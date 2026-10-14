@@ -67,4 +67,8 @@
         </PackageReference>
     </ItemGroup>
 
+    <ItemGroup>
+        <InternalsVisibleTo Include="ReTran.Tests" />
+    </ItemGroup>
+
 </Project>
