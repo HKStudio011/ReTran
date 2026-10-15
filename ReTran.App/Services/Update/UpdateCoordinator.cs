@@ -262,7 +262,12 @@ public sealed class UpdateCoordinator : IDisposable
         }
         catch (Exception ex)
         {
-            // Timeout-linked token cancelled, or any other exception → a real stop failure.
+            // The production UpdateStopper never throws: on this 30s timeout it swallows the OCE
+            // per step, still force-kills the core (step 2) and disposes the feed (step 3), then
+            // returns normally — locks are released, so reaching install+quit after a stop timeout
+            // is safe and intended, NOT a stop failure. This catch exists for the IUpdateStopper
+            // contract: a non-production stopper could fault before releasing anything, and only
+            // then is this a real stop failure.
             Fail(UpdateError.StopServicesFailed, $"Update aborted: stop services failed: {ex.Message}", runId);
             return;
         }

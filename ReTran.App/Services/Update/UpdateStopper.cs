@@ -17,7 +17,7 @@ public sealed class UpdateStopper : IUpdateStopper
 {
     private readonly PipelineController _pipeline;
     private readonly CoreProcessClient _core;
-    private readonly OverlayFeedServer _feed;
+    private readonly IOverlayFeedServer _feed;
     private readonly ILogger<UpdateStopper> _log;
 
     /// <summary>
@@ -32,7 +32,7 @@ public sealed class UpdateStopper : IUpdateStopper
     public UpdateStopper(
         PipelineController pipeline,
         CoreProcessClient core,
-        OverlayFeedServer feed,
+        IOverlayFeedServer feed,
         ILogger<UpdateStopper> log)
     {
         _pipeline = pipeline ?? throw new ArgumentNullException(nameof(pipeline));

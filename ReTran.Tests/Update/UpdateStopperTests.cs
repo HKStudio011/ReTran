@@ -134,6 +134,42 @@ public class UpdateStopperTests : IDisposable
     }
 
     [Fact]
+    public async Task StopServicesAsync_WhenCoreDisposeThrows_StillDisposesFeedAndDoesNotThrow()
+    {
+        // Brief Step 3: bước (2) throw → nuốt + log warn, bước (3) vẫn chạy, method không ném.
+        var peer = new FakeCorePeer { IsStarted = true };
+        PipelineController pipeline = CreatePipeline(peer);
+
+        var core = new ThrowingCoreProcessClient();
+        var feed = new OverlayFeedServer(new OverlayState(), port: 0);
+        var log = new RecordingLogger<UpdateStopper>();
+        var stopper = new UpdateStopper(pipeline, core, feed, log);
+
+        await stopper.StopServicesAsync(TestContext.Current.CancellationToken); // không ném
+
+        Assert.Single(log.Warnings);    // nuốt exception + log warn
+        await AssertFeedDisposed(feed); // bước (3) vẫn chạy sau khi bước (2) throw
+    }
+
+    [Fact]
+    public async Task StopServicesAsync_WhenFeedDisposeThrows_DoesNotThrow()
+    {
+        // Brief Step 3: bước (3) throw → nuốt + log warn, method không ném (bước cuối — không còn bước sau).
+        var peer = new FakeCorePeer { IsStarted = true };
+        PipelineController pipeline = CreatePipeline(peer);
+
+        var core = new CoreProcessClient();
+        var feed = new ThrowingFeedServer();
+        var log = new RecordingLogger<UpdateStopper>();
+        var stopper = new UpdateStopper(pipeline, core, feed, log);
+
+        await stopper.StopServicesAsync(TestContext.Current.CancellationToken); // không ném
+
+        Assert.True(feed.DisposeCalled); // bước (3) đã được gọi (rồi mới throw)
+        Assert.Single(log.Warnings);     // nuốt exception + log warn
+    }
+
+    [Fact]
     public async Task StopServicesAsync_CalledTwice_SecondCallIsNoOp()
     {
         var peer = new FakeCorePeer { IsStarted = true };
@@ -196,6 +232,25 @@ public class UpdateStopperTests : IDisposable
         public void RaiseHandlerError(Exception ex) => HandlerError?.Invoke(ex);
 
         public void RaiseExited(int exitCode) => Exited?.Invoke(exitCode);
+    }
+
+    /// <summary>CoreProcessClient subclass ném đúng lúc DisposeAsync — kiểm chứng cách ly bước (2) của UpdateStopper.</summary>
+    private sealed class ThrowingCoreProcessClient : CoreProcessClient
+    {
+        public override ValueTask DisposeAsync()
+            => throw new InvalidOperationException("simulated core dispose failure");
+    }
+
+    /// <summary>Fake IOverlayFeedServer ném khi DisposeAsync — kiểm chứng cách ly bước (3).</summary>
+    private sealed class ThrowingFeedServer : IOverlayFeedServer
+    {
+        public bool DisposeCalled { get; private set; }
+
+        public ValueTask DisposeAsync()
+        {
+            DisposeCalled = true;
+            throw new InvalidOperationException("simulated feed dispose failure");
+        }
     }
 
     /// <summary>ILogger ghi lại message ≥ Warning để xác nhận bước throw bị nuốt + log warn.</summary>

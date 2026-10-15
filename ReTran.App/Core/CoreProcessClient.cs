@@ -7,7 +7,7 @@ namespace ReTran_App.Core;
 /// Launches the headless ReTran.Core.exe as a child process and talks JSON-RPC over its stdio.
 /// Khởi chạy ReTran.Core.exe không-UI làm tiến trình con và nói chuyện JSON-RPC qua stdio của nó.
 /// </summary>
-public sealed class CoreProcessClient : ICorePeer, IAsyncDisposable
+public class CoreProcessClient : ICorePeer, IAsyncDisposable
 {
     private Process? _proc;
     private JsonRpcClient? _client;
@@ -158,7 +158,13 @@ public sealed class CoreProcessClient : ICorePeer, IAsyncDisposable
         catch (InvalidOperationException) { return -1; }
     }
 
-    public async ValueTask DisposeAsync()
+    /// <summary>
+    /// Kills the core process tree and releases the JSON-RPC connection; idempotent.
+    /// Virtual so test doubles can simulate a disposal failure (UpdateStopper's per-step isolation).
+    /// Kill cây tiến trình core và giải phóng kết nối JSON-RPC; idempotent.
+    /// Virtual để test double giả lập lỗi disposal (cách ly từng bước của UpdateStopper).
+    /// </summary>
+    public virtual async ValueTask DisposeAsync()
     {
         JsonRpcClient? client = _client;
         _client = null;

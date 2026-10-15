@@ -25,6 +25,7 @@ namespace ReTran_App
             builder.Services.AddSingleton<I18nService>();
             builder.Services.AddSingleton<OverlayState>();
             builder.Services.AddSingleton<OverlayFeedServer>();
+            builder.Services.AddSingleton<IOverlayFeedServer>(sp => sp.GetRequiredService<OverlayFeedServer>());
 
             string dbPath = TranslationCache.DefaultDbPath;
             builder.Services.AddDbContext<RetranDbContext>(

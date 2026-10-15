@@ -12,7 +12,7 @@ namespace ReTran_App.Services;
 /// </summary>
 /// <param name="state">The overlay state watched for new frames. / Trạng thái overlay được theo dõi để lấy khung hình mới.</param>
 /// <param name="port">Preferred localhost port (default 17863); 0 picks a free port. / Cổng localhost mong muốn (mặc định 17863); 0 nghĩa là tự chọn cổng trống.</param>
-public sealed class OverlayFeedServer(OverlayState state, int port = 17863) : IAsyncDisposable
+public sealed class OverlayFeedServer(OverlayState state, int port = 17863) : IAsyncDisposable, IOverlayFeedServer
 {
     private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(15);
     private static readonly JsonSerializerOptions JsonOptions = new()
