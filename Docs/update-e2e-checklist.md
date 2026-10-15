@@ -1,6 +1,6 @@
 # ReTran — Checklist E2E cập nhật bản release (manual)
 
-Checklist chạy tay trước/at mỗi lần phát hành bản cập nhật. Không chạy được local tự động (cần GitHub release thật + app đã cài) → ghi lại kết quả từng mục tại đây hoặc vào release notes.
+Checklist chạy tay trước mỗi lần phát hành bản cập nhật. Không chạy được local tự động (cần GitHub release thật + app đã cài) → ghi lại kết quả từng mục tại đây hoặc vào release notes.
 
 Nguồn: spec `Docs/superpowers/specs/2026-10-14-version-update-design.md` (§ layout zip, fail-closed verify) + plan `Docs/superpowers/plans/2026-10-14-version-update.md`.
 
@@ -17,9 +17,9 @@ Nguồn: spec `Docs/superpowers/specs/2026-10-14-version-update-design.md` (§ l
    - Bump `<Version>` / `<ApplicationDisplayVersion>` trong `ReTran.App/ReTran.App.csproj`.
    - Tag `v<version>` (khớp `ApplicationDisplayVersion` — workflow có bước verify, sai là fail sớm).
    - Publish release trên GitHub → workflow chạy: publish App (self-contained win-x64) → publish Core + copy vào output → verify 3 exe → zip → ký `.sig` (ECDSA) → SHA256SUMS → attest → upload assets.
-   - Verify assets: `ReTran-<version>-win-x64.zip`, `.zip.sig`, `SHA256SUMS.txt`; zip chứa đủ `ReTran.App.exe`, `ReTran.Core.exe`, `ReTran.Updater.exe` + `ReTran.Core.runtimeconfig.json` / `ReTran.Core.deps.json`.
+   - Verify assets: `ReTran-v<version>-win-x64.zip` (workflow zip theo `github.ref_name` — tên asset gồm `v`, ví dụ `ReTran-v0.2-win-x64.zip`), `.zip.sig`, `SHA256SUMS.txt`; zip chứa đủ `ReTran.App.exe`, `ReTran.Core.exe`, `ReTran.Updater.exe` + `ReTran.Core.runtimeconfig.json` / `ReTran.Core.deps.json`.
 3. **Happy path cập nhật**
-   - Cài bản zip cũ hơn (bản trước) → mở app → app check nền (định kỳ ~5 s/lần poll theo cấu hình) → toast "Có bản cập nhật mới" → bấm "Cập nhật ngay" → modal progress → app tự tắt → updater cài → app mở lại báo version mới (`AppVersionFormatter`).
+   - Cài bản zip cũ hơn (bản trước) → mở app → app check nền sau ~5 s (lần đầu) → lặp mỗi 24 h → toast "Có bản cập nhật mới" → bấm "Cập nhật ngay" → modal progress → app tự tắt → updater cài → app mở lại báo version mới (`AppVersionFormatter`).
 4. **Negative cases (fail-closed)**
    - Xóa file `.sig` trên release → client **từ chối** update (không có chữ ký = không cài).
    - Zip bị tampered (đổi 1 byte) → client báo `VerifyFailed` (sai chữ ký ECDSA), không cài.
