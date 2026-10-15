@@ -1,7 +1,12 @@
 @page "/settings"
 @using ReTran_App.Services
+@using ReTran_App.Services.Update
 @inject ReTran_App.Services.I18nService L
 @inject ReTran_App.Services.AppSettingsService SettingsStore
+@inject UpdateCheckService Check
+@inject UpdateCoordinator Coordinator
+@inject ToastService Toast
+@inject IAppUpdateService Updates
 @implements IDisposable
 
 <PageTitle>@(L["settings.title"])</PageTitle>
@@ -49,6 +54,25 @@
         <p class="text-sm text-secondary">@(L["settings.note.srcNextStart"])</p>
     </Card>
 
+    @if (UpdateFeature.IsEnabled)
+    {
+        <Card Title="@(L["update.title"])">
+            <div class="text-sm">@(L["update.version"]): @_appVersion
+                @if (Check.IsUpdateAvailable)
+                {
+                    <span class="ml-1 rounded-full bg-warning px-2 py-0.5 text-xs">@(L["update.badge"])</span>
+                }
+            </div>
+            <div class="flex items-center gap-3 flex-wrap">
+                <button class="btn btn-primary" disabled="@_checking" @onclick="CheckAsync">@(L["update.check"])</button>
+                @if (Check.IsUpdateAvailable)
+                {
+                    <button class="btn btn-primary" disabled="@Coordinator.UpdateInProgress" @onclick="UpdateNowAsync">@(L["update.now"])</button>
+                }
+            </div>
+        </Card>
+    }
+
     <div class="flex items-center gap-3 flex-wrap">
         <button class="btn btn-primary" @onclick="Save">@(L["settings.btn.save"])</button>
         @if (StatusText.Length > 0)
@@ -75,6 +99,8 @@
     private string[] _srcOptions = SrcCodes;
     private string[] _dstOptions = DstCodes;
     private string? _statusKind; // "saved" | "saveFailed" | null
+    private string _appVersion = string.Empty;
+    private bool _checking;
 
     private string StatusText => _statusKind switch
     {
@@ -90,6 +116,7 @@
         _model.Src = current.Src;
         _model.Dst = current.Dst;
         _model.ApiKey = current.ApiKey;
+        _appVersion = AppVersionFormatter.Format(Updates.CurrentVersion);
         // File ghi tay có thể chứa giá trị ngoài danh sách — thêm vào để select không bị trống.
         if (Array.IndexOf(_srcOptions, current.Src) < 0) _srcOptions = [current.Src, .. _srcOptions];
         if (Array.IndexOf(_dstOptions, current.Dst) < 0) _dstOptions = [current.Dst, .. _dstOptions];
@@ -111,6 +138,52 @@
     }
 
     private void OnLangChanged() => _ = InvokeAsync(StateHasChanged);
+
+    private async Task CheckAsync()
+    {
+        if (_checking) return;
+        _checking = true;
+        try
+        {
+            // Bắt trạng thái TRƯỚC khi check: chuyển tiếp none→available sẽ bắn UpdateFound
+            // (MainLayout đã toast) — Settings chỉ toast khi user check lại update
+            // đã biết (không có chuyển tiếp) để làm phản hồi nút Check, tránh toast đôi
+            var wasAvailable = Check.IsUpdateAvailable;
+            var result = await Check.CheckOnceAsync();
+            if (result == UpdateCheckResult.UpdateAvailable && wasAvailable
+                && Check.AvailableRelease is { } release)
+            {
+                Toast.Show(string.Format(L["update.available"], release.TagName));
+            }
+            else if (result == UpdateCheckResult.AlreadyLatest)
+            {
+                Toast.Show(L["update.latest"]);
+            }
+            else if (result == UpdateCheckResult.Failed)
+            {
+                // User chủ động bấm Check → cần feedback lỗi (check nền 24h vẫn im lặng vì không có ai xem toast)
+                Toast.Show(L["update.checkFailed"], ToastSeverity.Error);
+            }
+        }
+        finally
+        {
+            _checking = false;
+        }
+    }
+
+    private void UpdateNowAsync()
+    {
+        // is { } guard: 24h loop có thể vừa xác nhận "bản mới nhất" và xoá release
+        // giữa lúc render nút và lúc bấm — chạy với release null sẽ bắt đầu update "ma"
+        // rồi fail ở download, toast "tải thất bại" sai bản chất
+        if (Check.AvailableRelease is not { } release) return;
+        // Double-click trước khi modal render: StartUpdateAsync lần 2 throw
+        // InvalidOperationException trên task fire-and-forget (unobserved) — chặn sớm tại UI
+        if (Coordinator.UpdateInProgress) return;
+        // Fire-and-forget: await sẽ giữ handler mở suốt thời gian download —
+        // modal hiển thị qua UpdateCoordinator.UpdateInProgress + event Changed
+        _ = Coordinator.StartUpdateAsync(release);
+    }
 
     public void Dispose() => L.Changed -= OnLangChanged;
 }

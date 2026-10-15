@@ -1,4 +1,11 @@
 ﻿@inherits LayoutComponentBase
+@implements IDisposable
+@using ReTran_App.Services
+@using ReTran_App.Services.Update
+@inject ToastService Toast
+@inject UpdateCheckService UpdateCheck
+@inject UpdateCoordinator Coordinator
+@inject I18nService L
 
 <div class="h-screen w-screen bg-background text-surface">
     <div class="flex h-full">
@@ -11,4 +18,74 @@
             </div>
         </main>
     </div>
+
+    @* Modal update toàn màn hình — tự render rỗng khi không có update đang chạy *@
+    <UpdateModal />
+
+    @* Toast stack: fixed góc dưới phải, z-index cao để nổi trên nội dung *@
+    <div class="fixed bottom-4 right-4 z-50 flex flex-col gap-2">
+        @foreach (var toast in _toasts)
+        {
+            <div class="@ToastClass(toast.Severity) rounded px-4 py-2 text-light shadow" @key="toast.Id">
+                @toast.Message
+            </div>
+        }
+    </div>
 </div>
+
+@code {
+    private readonly List<ToastItem> _toasts = [];
+
+    protected override void OnInitialized()
+    {
+        Toast.ToastAdded += OnToastAdded;
+        UpdateCheck.UpdateFound += OnUpdateFound;
+        Coordinator.Failed += OnUpdateFailed;
+        Coordinator.Cancelled += OnUpdateCancelled;
+        base.OnInitialized();
+    }
+
+    private void OnToastAdded(ToastItem item) => _ = InvokeAsync(async () =>
+    {
+        _toasts.Add(item);
+        StateHasChanged();
+        await Task.Delay(TimeSpan.FromSeconds(4));
+        _toasts.Remove(item);
+        StateHasChanged();
+    });
+
+    // UpdateFound bắn từ luồng nền của UpdateCheckService — marshal về UI thread
+    private void OnUpdateFound(ReleaseInfo release) => _ = InvokeAsync(() =>
+        Toast.Show(string.Format(L["update.available"], release.TagName)));
+
+    // Cả 4 loại lỗi (UpdateError) đều toast kèm lý do — chi tiết đầy đủ đã vào Logs (spec §11)
+    private void OnUpdateFailed(UpdateError error) => _ = InvokeAsync(() =>
+    {
+        var reason = error switch
+        {
+            UpdateError.DownloadFailed => L["update.error.download"],
+            UpdateError.VerifyFailed => L["update.error.verify"],
+            UpdateError.StopServicesFailed => L["update.error.stop"],
+            UpdateError.InstallFailed => L["update.error.install"],
+            _ => L["update.error.install"],
+        };
+        Toast.Show(string.Format(L["update.failed"], reason), ToastSeverity.Error);
+    });
+
+    private void OnUpdateCancelled() => _ = InvokeAsync(() =>
+        Toast.Show(L["update.cancelled"]));
+
+    private static string ToastClass(ToastSeverity severity) => severity switch
+    {
+        ToastSeverity.Error => "bg-danger",
+        _ => "bg-info",
+    };
+
+    public void Dispose()
+    {
+        Toast.ToastAdded -= OnToastAdded;
+        UpdateCheck.UpdateFound -= OnUpdateFound;
+        Coordinator.Failed -= OnUpdateFailed;
+        Coordinator.Cancelled -= OnUpdateCancelled;
+    }
+}
