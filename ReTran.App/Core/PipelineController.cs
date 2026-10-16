@@ -97,6 +97,12 @@ public sealed class PipelineController
     public bool IsRunning { get; private set; }
 
     /// <summary>
+    /// The capture source of the current session, or <see langword="null"/> when no session is active.
+    /// Nguồn capture của phiên hiện tại, hoặc <see langword="null"/> khi không có phiên đang chạy.
+    /// </summary>
+    public SourceSelection? ActiveSource { get; private set; }
+
+    /// <summary>
     /// Ensures the core is running, wires the Core→App handlers once, then sends
     /// <c>core.start</c> built from the persisted settings (via <see cref="AppSettingsService.Load"/>)
     /// and the given source. <c>ocrFps</c>/<c>captureFps</c> are omitted so Core applies its defaults.
@@ -134,6 +140,7 @@ public sealed class PipelineController
         };
         await _peer.CallAsync("core.start", @params, ct).ConfigureAwait(false);
         IsRunning = true;
+        ActiveSource = source;
     }
 
     /// <summary>
@@ -146,6 +153,7 @@ public sealed class PipelineController
     {
         await _peer.CallAsync("core.stop", null, ct).ConfigureAwait(false);
         IsRunning = false;
+        ActiveSource = null;
     }
 
     /// <summary>
@@ -220,6 +228,7 @@ public sealed class PipelineController
     {
         _log.LogWarning("Core process exited with code {ExitCode}; the pipeline is gone.", exitCode);
         IsRunning = false;
+        ActiveSource = null;
         PipelineStateChanged?.Invoke(false, CoreExitedReason);
     }
 

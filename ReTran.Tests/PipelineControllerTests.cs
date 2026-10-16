@@ -289,6 +289,43 @@ public class PipelineControllerTests : IDisposable
         Assert.False(controller.IsRunning); // controller chỉ relay signal, state thành stopped
     }
 
+    [Fact]
+    public async Task Start_SetsActiveSource_ToSelection()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        PipelineController controller = CreateController(peer, new OverlayState());
+        SourceSelection selection = new(UseWindow: true, Monitor: 0, HwndHex: "0x1234");
+
+        await controller.StartAsync(selection, CancellationToken.None);
+
+        Assert.Equal(selection, controller.ActiveSource);
+    }
+
+    [Fact]
+    public async Task Stop_ClearsActiveSource()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        PipelineController controller = CreateController(peer, new OverlayState());
+        await controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None);
+        Assert.NotNull(controller.ActiveSource);
+
+        await controller.StopAsync(CancellationToken.None);
+
+        Assert.Null(controller.ActiveSource);
+    }
+
+    [Fact]
+    public async Task CoreExited_ClearsActiveSource()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        PipelineController controller = CreateController(peer, new OverlayState());
+        await controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None);
+
+        peer.RaiseExited(0);
+
+        Assert.Null(controller.ActiveSource);
+    }
+
     private sealed class FakeCorePeer : ICorePeer
     {
         public bool IsStarted { get; set; }
