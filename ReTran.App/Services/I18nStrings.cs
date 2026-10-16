@@ -97,6 +97,21 @@ public static class I18nStrings
         ["update.error.verify"] = "lỗi xác thực gói cập nhật",
         ["update.error.stop"] = "lỗi dừng dịch vụ trước khi cài",
         ["update.error.install"] = "lỗi khởi chạy trình cài đặt",
+        ["overlay.title"] = "Overlay trên game",
+        ["overlay.toggle"] = "Hiện overlay lên nguồn đang capture",
+        ["overlay.mode.label"] = "Chế độ hiển thị",
+        ["overlay.mode.subtitle"] = "Phủ lên chữ gốc",
+        ["overlay.mode.panel"] = "Bảng góc màn hình",
+        ["overlay.corner.label"] = "Vị trí bảng",
+        ["overlay.corner.tl"] = "Trên-trái",
+        ["overlay.corner.tr"] = "Trên-phải",
+        ["overlay.corner.bl"] = "Dưới-trái",
+        ["overlay.corner.br"] = "Dưới-phải",
+        ["overlay.font.label"] = "Cỡ chữ",
+        ["overlay.font.small"] = "Nhỏ",
+        ["overlay.font.medium"] = "Trung bình",
+        ["overlay.font.large"] = "Lớn",
+        ["overlay.note.fullscreen"] = "Game exclusive fullscreen không thể hiện overlay — chạy borderless windowed để dùng tính năng này.",
     };
 
     /// <summary>English strings, keyed by dotted ids. Chuỗi tiếng Anh, khóa dạng chấm.</summary>
@@ -190,6 +205,21 @@ public static class I18nStrings
         ["update.error.verify"] = "package verification error",
         ["update.error.stop"] = "stop-services error",
         ["update.error.install"] = "installer launch error",
+        ["overlay.title"] = "Game overlay",
+        ["overlay.toggle"] = "Show overlay over active source",
+        ["overlay.mode.label"] = "Display mode",
+        ["overlay.mode.subtitle"] = "Over original text",
+        ["overlay.mode.panel"] = "Corner panel",
+        ["overlay.corner.label"] = "Panel corner",
+        ["overlay.corner.tl"] = "Top-left",
+        ["overlay.corner.tr"] = "Top-right",
+        ["overlay.corner.bl"] = "Bottom-left",
+        ["overlay.corner.br"] = "Bottom-right",
+        ["overlay.font.label"] = "Font size",
+        ["overlay.font.small"] = "Small",
+        ["overlay.font.medium"] = "Medium",
+        ["overlay.font.large"] = "Large",
+        ["overlay.note.fullscreen"] = "Exclusive-fullscreen games cannot show the overlay — run borderless windowed to use this feature.",
     };
 
     /// <summary>

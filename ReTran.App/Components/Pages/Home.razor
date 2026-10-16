@@ -7,6 +7,7 @@
 @inject ReTran_App.Services.I18nService L
 @inject ReTran_App.Services.AppSettingsService Settings
 @inject ReTran_App.Core.PipelineController Pipeline
+@inject ReTran_App.Services.OverlayWindow.OverlayWindowService OverlaySvc
 @inject IJSRuntime JS
 @implements IDisposable
 
@@ -62,6 +63,43 @@
         }
 
         <p class="text-sm text-secondary">@(L["home.note.capture"])</p>
+    </Card>
+
+    <Card Title="@(L["overlay.title"])">
+        <div class="flex items-center gap-2">
+            <input id="overlay-toggle" type="checkbox" class="w-4 h-4" @bind="_overlayOn" @bind:after="ToggleOverlay" disabled="@(Pipeline.ActiveSource is null)" />
+            <label for="overlay-toggle" class="text-sm text-surface">@(L["overlay.toggle"])</label>
+        </div>
+
+        <label class="flex flex-col gap-1.5 text-sm text-surface">
+            @(L["overlay.mode.label"])
+            <select @bind="_overlayMode" @bind:after="ApplyOverlayMode" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
+                <option value="subtitle">@(L["overlay.mode.subtitle"])</option>
+                <option value="panel">@(L["overlay.mode.panel"])</option>
+            </select>
+        </label>
+
+        @if (_overlayMode == "panel")
+        {
+            <label class="flex flex-col gap-1.5 text-sm text-surface">
+                @(L["overlay.corner.label"])
+                <select @bind="_overlayCorner" @bind:after="ApplyOverlayCorner" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
+                    <option value="tl">@(L["overlay.corner.tl"])</option>
+                    <option value="tr">@(L["overlay.corner.tr"])</option>
+                    <option value="bl">@(L["overlay.corner.bl"])</option>
+                    <option value="br">@(L["overlay.corner.br"])</option>
+                </select>
+            </label>
+        }
+
+        <div class="flex gap-2 flex-wrap items-center">
+            <span class="text-sm text-surface">@(L["overlay.font.label"])</span>
+            <button class="@(FontBtnClass(0.85))" @onclick='() => SetOverlayFont(0.85)'>@(L["overlay.font.small"])</button>
+            <button class="@(FontBtnClass(1.0))" @onclick='() => SetOverlayFont(1.0)'>@(L["overlay.font.medium"])</button>
+            <button class="@(FontBtnClass(1.25))" @onclick='() => SetOverlayFont(1.25)'>@(L["overlay.font.large"])</button>
+        </div>
+
+        <p class="text-sm text-secondary">@(L["overlay.note.fullscreen"])</p>
     </Card>
 
     <Card Title="@(L["home.card.translation"])">
@@ -143,6 +181,10 @@
     private string? _copyState;      // "copied" | "failed" | null
     private string? _themeStateKind; // "theme" | "themeFail" | "color" | "colorFail"
     private string? _themeStateValue;
+    private bool _overlayOn;
+    private string _overlayMode = "subtitle";    // "subtitle" | "panel"
+    private string _overlayCorner = "bl";        // "tl" | "tr" | "bl" | "br"
+    private double _overlayFontScale = 1.0;
 
     private string ObsUrl => $"http://127.0.0.1:{FeedServer.Port}/overlay";
 
@@ -197,6 +239,10 @@
         _quickDst = current.Dst;
         // File ghi tay có thể chứa dst ngoài danh sách — thêm vào để select không bị trống.
         if (Array.IndexOf(_dstOptions, _quickDst) < 0) _dstOptions = [_quickDst, .. _dstOptions];
+        _overlayOn = OverlaySvc.IsEnabled; // service là nguồn sự thật (persisted flag chỉ để restore ở nơi khác)
+        _overlayMode = current.OverlayMode;
+        _overlayCorner = current.OverlayCorner;
+        _overlayFontScale = current.OverlayFontScale;
         _ = LoadSourcesAsync();
         base.OnInitialized();
     }
@@ -318,6 +364,22 @@
             // Ghi file fail không được phá UI — dst giữ trong RAM cho lần start sau.
         }
     }
+
+    // Service tự persist OverlayOnGame; UI chỉ mirror IsEnabled.
+    private void ToggleOverlay() => OverlaySvc.SetEnabled(_overlayOn);
+
+    private void ApplyOverlayMode() => OverlaySvc.ApplyOptions(mode: _overlayMode);
+
+    private void ApplyOverlayCorner() => OverlaySvc.ApplyOptions(corner: _overlayCorner);
+
+    private void SetOverlayFont(double scale)
+    {
+        _overlayFontScale = scale;
+        OverlaySvc.ApplyOptions(fontScale: scale);
+    }
+
+    private string FontBtnClass(double scale) =>
+        _overlayFontScale == scale ? "btn btn-primary" : "btn btn-outline-secondary";
 
     private void OnLangChanged() => _ = InvokeAsync(StateHasChanged);
 
