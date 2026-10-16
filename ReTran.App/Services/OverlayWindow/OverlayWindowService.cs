@@ -222,7 +222,7 @@ public sealed class OverlayWindowService : IDisposable
         }
     }
 
-    private void OnPipelineStateChanged(bool running, string reason)
+    private void OnPipelineStateChanged(bool running, string? reason)
     {
         lock (_gate)
         {

@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using ReTran_App.Core;
 using ReTran_App.Data;
 using ReTran_App.Services;
+using ReTran_App.Services.OverlayWindow;
 using ReTran_App.Services.Update;
 
 namespace ReTran_App
@@ -27,6 +28,12 @@ namespace ReTran_App
             builder.Services.AddSingleton<OverlayState>();
             builder.Services.AddSingleton<OverlayFeedServer>();
             builder.Services.AddSingleton<IOverlayFeedServer>(sp => sp.GetRequiredService<OverlayFeedServer>());
+
+            // Local game overlay: layered Win32 window + window/monitor anchor tracker.
+            // Overlay game local: cửa sổ layered Win32 + tracker neo theo cửa sổ/monitor.
+            builder.Services.AddSingleton<IOverlayHost, Win32OverlayHost>();
+            builder.Services.AddSingleton<IAnchorTracker, Win32AnchorTracker>();
+            builder.Services.AddSingleton<OverlayWindowService>();
 
             string dbPath = TranslationCache.DefaultDbPath;
             builder.Services.AddDbContext<RetranDbContext>(
