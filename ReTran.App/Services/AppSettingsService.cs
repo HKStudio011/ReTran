@@ -4,15 +4,24 @@ namespace ReTran_App.Services;
 
 /// <summary>
 /// Translation settings persisted in <c>settings.json</c>: provider, language pair and an
-/// optional API key for providers that need one.
+/// optional API key for providers that need one, plus game-overlay display options.
 /// Cài đặt dịch thuật lưu trong <c>settings.json</c>: nhà cung cấp, cặp ngôn ngữ và API key tùy
-/// chọn cho các nhà cung cấp cần key.
+/// chọn cho các nhà cung cấp cần key, kèm tùy chọn hiển thị overlay trên game.
 /// </summary>
 /// <param name="Provider">Provider name, e.g. <c>google</c>. Tên nhà cung cấp, ví dụ <c>google</c>.</param>
 /// <param name="Src">Source language code, or <c>auto</c>. Mã ngôn ngữ nguồn, hoặc <c>auto</c>.</param>
 /// <param name="Dst">Target language code. Mã ngôn ngữ đích.</param>
 /// <param name="ApiKey">API key for providers that require one; <see langword="null"/> otherwise. API key cho nhà cung cấp yêu cầu; ngược lại <see langword="null"/>.</param>
-public sealed record AppSettings(string Provider, string Src, string Dst, string? ApiKey)
+/// <param name="OverlayOnGame">Whether the local overlay window over the capture source is enabled. Có bật cửa sổ overlay local đè lên nguồn capture hay không.</param>
+/// <param name="OverlayMode">Overlay display mode: <c>"subtitle"</c> (over original text) or <c>"panel"</c> (corner list). Chế độ hiển thị overlay: <c>"subtitle"</c> hoặc <c>"panel"</c>.</param>
+/// <param name="OverlayCorner">Panel corner when mode is <c>"panel"</c>: <c>"tl"</c>, <c>"tr"</c>, <c>"bl"</c> or <c>"br"</c>. Góc bảng khi chế độ <c>"panel"</c>: <c>"tl"</c>, <c>"tr"</c>, <c>"bl"</c> hoặc <c>"br"</c>.</param>
+/// <param name="OverlayFontScale">Font size multiplier for overlay text (0.85, 1.0 or 1.25). Hệ số cỡ chữ overlay (0.85, 1.0 hoặc 1.25).</param>
+public sealed record AppSettings(
+    string Provider, string Src, string Dst, string? ApiKey,
+    bool OverlayOnGame = false,
+    string OverlayMode = "subtitle",
+    string OverlayCorner = "bl",
+    double OverlayFontScale = 1.0)
 {
     /// <summary>
     /// Factory default: Google Translate, auto source, Vietnamese target, no API key.

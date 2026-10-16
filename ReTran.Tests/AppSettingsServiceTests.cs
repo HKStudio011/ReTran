@@ -47,4 +47,32 @@ public class AppSettingsServiceTests : IDisposable
         service.Save(AppSettings.Default);
         Assert.Equal(AppSettings.Default, service.Load());
     }
+
+    [Fact]
+    public void LegacyFile_WithoutOverlayFields_LoadsOverlayDefaults()
+    {
+        Directory.CreateDirectory(_dir); // Save() would create it; a hand-written file needs the dir first.
+        File.WriteAllText(_path, """{"provider":"google","src":"auto","dst":"vi"}""");
+        var service = new AppSettingsService(_path);
+
+        AppSettings settings = service.Load();
+
+        Assert.Equal("google", settings.Provider);
+        Assert.False(settings.OverlayOnGame);
+        Assert.Equal("subtitle", settings.OverlayMode);
+        Assert.Equal("bl", settings.OverlayCorner);
+        Assert.Equal(1.0, settings.OverlayFontScale);
+    }
+
+    [Fact]
+    public void SaveThenLoad_Roundtrips_WithOverlayFields()
+    {
+        var service = new AppSettingsService(_path);
+        var saved = new AppSettings("google", "auto", "vi", null,
+            OverlayOnGame: true, OverlayMode: "panel", OverlayCorner: "tr", OverlayFontScale: 1.25);
+
+        service.Save(saved);
+
+        Assert.Equal(saved, service.Load());
+    }
 }
