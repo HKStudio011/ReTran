@@ -85,7 +85,7 @@ public class OcrLoopCliTests
                     try { await Task.Delay(100, feederCts.Token); }
                     catch (OperationCanceledException) { break; }
                 }
-            });
+            }, TestContext.Current.CancellationToken);
 
             Assert.True(await stdout.WaitForLineCount(2, TimeSpan.FromSeconds(60)), "no 2 lines");
             feederCts.Cancel();

@@ -103,7 +103,7 @@ public class OcrLoopTests
         Task<int> run = Task.Run(() =>
             OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr, CancellationToken.None));
 
-        await Task.Delay(400); // first-frame wait polls every 50 ms — A consumed by now
+        await Task.Delay(400, TestContext.Current.CancellationToken); // first-frame wait polls every 50 ms — A consumed by now
         source.Raise(TinyFrame());
         Assert.True(await stdout.WaitForLineCount(1, TimeSpan.FromSeconds(10)), "no line 1");
         source.Raise(TinyFrame());
@@ -135,7 +135,7 @@ public class OcrLoopTests
         Task<int> run = Task.Run(() =>
             OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr, cts.Token));
 
-        await Task.Delay(1500); // first frame consumed, >=1 tick elapsed with an empty buffer
+        await Task.Delay(1500, TestContext.Current.CancellationToken); // first frame consumed, >=1 tick elapsed with an empty buffer
         Assert.Empty(stdout.Snapshot()); // skipped ticks emit nothing
         cts.Cancel();
         Assert.Equal(0, await run);
@@ -176,9 +176,9 @@ public class OcrLoopTests
         Task<int> run = Task.Run(() =>
             OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr, CancellationToken.None));
 
-        await Task.Delay(400);   // first frame (A) consumed
+        await Task.Delay(400, TestContext.Current.CancellationToken);   // first frame (A) consumed
         source.Raise(TinyFrame()); // cycle 1 -> times out at ~1.3 s -> warn + skip
-        await Task.Delay(1500);
+        await Task.Delay(1500, TestContext.Current.CancellationToken);
         source.Raise(TinyFrame()); // cycle 2 -> fast -> emits
         Assert.True(await stdout.WaitForLineCount(1, TimeSpan.FromSeconds(10)), "no line after timeout cycle");
 
@@ -202,7 +202,7 @@ public class OcrLoopTests
         Task<int> run = Task.Run(() =>
             OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr, CancellationToken.None));
 
-        await Task.Delay(400);
+        await Task.Delay(400, TestContext.Current.CancellationToken);
         source.Raise(TinyFrame()); // processed on the first tick -> fatal
 
         Assert.Equal(1, await run);

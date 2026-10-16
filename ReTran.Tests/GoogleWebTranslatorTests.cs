@@ -21,7 +21,7 @@ public class GoogleWebTranslatorTests
     {
         var h = new StubHandler(HttpStatusCode.OK, "[[[\"Xin \",\"hello\",null,null,1],[\"chào\",\"hello\",null,null,1]]]");
         var t = new GoogleWebTranslator(h);
-        Assert.Equal("Xin chào", await t.TranslateAsync("hello", "en", "vi"));
+        Assert.Equal("Xin chào", await t.TranslateAsync("hello", "en", "vi", TestContext.Current.CancellationToken));
         Assert.Contains("client=gtx", h.LastUrl);
         Assert.Contains("sl=en", h.LastUrl); Assert.Contains("tl=vi", h.LastUrl);
         Assert.Contains("q=hello", h.LastUrl);
@@ -31,7 +31,7 @@ public class GoogleWebTranslatorTests
     public async Task Translate_SrcAuto_PassesAuto()
     {
         var h = new StubHandler(HttpStatusCode.OK, "[[[\"chào\",null,null,null,1]]]");
-        await new GoogleWebTranslator(h).TranslateAsync("hi", "auto", "vi");
+        await new GoogleWebTranslator(h).TranslateAsync("hi", "auto", "vi", TestContext.Current.CancellationToken);
         Assert.Contains("sl=auto", h.LastUrl);
     }
 
@@ -39,14 +39,14 @@ public class GoogleWebTranslatorTests
     public async Task Translate_HttpError_Throws()
     {
         var t = new GoogleWebTranslator(new StubHandler(HttpStatusCode.InternalServerError, "boom"));
-        await Assert.ThrowsAsync<HttpRequestException>(() => t.TranslateAsync("x", "en", "vi"));
+        await Assert.ThrowsAsync<HttpRequestException>(() => t.TranslateAsync("x", "en", "vi", TestContext.Current.CancellationToken));
     }
 
     [Fact]
     public async Task Translate_SlowerThanTimeout_ThrowsTimeout()
     {
         var t = new GoogleWebTranslator(new StubHandler(HttpStatusCode.OK, "[]", delayMs: 300), timeout: TimeSpan.FromMilliseconds(50));
-        await Assert.ThrowsAsync<TimeoutException>(() => t.TranslateAsync("x", "en", "vi"));
+        await Assert.ThrowsAsync<TimeoutException>(() => t.TranslateAsync("x", "en", "vi", TestContext.Current.CancellationToken));
     }
 
     [Fact]

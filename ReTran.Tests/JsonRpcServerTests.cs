@@ -164,8 +164,8 @@ public class JsonRpcServerTests
         server.Register("slow", async _ => { await gate.Task; return JsonValue.Create("done"); });
         _ = server.RunAsync(t, CancellationToken.None);
         await t.InjectLineAsync("{\"jsonrpc\":\"2.0\",\"id\":\"a\",\"method\":\"slow\"}");
-        Task notify1 = server.NotifyAsync("frame.translated", new JsonObject());
-        Task notify2 = server.NotifyAsync("pipeline.state", new JsonObject());
+        Task notify1 = server.NotifyAsync("frame.translated", new JsonObject(), TestContext.Current.CancellationToken);
+        Task notify2 = server.NotifyAsync("pipeline.state", new JsonObject(), TestContext.Current.CancellationToken);
         gate.SetResult();
         await Task.WhenAll(notify1, notify2);
         await t.WaitForLinesAsync(3);

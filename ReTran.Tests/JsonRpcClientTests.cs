@@ -29,14 +29,14 @@ public class JsonRpcClientTests
         Task<JsonNode?> callTask = client.CallAsync("core.ping", null, CancellationToken.None);
 
         // Read what the client sent to us.
-        string? sentLine = await new StreamReader(serverIn).ReadLineAsync();
+        string? sentLine = await new StreamReader(serverIn).ReadLineAsync(TestContext.Current.CancellationToken);
 
         // Feed the matching response back — flush explicitly: an unflushed StreamWriter
         // leaves the line in its buffer, so the client's read loop never sees it and hangs.
         var respWriter = new StreamWriter(serverOut) { NewLine = "\n" };
         await respWriter.WriteLineAsync(
             "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"result\":\"pong\"}");
-        await respWriter.FlushAsync();
+        await respWriter.FlushAsync(TestContext.Current.CancellationToken);
 
         JsonNode? result = await callTask;
         Assert.Equal("pong", result!.GetValue<string>());
@@ -65,14 +65,14 @@ public class JsonRpcClientTests
         Task<JsonNode?> callTask = client.CallAsync("core.missing", null, CancellationToken.None);
 
         // The request line must be exactly the JsonObject-serialized wire format (byte-compatible).
-        string? sentLine = await new StreamReader(serverIn).ReadLineAsync();
+        string? sentLine = await new StreamReader(serverIn).ReadLineAsync(TestContext.Current.CancellationToken);
         Assert.Equal("{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"core.missing\",\"params\":{}}", sentLine);
 
         // Feed a JSON-RPC error response for the same id.
         var respWriter = new StreamWriter(serverOut) { NewLine = "\n" };
         await respWriter.WriteLineAsync(
             "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}");
-        await respWriter.FlushAsync();
+        await respWriter.FlushAsync(TestContext.Current.CancellationToken);
 
         RpcException ex = await Assert.ThrowsAsync<RpcException>(() => callTask);
         Assert.Equal(-32601, ex.Code);
@@ -287,7 +287,7 @@ public class JsonRpcClientTests
             lock (seen) { if (seen.Count >= 2) break; }
             if (DateTime.UtcNow > deadline)
                 throw new TimeoutException($"Expected both notifications, saw {seen.Count}.");
-            await Task.Delay(10);
+            await Task.Delay(10, TestContext.Current.CancellationToken);
         }
 
         lock (seen) Assert.Equal(new[] { "frame.translated", "pipeline.state" }, seen);
@@ -334,7 +334,7 @@ public class JsonRpcClientTests
         input.Complete();
 
         await Assert.ThrowsAsync<TaskCanceledException>(
-            () => call.WaitAsync(TimeSpan.FromSeconds(5)));
+            () => call.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -350,7 +350,7 @@ public class JsonRpcClientTests
         await client.DisposeAsync();
 
         await Assert.ThrowsAsync<TaskCanceledException>(
-            () => call.WaitAsync(TimeSpan.FromSeconds(5)));
+            () => call.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
     }
 
     [Fact]

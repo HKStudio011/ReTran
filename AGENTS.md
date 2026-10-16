@@ -33,7 +33,7 @@ ReTran Project/
 │   └── Program.cs
 ├── ReTran.OCR/                # Python OCR sidecar project `retran-core` — uv-managed .venv (CPython 3.13)
 │   └── hook/                  # (planned) Rust cdylib for exclusive-fullscreen game capture
-├── ReTran.Tests/              # xUnit v2 + bUnit + Appium test project (core + app tests)
+├── ReTran.Tests/              # xUnit v3 test project (core + app unit tests)
 └── Docs/                      # design notes, decisions; superpowers/specs + superpowers/plans
 ```
 
@@ -41,13 +41,13 @@ Current state: M0 IPC backbone done (App launches Core, Core spawns sidecar, all
 
 ## Tech Stack & Role of Each Language
 
-| Language | Role | Status |
-|---|---|---|
-| **C#** (.NET 10) | App shell (MAUI Blazor Hybrid controller surface) + headless core process (`ReTran.Core`, net10.0-windows console): Windows capture interop, JSON-RPC peer, OCR sidecar client, translation orchestration; EF Core + SQLite persistence in the App (planned) | done (M0 backbone, M1 capture, App UI) |
-| **TypeScript / JavaScript** | UI logic in the WebView (overlay drawing, result display); built by Vite from `ReTran.App/vite-project` | scaffolded |
-| **HTML / CSS** | WebView markup and styling (Tailwind v4) | scaffolded |
-| **Python** | OCR sidecar (`retran-core`): long-lived PaddleOCR process spawned by the C# core, JSON-RPC over stdio; local translation models later | scaffolded (pyproject + uv .venv) |
-| **Rust** | Native hook DLL for exclusive fullscreen game capture (OBS-style D3D11 Present hook, injected into the game process) | planned — `cargo` not installed on dev machine yet |
+| Language                          | Role                                                                                                                                                                                                                                                           | Status                                               |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| **C#** (.NET 10)            | App shell (MAUI Blazor Hybrid controller surface) + headless core process (`ReTran.Core`, net10.0-windows console): Windows capture interop, JSON-RPC peer, OCR sidecar client, translation orchestration; EF Core + SQLite persistence in the App (planned) | done (M0 backbone, M1 capture, App UI)               |
+| **TypeScript / JavaScript** | UI logic in the WebView (overlay drawing, result display); built by Vite from`ReTran.App/vite-project`                                                                                                                                                       | scaffolded                                           |
+| **HTML / CSS**              | WebView markup and styling (Tailwind v4)                                                                                                                                                                                                                       | scaffolded                                           |
+| **Python**                  | OCR sidecar (`retran-core`): long-lived PaddleOCR process spawned by the C# core, JSON-RPC over stdio; local translation models later                                                                                                                        | scaffolded (pyproject + uv .venv)                    |
+| **Rust**                    | Native hook DLL for exclusive fullscreen game capture (OBS-style D3D11 Present hook, injected into the game process)                                                                                                                                           | planned —`cargo` not installed on dev machine yet |
 
 ## Product Pipeline
 
@@ -98,14 +98,14 @@ Export the overlay to OBS via a **Browser Source** pointing at the App's local o
 
 The app runs **while the user is gaming and streaming** — every component must stay within budget:
 
-| Component | Budget |
-|---|---|
-| Capture (screen/window) | < 2% CPU |
-| OCR (GPU, PP-OCR mobile default) | throttled to ~3 fps, VRAM < 1 GB, drop frames if busy |
-| Translation | diff-based (only new text), cached, fully async — never blocks pipeline |
-| UI/overlay updates | throttled to 10–15 fps |
-| OBS export | ~10 fps image source updates |
-| Total extra footprint | < 8% CPU, < 500 MB RAM while gaming + streaming |
+| Component                        | Budget                                                                   |
+| -------------------------------- | ------------------------------------------------------------------------ |
+| Capture (screen/window)          | < 2% CPU                                                                 |
+| OCR (GPU, PP-OCR mobile default) | throttled to ~3 fps, VRAM < 1 GB, drop frames if busy                    |
+| Translation                      | diff-based (only new text), cached, fully async — never blocks pipeline |
+| UI/overlay updates               | throttled to 10–15 fps                                                  |
+| OBS export                       | ~10 fps image source updates                                             |
+| Total extra footprint            | < 8% CPU, < 500 MB RAM while gaming + streaming                          |
 
 Every milestone must measure against this budget with a real game running and record numbers in `Docs/performance.md`. No feature ships if it breaks the budget without an approved tradeoff.
 
@@ -116,6 +116,9 @@ Verified on this machine (Windows, .NET SDK 10.0.400, Node v24, uv 0.11.x; syste
 ```bash
 # C# — build the whole solution (verified clean 2026-09-09)
 dotnet build "ReTran Project.slnx"
+
+# C# — run tests (xUnit v3 / MTP runner per global.json; filter: dotnet test --project "ReTran.Tests/ReTran.Tests.csproj" -- --filter-class "TranslationCacheTests")
+dotnet test --project "ReTran.Tests/ReTran.Tests.csproj"
 
 # Frontend — from ReTran.App/vite-project (output → ../wwwroot/build)
 npm run dev      # watch mode
@@ -532,4 +535,3 @@ Before completing a task, verify that:
 ## Agent Infrastructure
 
 - **CodeGraph** (`codegraph_explore`): structural queries — call what, define where, blast radius
-- **GitNexus** (`.claude/skills/gitnexus/`): impact analysis, refactoring, execution flows

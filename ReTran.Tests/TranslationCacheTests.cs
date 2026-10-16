@@ -84,11 +84,11 @@ public class TranslationCacheTests : IDisposable
         await cache.PutAsync("notepad.exe", "en", "vi",
             new[] { ("hello", "chào bạn") }, CancellationToken.None);
 
-        Assert.Equal(1, await db.Translations.CountAsync());
+        Assert.Equal(1, await db.Translations.CountAsync(TestContext.Current.CancellationToken));
         string translated = await db.Translations
             .Where(e => e.Text == "hello")
             .Select(e => e.Translated)
-            .SingleAsync();
+            .SingleAsync(TestContext.Current.CancellationToken);
         Assert.Equal("chào bạn", translated);
     }
 
@@ -122,7 +122,7 @@ public class TranslationCacheTests : IDisposable
         await cache.PutAsync("notepad.exe", "ja", "vi",
             new[] { ("hello", "こんにちは") }, CancellationToken.None);
 
-        Assert.Equal(5, await db.Translations.CountAsync());
+        Assert.Equal(5, await db.Translations.CountAsync(TestContext.Current.CancellationToken));
 
         CacheLookupResult result = await cache.LookupAsync("chrome.exe", "en", "vi",
             new[] { "hello" }, CancellationToken.None);
@@ -138,7 +138,7 @@ public class TranslationCacheTests : IDisposable
     {
         await using var db = new RetranDbContext(_options);
         await using Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction tx =
-            await db.Database.BeginTransactionAsync();
+            await db.Database.BeginTransactionAsync(TestContext.Current.CancellationToken);
 
         static TranslationEntry MakeRow() => new()
         {
@@ -154,9 +154,9 @@ public class TranslationCacheTests : IDisposable
         // must be rejected by the unique index.
         db.Translations.Add(MakeRow());
         db.Translations.Add(MakeRow());
-        await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
+        await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync(TestContext.Current.CancellationToken));
 
-        await tx.RollbackAsync();
+        await tx.RollbackAsync(TestContext.Current.CancellationToken);
     }
 
     [Fact]
@@ -170,7 +170,7 @@ public class TranslationCacheTests : IDisposable
             .UseSqlite($"Data Source={freshPath};Pooling=False")
             .Options;
         await using var db = new RetranDbContext(options);
-        await db.Database.MigrateAsync();
+        await db.Database.MigrateAsync(TestContext.Current.CancellationToken);
 
         db.Translations.Add(new TranslationEntry
         {
@@ -181,8 +181,8 @@ public class TranslationCacheTests : IDisposable
             Translated = "hoàn thành nhiệm vụ",
             CreatedAtUtc = DateTime.UtcNow,
         });
-        await db.SaveChangesAsync();
+        await db.SaveChangesAsync(TestContext.Current.CancellationToken);
 
-        Assert.Equal(1, await db.Translations.CountAsync());
+        Assert.Equal(1, await db.Translations.CountAsync(TestContext.Current.CancellationToken));
     }
 }

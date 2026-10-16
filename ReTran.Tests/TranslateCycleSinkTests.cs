@@ -172,7 +172,7 @@ public class TranslateCycleSinkTests
         var tr = new StubTranslator { BlockForever = true };
         var sink = Create(tr, new StubCache { Misses = new List<string> { "SLOW" } }, new StubNotifier());
         Task cycle = sink.OnCycleAsync(1, 100, 100, Result("SLOW"), CancellationToken.None);
-        Task done = await Task.WhenAny(cycle, Task.Delay(500));
+        Task done = await Task.WhenAny(cycle, Task.Delay(500, TestContext.Current.CancellationToken));
         Assert.Same(cycle, done); // chu kỳ trả về dù dịch còn treo
                                // (không WhenIdleAsync ở test này — background treo có chủ đích)
     }
@@ -199,7 +199,7 @@ public class TranslateCycleSinkTests
         var sink = Create(tr, cache, n);
         await sink.OnCycleAsync(1, 100, 100, Result("STUCK"), CancellationToken.None);
         // hard bound 2s: chain drain xong trước 10s -> không treo dù channel bỏ qua token
-        await sink.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        await sink.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         Assert.Null(n.Single("frame.translated")!["boxes"]!.AsArray()[0]!["translated"]);
         Assert.Equal(new[] { "STUCK" }, tr.CallTexts); // lookup treo -> timeout -> all-miss -> dịch hết

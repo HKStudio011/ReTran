@@ -340,7 +340,7 @@ public class PipelineHostTests
         JsonNode? started = await host.StartAsync(StartParams(), CancellationToken.None);
         Assert.True(started!["running"]!.GetValue<bool>());
 
-        await Task.Delay(400); // queued frame consumed by the first-frame wait
+        await Task.Delay(400, TestContext.Current.CancellationToken); // queued frame consumed by the first-frame wait
         sources[^1].Raise(TinyFrame()); // next tick -> SpotAsync -> SidecarRpcException -> fatal
 
         JsonNode? state = await WaitForNotificationAsync(peer, "pipeline.state");
@@ -359,7 +359,7 @@ public class PipelineHostTests
 
         JsonNode? first = await host.StartAsync(StartParams(), CancellationToken.None);
         Assert.True(first!["running"]!.GetValue<bool>());
-        await Task.Delay(400);
+        await Task.Delay(400, TestContext.Current.CancellationToken);
         sources[^1].Raise(TinyFrame()); // cycle 1 -> new_texts ["HELLO"] -> translate
         await WaitUntilAsync(() => translator.Calls >= 1, "session-1 translation");
 
@@ -369,7 +369,7 @@ public class PipelineHostTests
         translator.Reset(); // fresh OcrDiff in session 2 must surface the same text as new again
         JsonNode? second = await host.StartAsync(StartParams(), CancellationToken.None);
         Assert.True(second!["running"]!.GetValue<bool>());
-        await Task.Delay(400);
+        await Task.Delay(400, TestContext.Current.CancellationToken);
         sources[^1].Raise(TinyFrame()); // cycle -> new_texts ["HELLO"] again -> translate
         await WaitUntilAsync(() => translator.Calls >= 1, "session-2 translation (fresh OcrDiff)");
     }
@@ -385,12 +385,12 @@ public class PipelineHostTests
 
         JsonNode? started = await host.StartAsync(StartParams(), CancellationToken.None);
         Assert.True(started!["running"]!.GetValue<bool>());
-        await Task.Delay(400); // queued frame consumed by the first-frame wait; loop now ticking
+        await Task.Delay(400, TestContext.Current.CancellationToken); // queued frame consumed by the first-frame wait; loop now ticking
 
         JsonNode? stopped = await host.StopAsync(null, CancellationToken.None);
         Assert.False(stopped!["running"]!.GetValue<bool>());
 
-        await Task.Delay(700); // settle window: a stray fire-and-forget notify would flush here
+        await Task.Delay(700, TestContext.Current.CancellationToken); // settle window: a stray fire-and-forget notify would flush here
         Assert.Empty(NotificationsOf(peer, "pipeline.state"));
     }
 
@@ -405,12 +405,12 @@ public class PipelineHostTests
         JsonNode? started = await host.StartAsync(StartParams(), CancellationToken.None);
         Assert.True(started!["running"]!.GetValue<bool>());
 
-        await Task.Delay(400); // queued frame consumed by the first-frame wait
+        await Task.Delay(400, TestContext.Current.CancellationToken); // queued frame consumed by the first-frame wait
         sources[^1].Raise(TinyFrame()); // next tick -> SpotAsync -> SidecarRpcException -> fatal
 
         JsonNode? state = await WaitForNotificationAsync(peer, "pipeline.state");
         Assert.False(state!["running"]!.GetValue<bool>());
-        await Task.Delay(500); // settle window: a second (buggy) notify would land here
+        await Task.Delay(500, TestContext.Current.CancellationToken); // settle window: a second (buggy) notify would land here
         JsonNode? only = Assert.Single(NotificationsOf(peer, "pipeline.state"));
         Assert.Equal("sidecar-exited", only!["reason"]!.GetValue<string>());
     }

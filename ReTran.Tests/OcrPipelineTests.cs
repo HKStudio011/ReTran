@@ -45,7 +45,7 @@ public class OcrPipelineTests
     {
         var fake = new FakeSidecarRpc { NextResult = SpotResult("HELLO", "WORLD") };
         var pipeline = new OcrPipeline(fake, new OcrDiff());
-        var result = await pipeline.SpotAsync("BASE64PNG");
+        var result = await pipeline.SpotAsync("BASE64PNG", TestContext.Current.CancellationToken);
         Assert.Equal("ocr.spot", fake.LastMethod);
         Assert.Equal("BASE64PNG", fake.LastParams!["image"]!.GetValue<string>());
         Assert.Equal(12, result["elapsed_ms"]!.GetValue<int>());
@@ -57,8 +57,8 @@ public class OcrPipelineTests
     {
         var fake = new FakeSidecarRpc { NextResult = SpotResult("HELLO") };
         var pipeline = new OcrPipeline(fake, new OcrDiff());
-        await pipeline.SpotAsync("x");
-        var second = await pipeline.SpotAsync("x");
+        await pipeline.SpotAsync("x", TestContext.Current.CancellationToken);
+        var second = await pipeline.SpotAsync("x", TestContext.Current.CancellationToken);
         Assert.Empty(second["new_texts"]!.AsArray());
     }
 
@@ -67,7 +67,7 @@ public class OcrPipelineTests
     {
         var fake = new FakeSidecarRpc { Throw = new SidecarRpcException(-32602, "invalid PNG image: bad") };
         var pipeline = new OcrPipeline(fake, new OcrDiff());
-        var ex = await Assert.ThrowsAsync<SidecarRpcException>(() => pipeline.SpotAsync("x"));
+        var ex = await Assert.ThrowsAsync<SidecarRpcException>(() => pipeline.SpotAsync("x", TestContext.Current.CancellationToken));
         Assert.Equal(-32602, ex.Code);
         Assert.Contains("invalid PNG", ex.Message);
     }
@@ -77,7 +77,7 @@ public class OcrPipelineTests
     {
         var fake = new FakeSidecarRpc { Delay = TimeSpan.FromSeconds(5) };
         var pipeline = new OcrPipeline(fake, new OcrDiff()) { Timeout = TimeSpan.FromMilliseconds(200) };
-        await Assert.ThrowsAsync<TimeoutException>(() => pipeline.SpotAsync("x"));
+        await Assert.ThrowsAsync<TimeoutException>(() => pipeline.SpotAsync("x", TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -85,6 +85,6 @@ public class OcrPipelineTests
     {
         var fake = new FakeSidecarRpc { NextResult = new JsonObject() };
         var pipeline = new OcrPipeline(fake, new OcrDiff());
-        await Assert.ThrowsAsync<InvalidOperationException>(() => pipeline.SpotAsync("x"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => pipeline.SpotAsync("x", TestContext.Current.CancellationToken));
     }
 }

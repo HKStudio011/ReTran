@@ -181,7 +181,7 @@ public class PipelineControllerTests : IDisposable
             try
             {
                 if (await _controllerDb!.Translations
-                        .AnyAsync(e => e.Context == "screen:0" && e.Text == "HELLO"))
+                        .AnyAsync(e => e.Context == "screen:0" && e.Text == "HELLO", TestContext.Current.CancellationToken))
                 {
                     break;
                 }
@@ -189,10 +189,10 @@ public class PipelineControllerTests : IDisposable
             catch (SqliteException ex) when (ex.SqliteErrorCode is 5 or 6) // BUSY/LOCKED vs. the concurrent writer
             {
             }
-            await Task.Delay(50);
+            await Task.Delay(50, TestContext.Current.CancellationToken);
         }
 
-        TranslationEntry row = await _controllerDb!.Translations.SingleAsync(e => e.Text == "HELLO");
+        TranslationEntry row = await _controllerDb!.Translations.SingleAsync(e => e.Text == "HELLO", TestContext.Current.CancellationToken);
         Assert.Equal("Xin chào", row.Translated);
         Assert.Equal("auto", row.Src);
         Assert.Equal("vi", row.Dst);

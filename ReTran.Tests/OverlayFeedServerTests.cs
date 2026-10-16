@@ -19,10 +19,10 @@ public class OverlayFeedServerTests
 
         using var sse = await http.GetStreamAsync($"http://127.0.0.1:{server.Port}/events", cts.Token);
         using var reader = new StreamReader(sse);
-        var readTask = reader.ReadLineAsync();
+        var readTask = reader.ReadLineAsync(TestContext.Current.CancellationToken);
         state.Publish(new OverlayFrame(1920, 1080, DateTime.UtcNow,
             new[] { new OverlayBox(0.1, 0.1, 0.2, 0.05, "a", "A") }));
-        string? first = await readTask.WaitAsync(TimeSpan.FromSeconds(5), cts.Token);
+        string? first = await readTask.AsTask().WaitAsync(TimeSpan.FromSeconds(5), cts.Token);
         Assert.StartsWith("data: {\"boxes\":[{\"x\":0.1", first);
     }
 }
