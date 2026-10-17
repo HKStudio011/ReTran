@@ -38,7 +38,7 @@ public class PipelineControllerTests : IDisposable
         }
     }
 
-    private PipelineController CreateController(FakeCorePeer peer, OverlayState overlay)
+    private PipelineController CreateController(FakeCorePeer peer, OverlayState overlay, PreviewState? preview = null)
     {
         _controllerDb = new RetranDbContext(_options);
         return new PipelineController(
@@ -46,7 +46,8 @@ public class PipelineControllerTests : IDisposable
             new AppSettingsService(_settingsPath),
             new TranslationCache(_controllerDb),
             overlay,
-            NullLogger<PipelineController>.Instance);
+            NullLogger<PipelineController>.Instance,
+            preview);
     }
 
     [Fact]
@@ -131,6 +132,32 @@ public class PipelineControllerTests : IDisposable
         Assert.Equal("Xin chào", frame.Boxes[0].Translated);
         // translated:null keeps the source text so UI/OBS always have something to show.
         Assert.Equal("PENDING", frame.Boxes[1].Translated);
+    }
+
+    [Fact]
+    public async Task FrameAnnotated_Notification_PublishesPreview()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        var preview = new PreviewState();
+        PipelineController controller = CreateController(peer, new OverlayState(), preview);
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+
+        peer.RaiseNotification("frame.annotated", new JsonObject
+        {
+            ["seq"] = 42,
+            ["w"] = 1280,
+            ["h"] = 720,
+            ["jpeg"] = "AQID",
+        });
+
+        PreviewFrame? frame = preview.Latest;
+        Assert.NotNull(frame);
+        Assert.Equal(42, frame!.Seq);
+        Assert.Equal(1280, frame.W);
+        Assert.Equal(720, frame.H);
+        Assert.Equal("AQID", frame.JpegBase64);
     }
 
     [Fact]

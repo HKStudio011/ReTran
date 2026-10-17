@@ -2,6 +2,7 @@
 @using ReTran_App.Core
 @using ReTran_App.Services
 @inject ReTran_App.Core.OverlayState State
+@inject ReTran_App.Core.PreviewState Preview
 @inject ReTran_App.Services.OverlayFeedServer FeedServer
 @inject ReTran_App.Services.JsInteropService Js
 @inject ReTran_App.Services.I18nService L
@@ -18,6 +19,22 @@
 </div>
 
 <div class="space-y-4">
+    <div class="relative w-full aspect-video rounded-lg overflow-hidden border border-surface/20 bg-[#0f172a]" title="@(L["home.preview.title"])">
+        @if (_previewSrc is not null)
+        {
+            <img src="@_previewSrc" alt="@(L["home.preview.title"])" class="w-full h-full object-contain" />
+        }
+        else
+        {
+            <span class="absolute inset-0 flex items-center justify-center text-sm text-secondary opacity-60">@(L["home.preview.idle"])</span>
+        }
+        <span class="absolute top-2 left-2 px-2 py-0.5 rounded text-xs font-semibold text-black @PreviewBadgeClass">@PreviewBadgeText</span>
+        @if (_feed is not null)
+        {
+            <span class="absolute top-9 left-2 px-2 py-0.5 rounded text-xs font-semibold text-black bg-[#f97316]">@(L["home.preview.demo"])</span>
+        }
+    </div>
+
     <Card Title="@(L["home.card.pipeline"])">
         <div class="flex items-center gap-3 flex-wrap">
             <span class="px-2 py-1 rounded border text-sm font-medium @(BadgeClass)">@BadgeSymbol @BadgeText</span>
@@ -185,8 +202,22 @@
     private string _overlayMode = "subtitle";    // "subtitle" | "panel"
     private string _overlayCorner = "bl";        // "tl" | "tr" | "bl" | "br"
     private double _overlayFontScale = 1.0;
+    private string? _previewSrc;
+    private long _lastPreviewRender;
+
+    /// Preview refresh cap: ≥100 ms/lần (~10 fps) — data-URL nặng trong WebView không được rẽ nhánh mỗi frame.
+    private const long PreviewMinIntervalMs = 100;
 
     private string ObsUrl => $"http://127.0.0.1:{FeedServer.Port}/overlay";
+
+    // Badge preview: pipeline running -> xanh, còn lại -> vàng (demo có badge riêng đè bên dưới).
+    private string PreviewBadgeText => _pipelineState == "running"
+        ? L["home.preview.running"]
+        : L["home.preview.stopped"];
+
+    private string PreviewBadgeClass => _pipelineState == "running"
+        ? "bg-[#22c55e]"
+        : "bg-[#eab308]";
 
     private string BadgeSymbol => _pipelineState == "running" ? "●" : "■";
 
@@ -233,6 +264,9 @@
     {
         L.Changed += OnLangChanged;
         Pipeline.PipelineStateChanged += OnPipelineStateChanged;
+        Preview.Changed += OnPreviewChanged;
+        PreviewFrame? initial = Preview.Latest; // quay lại trang vẫn thấy khung cuối
+        _previewSrc = initial is null ? null : PreviewDataUrl(initial);
         // Quay lại trang này (Home → Settings → Home) phải lấy state thật, không hardcode "stopped".
         _pipelineState = Pipeline.IsRunning ? "running" : "stopped";
         AppSettings current = Settings.Load();
@@ -352,6 +386,21 @@
             StateHasChanged();
         });
 
+    // frame.annotated đến từ read-loop thread của peer; throttle ≥100 ms trên renderer rồi mới
+    // gán data-URL — WebView chỉ cần ~10 fps, giữ nguyên khung cuối khi pipeline dừng.
+    private void OnPreviewChanged(PreviewFrame frame) =>
+        _ = InvokeAsync(() =>
+        {
+            long now = Environment.TickCount64;
+            if (now - _lastPreviewRender < PreviewMinIntervalMs) return;
+            _lastPreviewRender = now;
+            _previewSrc = PreviewDataUrl(frame);
+            StateHasChanged();
+        });
+
+    private static string PreviewDataUrl(PreviewFrame frame) =>
+        $"data:image/jpeg;base64,{frame.JpegBase64}";
+
     // Ghi ngay dst mới vào settings.json — áp dụng cho lần start kế tiếp.
     private void SaveQuickDst()
     {
@@ -435,6 +484,7 @@
     {
         L.Changed -= OnLangChanged;
         Pipeline.PipelineStateChanged -= OnPipelineStateChanged;
+        Preview.Changed -= OnPreviewChanged;
         if (_feed is not null)
         {
             _feed.Stop();

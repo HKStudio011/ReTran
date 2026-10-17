@@ -26,6 +26,7 @@ namespace ReTran_App
             builder.Services.AddSingleton<I18nService>();
             builder.Services.AddSingleton<ToastService>();
             builder.Services.AddSingleton<OverlayState>();
+            builder.Services.AddSingleton<PreviewState>();
             builder.Services.AddSingleton<OverlayFeedServer>();
             builder.Services.AddSingleton<IOverlayFeedServer>(sp => sp.GetRequiredService<OverlayFeedServer>());
 

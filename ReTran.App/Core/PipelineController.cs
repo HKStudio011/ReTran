@@ -48,6 +48,7 @@ public sealed class PipelineController
     private readonly AppSettingsService _settings;
     private readonly TranslationCache _cache;
     private readonly OverlayState _overlay;
+    private readonly PreviewState? _preview;
     private readonly ILogger<PipelineController> _log;
     private readonly SemaphoreSlim _cacheGate = new(1, 1);
     // Giữ handler trong bounds của read-loop: gate wait + truy cập DB tối đa 2 s (lookup và put).
@@ -63,19 +64,27 @@ public sealed class PipelineController
     /// <param name="cache">Translation cache backing <c>translate.request_cache</c>/<c>translate.put</c>. Cache dịch thuật chống lưng <c>translate.request_cache</c>/<c>translate.put</c>.</param>
     /// <param name="overlay">Overlay state published from <c>frame.translated</c>. Trạng thái overlay được xuất bản từ <c>frame.translated</c>.</param>
     /// <param name="log">Logger for best-effort failures. Logger cho các lỗi best-effort.</param>
+    /// <param name="preview">
+    /// Optional preview state published from <c>frame.annotated</c>; <see langword="null"/>
+    /// disables preview publishing (old tests keep passing). Trạng thái preview tùy chọn được
+    /// xuất bản từ <c>frame.annotated</c>; <see langword="null"/> tắt xuất bản preview (test cũ
+    /// không vỡ).
+    /// </param>
     /// <exception cref="ArgumentNullException">Thrown when any reference parameter is null. Ném khi tham số tham chiếu nào đó là null.</exception>
     public PipelineController(
         ICorePeer peer,
         AppSettingsService settings,
         TranslationCache cache,
         OverlayState overlay,
-        ILogger<PipelineController> log)
+        ILogger<PipelineController> log,
+        PreviewState? preview = null)
     {
         _peer = peer ?? throw new ArgumentNullException(nameof(peer));
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _cache = cache ?? throw new ArgumentNullException(nameof(cache));
         _overlay = overlay ?? throw new ArgumentNullException(nameof(overlay));
         _log = log ?? throw new ArgumentNullException(nameof(log));
+        _preview = preview;
     }
 
     /// <summary>
@@ -308,6 +317,9 @@ public sealed class PipelineController
             case "frame.translated":
                 HandleFrameTranslated(@params);
                 break;
+            case "frame.annotated":
+                HandleFrameAnnotated(@params);
+                break;
             case "pipeline.state":
                 HandlePipelineState(@params);
                 break;
@@ -315,6 +327,22 @@ public sealed class PipelineController
                 HandleTranslatePut(@params);
                 break;
         }
+    }
+
+    private void HandleFrameAnnotated(JsonNode? @params)
+    {
+        if (@params is not JsonObject p || _preview is null) return;
+        if (p["jpeg"] is not JsonValue jpegValue || jpegValue.GetValueKind() != JsonValueKind.String)
+        {
+            return;
+        }
+        string? jpeg = jpegValue.GetValue<string>();
+        if (string.IsNullOrEmpty(jpeg)) return;
+        _preview.Publish(new PreviewFrame(
+            ReadLong(p, "seq"),
+            ReadInt(p, "w"),
+            ReadInt(p, "h"),
+            jpeg));
     }
 
     private void HandleFrameTranslated(JsonNode? @params)
@@ -428,6 +456,21 @@ public sealed class PipelineController
             && value.TryGetValue<int>(out int parsed)
             ? parsed
             : fallback;
+
+    // Long (seq) đọc qua JSON literal: TryGetValue<long> chỉ sốc đúng kiểu backing — JsonNode
+    // tự dựng (int) hay parse từ wire (JsonElement) đều phải đọc được.
+    private static long ReadLong(JsonObject o, string key, long fallback = 0)
+    {
+        if (o[key] is not JsonValue value || value.GetValueKind() != JsonValueKind.Number)
+            return fallback;
+        return long.TryParse(
+            value.ToJsonString(),
+            System.Globalization.NumberStyles.Integer,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out long parsed)
+            ? parsed
+            : fallback;
+    }
 
     private static double ReadDouble(JsonObject o, string key, double fallback = 0)
         => o[key] is JsonValue value
