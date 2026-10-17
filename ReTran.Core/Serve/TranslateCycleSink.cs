@@ -35,6 +35,9 @@ public sealed class TranslateCycleSink : ICycleSink
     private readonly IJsonRpcNotifier _notifier;
     private readonly TextWriter _stderr;
 
+    /// <summary>Hand-off slot for the annotation loop (camera/preview). Khe giao cho vòng ghi chú khung (camera/preview).</summary>
+    private readonly AnnotationSnapshot _snapshot;
+
     /// <summary>Bounds concurrent translator calls to 4 (spec §4.2). Giới số lời gọi dịch đồng thời ở 4 (spec §4.2).</summary>
     private readonly SemaphoreSlim _translateGate = new(4, 4);
 
@@ -70,13 +73,15 @@ public sealed class TranslateCycleSink : ICycleSink
     /// <param name="cache">Batched cache channel to the App. Kênh cache theo lô tới App.</param>
     /// <param name="notifier">JSON-RPC sender for <c>frame.translated</c>. Bộ gửi JSON-RPC cho <c>frame.translated</c>.</param>
     /// <param name="stderr">Writer for best-effort warnings; never the hot path. Nơi ghi cảnh báo best-effort; không thuộc hot path.</param>
+    /// <param name="snapshot">Slot publishing the box list for the frame annotator. Khe đăng bố danh sách box cho bộ ghi chú khung.</param>
     /// <exception cref="ArgumentNullException">Thrown when any reference parameter is null. Ném khi tham số tham chiếu nào đó là null.</exception>
     public TranslateCycleSink(
         string context, string src, string dst,
         ITranslator translator,
         ICacheChannel cache,
         IJsonRpcNotifier notifier,
-        TextWriter stderr)
+        TextWriter stderr,
+        AnnotationSnapshot snapshot)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(src);
@@ -85,6 +90,7 @@ public sealed class TranslateCycleSink : ICycleSink
         ArgumentNullException.ThrowIfNull(cache);
         ArgumentNullException.ThrowIfNull(notifier);
         ArgumentNullException.ThrowIfNull(stderr);
+        ArgumentNullException.ThrowIfNull(snapshot);
         _context = context;
         _src = src;
         _dst = dst;
@@ -92,6 +98,7 @@ public sealed class TranslateCycleSink : ICycleSink
         _cache = cache;
         _notifier = notifier;
         _stderr = stderr;
+        _snapshot = snapshot;
     }
 
     /// <summary>
@@ -122,6 +129,7 @@ public sealed class TranslateCycleSink : ICycleSink
         // (1) Build the full box list from the session so every cycle re-annotates all spots.
         // (1) Dựng danh sách box đầy đủ từ session để mỗi chu kỳ ghi chú lại toàn bộ spot.
         var boxes = new JsonArray();
+        var annotBoxes = new List<AnnotBox>();
         if (spotResult["spots"] is JsonArray spots)
         {
             foreach (JsonNode? node in spots)
@@ -142,8 +150,14 @@ public sealed class TranslateCycleSink : ICycleSink
                     // Explicit null until a translation exists (spec §3.3). Tường minh null khi chưa có bản dịch (spec §3.3).
                     ["translated"] = translated,
                 });
+                annotBoxes.Add(new AnnotBox(x, y, w, h, text, translated));
             }
         }
+
+        // Publish for the annotation loop before emitting: the annotator draws exactly this list
+        // (an empty list clears vanished text). Đăng cho vòng ghi chú trước khi emit: bộ ghi chú
+        // vẽ đúng danh sách này (list rỗng = text đã biến mất).
+        _snapshot.Publish(frameWidth, frameHeight, annotBoxes);
 
         // (2) Emit before scheduling: the first emit must show pre-background state.
         // (2) Emit trước khi xếp hàng: lần emit đầu phải cho thấy trạng thái trước khi chạy nền.

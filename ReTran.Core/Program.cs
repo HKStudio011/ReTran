@@ -79,7 +79,9 @@ public static class Program
 
         var registry = new TranslatorRegistry();
         registry.Register(new GoogleWebTranslator());
-        await using var host = new PipelineHost(rpc, registry, server, Console.Error);
+        Config.CoreConfig config = Config.CoreConfig.LoadFrom(Config.CoreConfig.DefaultPath);
+        await using var host = new PipelineHost(rpc, registry, server, Console.Error,
+            sourceFactory: null, annotator: new FrameAnnotator(), annotatorFps: config.CaptureFps);
         server.Register("core.start", p => host.StartAsync(p, CancellationToken.None));
         server.Register("core.stop", p => host.StopAsync(p, CancellationToken.None));
         server.Register("core.list_sources", _ => host.ListSourcesAsync(CancellationToken.None));

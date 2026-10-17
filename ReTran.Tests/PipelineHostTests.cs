@@ -44,6 +44,14 @@ public class PipelineHostTests
         }
     }
 
+    /// <summary>Annotator stub returning fixed JPEG bytes so tests can assert the exact payload.</summary>
+    private sealed class FakeAnnotator : IFrameAnnotator
+    {
+        public byte[] Result { get; set; } = [1, 2, 3];
+
+        public byte[] Annotate(Frame frame, AnnotSnapshot? snapshot) => Result;
+    }
+
     /// <summary>
     /// Long-lived JSON-RPC transport: blocking read channel, captured writes, and an auto-responder
     /// that answers translate.request_cache with an all-miss result (no real App in tests).
@@ -178,7 +186,8 @@ public class PipelineHostTests
         JsonRpcServer server,
         List<FakeCaptureSource>? sources = null,
         TextWriter? stderr = null,
-        Func<OcrLoopOptions, ICaptureSource>? sourceFactory = null)
+        Func<OcrLoopOptions, ICaptureSource>? sourceFactory = null,
+        IFrameAnnotator? annotator = null)
     {
         Func<OcrLoopOptions, ICaptureSource>? factory = sourceFactory;
         if (factory is null && sources is not null)
@@ -191,7 +200,7 @@ public class PipelineHostTests
                 return source;
             };
         }
-        return new PipelineHost(rpc, registry, server, stderr ?? new StringWriter(), factory);
+        return new PipelineHost(rpc, registry, server, stderr ?? new StringWriter(), factory, annotator);
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition, string what, int timeoutMs = 10_000)
@@ -426,6 +435,73 @@ public class PipelineHostTests
             () => host.StartAsync(StartParams(), CancellationToken.None));
         Assert.Equal(RpcErrorCodes.InternalError, ex.Code);
         Assert.Contains("capture source unavailable", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Start_EmitsFrameAnnotated_WithJpegPayload()
+    {
+        await using var peer = new Peer();
+        var sources = new List<FakeCaptureSource>();
+        await using var host = CreateHost(
+            new FakeSidecarRpc { NextResult = SpotResult() },
+            RegistryWith(new CountingTranslator()), peer.Server, sources,
+            annotator: new FakeAnnotator());
+
+        JsonNode? started = await host.StartAsync(StartParams(), CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+
+        JsonNode? frame = await WaitForNotificationAsync(peer, "frame.annotated");
+        Assert.Equal(1, frame!["seq"]!.GetValue<long>());
+        Assert.Equal(2, frame["w"]!.GetValue<int>());   // TinyFrame 2x2
+        Assert.Equal(2, frame["h"]!.GetValue<int>());
+        byte[] jpeg = Convert.FromBase64String(frame["jpeg"]!.GetValue<string>());
+        Assert.Equal(new byte[] { 1, 2, 3 }, jpeg);
+    }
+
+    [Fact]
+    public async Task Stop_AnnotationLoop_StopsEmitting()
+    {
+        await using var peer = new Peer();
+        var sources = new List<FakeCaptureSource>();
+        await using var host = CreateHost(
+            new FakeSidecarRpc { NextResult = SpotResult() },
+            RegistryWith(new CountingTranslator()), peer.Server, sources,
+            annotator: new FakeAnnotator());
+
+        JsonNode? started = await host.StartAsync(StartParams(), CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+
+        // Keep frames flowing so the loop would keep emitting if it survived the stop.
+        // Giữ frame chảy liên tục để loop sẽ còn emit nếu sống sót sau stop.
+        using var feederCts = new CancellationTokenSource();
+        Task feeder = Task.Run(async () =>
+        {
+            while (!feederCts.IsCancellationRequested)
+            {
+                if (sources.Count > 0) sources[^1].Raise(TinyFrame());
+                try { await Task.Delay(50, feederCts.Token); }
+                catch (OperationCanceledException) { break; }
+            }
+        });
+
+        try
+        {
+            await WaitUntilAsync(
+                () => NotificationsOf(peer, "frame.annotated").Count >= 2,
+                "two frame.annotated notifications");
+
+            JsonNode? stopped = await host.StopAsync(null, CancellationToken.None);
+            Assert.False(stopped!["running"]!.GetValue<bool>());
+
+            int count = NotificationsOf(peer, "frame.annotated").Count;
+            await Task.Delay(300, TestContext.Current.CancellationToken);
+            Assert.Equal(count, NotificationsOf(peer, "frame.annotated").Count);
+        }
+        finally
+        {
+            feederCts.Cancel();
+            await feeder;
+        }
     }
 
     [Fact]

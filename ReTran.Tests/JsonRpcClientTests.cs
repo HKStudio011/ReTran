@@ -354,6 +354,31 @@ public class JsonRpcClientTests
     }
 
     [Fact]
+    public async Task CallAsync_200KB_Params_RoundtripIntact()
+    {
+        // frame.annotated carries a ~200 KB base64 JPEG on one JSON line — a reader with any
+        // buffer/line limit would truncate it. Exercises the same read/write path both ways.
+        // frame.annotated mang JPEG base64 ~200 KB trên một dòng JSON — reader có giới hạn
+        // buffer/dòng là cắt mất. Đi qua cùng đường read/write theo cả hai chiều.
+        var input = new BlockingTextReader();
+        var output = new RecordingWriter();
+        await using var client = new JsonRpcClient(input, output);
+
+        string big = new string('x', 200_000);
+        Task<JsonNode?> call = client.CallAsync(
+            "frame.annotated", new JsonObject { ["jpeg"] = big }, CancellationToken.None);
+        await output.WaitForLinesAsync(1);
+
+        var sent = JsonNode.Parse(output.Lines[0])!;
+        string id = sent["id"]!.GetValue<string>();
+        Assert.Equal(200_000, sent["params"]!["jpeg"]!.GetValue<string>().Length);
+
+        input.Enqueue($"{{\"jsonrpc\":\"2.0\",\"id\":\"{id}\",\"result\":\"{big}\"}}");
+        JsonNode? result = await call;
+        Assert.Equal(200_000, result!.GetValue<string>().Length);
+    }
+
+    [Fact]
     public async Task CallAsync_WriteFailure_RemovesPendingEntry()
     {
         var input = new BlockingTextReader();

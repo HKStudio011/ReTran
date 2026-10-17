@@ -84,8 +84,11 @@ public class TranslateCycleSinkTests
         }
     }
 
-    private static TranslateCycleSink Create(ITranslator tr, ICacheChannel cache, StubNotifier n, TextWriter? err = null)
-        => new("screen:0", "auto", "vi", tr, cache, n, err ?? new StringWriter());
+    private static TranslateCycleSink Create(
+        ITranslator tr, ICacheChannel cache, StubNotifier n, TextWriter? err = null,
+        AnnotationSnapshot? snapshot = null)
+        => new("screen:0", "auto", "vi", tr, cache, n, err ?? new StringWriter(),
+            snapshot ?? new AnnotationSnapshot());
 
     [Fact]
     public async Task Cycle_EmitsFrameTranslated_EveryTime_EvenWithoutNewTexts()
@@ -137,6 +140,30 @@ public class TranslateCycleSinkTests
         var entry = Assert.Single(put);
         Assert.Equal("B", entry.Text);
         Assert.Equal("β", entry.Translated);
+    }
+
+    [Fact]
+    public async Task OnCycle_PublishesAnnotationSnapshot()
+    {
+        var cache = new StubCache { Hits = new() { ["HELLO"] = "Xin chào" } };
+        var snapshot = new AnnotationSnapshot();
+        var sink = Create(new StubTranslator(), cache, new StubNotifier(), snapshot: snapshot);
+
+        await sink.OnCycleAsync(1, 1000, 500, Result("HELLO"), CancellationToken.None);
+        await sink.WhenIdleAsync(); // HELLO hit -> session có bản dịch
+        await sink.OnCycleAsync(2, 1000, 500, Result("HELLO"), CancellationToken.None);
+
+        AnnotSnapshot? latest = snapshot.TryGet();
+        Assert.NotNull(latest);
+        Assert.Equal(1000, latest!.FrameWidth);
+        Assert.Equal(500, latest.FrameHeight);
+        AnnotBox box = Assert.Single(latest.Boxes);
+        Assert.Equal("HELLO", box.Text);
+        Assert.Equal("Xin chào", box.Translated);
+        Assert.Equal(0.1, box.X, 6); // 100/1000
+        Assert.Equal(0.1, box.Y, 6); // 50/500
+        Assert.Equal(0.2, box.W, 6); // (300-100)/1000
+        Assert.Equal(0.2, box.H, 6); // (150-50)/500
     }
 
     [Fact]
