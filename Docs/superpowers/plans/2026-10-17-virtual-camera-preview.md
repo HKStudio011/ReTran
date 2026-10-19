@@ -400,11 +400,13 @@ Note: card dùng `CameraRegistrar.DeviceName` (nguồn duy nhất) + test `Devic
 
 - [x] **Step 3: Cập nhật `AGENTS.md`** — mục OBS Export → **Virtual Camera** (browser source gỡ, ReTran Camera là đường ra, giữ khung cuối/đen khi app thoát, letterbox); Repository Layout thêm `ReTran.Camera/`; Tech Stack thêm hàng **C++** + cập nhật C#/Python; budget row "OBS export" → "Virtual camera output".
 
-- [ ] **Step 4: Chạy acceptance checklist của spec §8** (7 mục) — tự check: §8.1 OBS device + khung thật ✓ (GATE Task 4 + log OBS `13:17:31`); §8.3 Start/Stop/giữ khung ✓ (GATE); §8.5 port 17863 không còn listener ✓ + `Overlay.razor` đã xoá ✓ (chỉ còn file build cũ trong `bin/Release`); §8.6 code overlay local (`Services/OverlayWindow/*`) còn nguyên ✓. **Cần user xác nhận**: §8.1 Zoom/Discord có thấy device không; §8.2 đổi nguồn (window ↔ screen) camera có theo kịp không; §8.4 layout trang điều khiển (demo badge đã bỏ từ commit `cd0b7fb` ⇒ mục demo coi như n/a).
+- [x] **Step 4: Chạy acceptance checklist của spec §8** (7 mục) — 2026-10-19. Tự check: §8.1 OBS device + khung thật ✓ (GATE Task 4 + log OBS `13:17:31`); §8.3 Start/Stop/giữ khung ✓ (GATE); §8.5 port 17863 không còn listener ✓ + `Overlay.razor` đã xoá ✓ (chỉ còn file build cũ trong `bin/Release`); §8.6 code overlay local (`Services/OverlayWindow/*`) còn nguyên ✓. **User quyết định (2026-10-19): bỏ qua** kiểm tay §8.1 Zoom/Discord và §8.2 đổi nguồn (window ↔ screen) — coi là **n/a**, chỉ chốt với OBS. §8.4 layout: demo badge đã bỏ từ commit `cd0b7fb` ⇒ mục demo n/a, layout lớn đã xác nhận khi làm Task 5.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit** — commit `8c91578` (2026-10-19).
 
 ```bash
 git add Docs/performance.md AGENTS.md Docs/superpowers/plans/2026-10-17-virtual-camera-preview.md
 git commit -m "docs: record camera/preview performance and update AGENTS"
 ```
+
+**Kết luận Task 6:** CPU/RAM/annotate/IPC **FAIL** budget (chi tiết + phân rã ở `Docs/performance.md` §M5); camera + VRAM PASS. Việc fix performance tách sang plan mới: `Docs/superpowers/plans/2026-10-19-pipeline-perf-fix.md`.
