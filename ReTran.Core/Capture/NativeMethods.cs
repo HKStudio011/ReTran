@@ -24,6 +24,9 @@ internal static class NativeMethods
     /// <summary>No color table mapping for GetDIBits/CreateDIBSection. Không dùng bảng màu khi gọi GetDIBits/CreateDIBSection.</summary>
     internal const uint DIB_RGB_COLORS = 0;
 
+    /// <summary>BitBlt raster operation: copy source pixels as-is. Thao tác BitBlt: copy nguyên pixel nguồn.</summary>
+    internal const uint SRCCOPY = 0x00CC0020;
+
     /// <summary>
     /// Per-Monitor-V2 awareness value (DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4).
     /// Giá trị nhận thức DPI Per-Monitor-V2 (DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4).
@@ -97,6 +100,13 @@ internal static class NativeMethods
     /// <summary>Releases a DC obtained via GetDC. Giải phóng DC đã lấy qua GetDC.</summary>
     [DllImport("user32.dll")]
     internal static extern int ReleaseDC(nint hWnd, nint hDC);
+
+    /// <summary>Copies a rectangle of pixels from one DC to another. Copy một vùng pixel từ DC này sang DC khác.</summary>
+    [DllImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool BitBlt(
+        nint hdcDest, int xDest, int yDest, int wDest, int hDest,
+        nint hdcSrc, int xSrc, int ySrc, uint rop);
 
     /// <summary>Creates a memory DC compatible with the given DC. Tạo memory DC tương thích với DC đã cho.</summary>
     [DllImport("gdi32.dll")]

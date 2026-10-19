@@ -45,6 +45,9 @@ public class ScreenCaptureSource : ICaptureSource
     /// <summary>WAIT_TIMEOUT — no new frame yet; normal on a static desktop, not an error. Chưa có frame mới; bình thường với màn hình tĩnh, không phải lỗi.</summary>
     private const int WaitTimeoutHResult = unchecked((int)0x887A0027);
 
+    /// <summary>Once-flag for the best-effort Per-Monitor-V2 DPI opt-in (shared with the window source). Cờ một lần cho việc đăng ký DPI Per-Monitor-V2 best-effort.</summary>
+    private static int s_dpiAwarenessAttempted;
+
     private readonly ScreenTarget _target;
     private readonly ILogger? _logger;
     private readonly int _fps;
@@ -65,7 +68,16 @@ public class ScreenCaptureSource : ICaptureSource
     private int _stagingHeight;
     private int _backoffMs = InitialBackoffMs;
     private int _failureCount;
-    private int _formatSkipCount;
+
+    // GDI fallback state — owned by the capture thread. Active while the desktop output format
+    // is not BGRA (HDR/10-bit displays): frames come from a GDI BitBlt of the monitor rectangle.
+    // Trạng thái fallback GDI — chỉ luồng chụp sở hữu. Bật khi định dạng output desktop không phải
+    // BGRA (màn hình HDR/10-bit): frame lấy từ GDI BitBlt vùng monitor.
+    private bool _gdiFallback;
+    private int _gdiLeft;
+    private int _gdiTop;
+    private int _gdiWidth;
+    private int _gdiHeight;
 
     /// <summary>
     /// Creates a screen capture source for the monitor at <paramref name="target"/>.MonitorIndex (0 = primary).
@@ -109,6 +121,12 @@ public class ScreenCaptureSource : ICaptureSource
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_running) throw new InvalidOperationException("Capture is already running.");
+
+        // DPI: opt the process into Per-Monitor-V2 once (best effort) so the GDI fallback's
+        // monitor rectangle and BitBlt coordinates are in physical pixels.
+        // DPI: đăng ký Per-Monitor-V2 một lần (best effort) để hình chữ nhật monitor và tọa độ
+        // BitBlt của fallback GDI tính theo pixel vật lý.
+        EnsureDpiAwareness();
 
         _cts = new CancellationTokenSource();
         var token = _cts.Token;
@@ -186,7 +204,7 @@ public class ScreenCaptureSource : ICaptureSource
             throw new InvalidOperationException("DXGI reports no attached display outputs.");
 
         string? primaryName = null;
-        try { primaryName = NativeMethods.GetPrimaryDeviceName(); }
+        try { primaryName = MonitorInfoNative.GetPrimaryDeviceName(); }
         catch (DllNotFoundException) { /* non-Windows / headless: fall back to origin check */ }
         catch (EntryPointNotFoundException) { /* same as above */ }
 
@@ -281,6 +299,27 @@ public class ScreenCaptureSource : ICaptureSource
         var device = _device!;
         var context = _context!;
 
+        // GDI mode: the frame comes from BitBlt; the DXGI queue is only drained non-blockingly so
+        // ACCESS_LOST (mode change / lock screen) stays detectable.
+        // Chế độ GDI: frame lấy từ BitBlt; hàng đợi DXGI chỉ được xả không-đóng-đường để
+        // ACCESS_LOST (đổi chế độ / khóa màn hình) vẫn phát hiện được.
+        if (_gdiFallback)
+        {
+            var drain = dup.AcquireNextFrame(0, out _, out IDXGIResource drained);
+            if (drain.Success)
+            {
+                try { dup.ReleaseFrame(); }
+                finally { drained.Dispose(); }
+            }
+            else if (drain.Code == AccessLostHResult)
+            {
+                LogWarning("DXGI access lost (mode change / lock screen) — re-acquiring with backoff.");
+                DisposePipeline();
+                return AttemptResult.Failed;
+            }
+            return CaptureOnceGdi();
+        }
+
         var acquire = dup.AcquireNextFrame(AcquireTimeoutMs, out OutduplFrameInfo info, out IDXGIResource desktopRes);
         if (!acquire.Success)
         {
@@ -305,12 +344,21 @@ public class ScreenCaptureSource : ICaptureSource
             var mode = dup.Description.ModeDescription;
             if (mode.Format != Format.B8G8R8A8_UNorm)
             {
-                // HDR / 10-bit output: skip the frame, never silently convert.
-                // Output HDR / 10-bit: bỏ qua frame, không bao giờ chuyển đổi im lặng.
-                _formatSkipCount++;
-                if (_formatSkipCount == 1 || _formatSkipCount % 60 == 0)
-                    LogError("Desktop output format {Format} is not B8G8R8A8_UNORM (HDR/10-bit) — frame skipped, no conversion.", mode.Format);
-                return AttemptResult.Frame; // pipeline is healthy; do not back off. Pipeline bình thường; không lùi nhịp.
+                // HDR / 10-bit output: DXGI cannot hand us BGRA — capture the monitor rectangle
+                // with GDI BitBlt instead of dropping every frame.
+                // Output HDR / 10-bit: DXGI không cho BGRA — chụp hình chữ nhật monitor bằng GDI
+                // BitBlt thay vì bỏ hết frame.
+                if (!_gdiFallback)
+                {
+                    _gdiFallback = true;
+                    LogWarning("Desktop output format {Format} is not B8G8R8A8_UNORM (HDR/10-bit) — switching to GDI BitBlt fallback.", mode.Format);
+                }
+                return CaptureOnceGdi();
+            }
+            if (_gdiFallback)
+            {
+                _gdiFallback = false;
+                LogWarning("Desktop output is B8G8R8A8_UNORM again — leaving the GDI fallback.");
             }
 
             int width = (int)mode.Width;
@@ -358,6 +406,76 @@ public class ScreenCaptureSource : ICaptureSource
             // ReleaseFrame ngay sau khi copy xong — yêu cầu của DXGI.
             dup.ReleaseFrame();
             desktopRes.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// GDI fallback capture: BitBlt the target monitor's rectangle from the screen DC into a
+    /// top-down 32-bit DIB section. Used while the desktop output format is not BGRA (HDR/10-bit).
+    /// Fallback GDI: BitBlt hình chữ nhật monitor đích từ DC màn hình vào DIB section 32-bit
+    /// top-down. Dùng khi định dạng output desktop không phải BGRA (HDR/10-bit).
+    /// </summary>
+    private AttemptResult CaptureOnceGdi()
+    {
+        if (_gdiWidth <= 0 || _gdiHeight <= 0)
+        {
+            if (!TryGetMonitorRect(out _gdiLeft, out _gdiTop, out _gdiWidth, out _gdiHeight))
+            {
+                LogError("GDI fallback: monitor '{Device}' rectangle could not be resolved.", _targetDeviceName);
+                return AttemptResult.Failed;
+            }
+        }
+
+        nint screenDc = NativeMethods.GetDC(nint.Zero);
+        if (screenDc == nint.Zero) return AttemptResult.Failed;
+        try
+        {
+            nint memDc = NativeMethods.CreateCompatibleDC(screenDc);
+            if (memDc == nint.Zero) return AttemptResult.Failed;
+            try
+            {
+                var bmi = new NativeMethods.BITMAPINFO
+                {
+                    bmiHeader = new NativeMethods.BITMAPINFOHEADER
+                    {
+                        biSize = (uint)Marshal.SizeOf<NativeMethods.BITMAPINFOHEADER>(),
+                        biWidth = _gdiWidth,
+                        biHeight = -_gdiHeight, // top-down: row 0 is the top of the monitor. Hàng 0 là đỉnh monitor.
+                        biPlanes = 1,
+                        biBitCount = 32,
+                        biCompression = NativeMethods.BI_RGB,
+                    },
+                };
+
+                nint hBitmap = NativeMethods.CreateDIBSection(memDc, ref bmi, NativeMethods.DIB_RGB_COLORS, out nint bits, nint.Zero, 0);
+                if (hBitmap == nint.Zero || bits == nint.Zero) return AttemptResult.Failed;
+                try
+                {
+                    nint oldBitmap = NativeMethods.SelectObject(memDc, hBitmap);
+                    bool ok = NativeMethods.BitBlt(
+                        memDc, 0, 0, _gdiWidth, _gdiHeight,
+                        screenDc, _gdiLeft, _gdiTop, NativeMethods.SRCCOPY);
+                    if (oldBitmap != nint.Zero) NativeMethods.SelectObject(memDc, oldBitmap);
+                    if (!ok) return AttemptResult.Failed;
+
+                    var pixels = new byte[_gdiWidth * _gdiHeight * 4];
+                    Marshal.Copy(bits, pixels, 0, pixels.Length);
+                    FrameArrived?.Invoke(this, new FrameArrivedEventArgs(Frame.FromBgra(_gdiWidth, _gdiHeight, pixels)));
+                    return AttemptResult.Frame;
+                }
+                finally
+                {
+                    NativeMethods.DeleteObject(hBitmap);
+                }
+            }
+            finally
+            {
+                NativeMethods.DeleteDC(memDc);
+            }
+        }
+        finally
+        {
+            NativeMethods.ReleaseDC(nint.Zero, screenDc);
         }
     }
 
@@ -442,6 +560,19 @@ public class ScreenCaptureSource : ICaptureSource
             _context = null;
             throw;
         }
+
+        // The desktop format is known from the duplication description immediately — arm the GDI
+        // fallback before the first frame (a static HDR desktop never delivers a DXGI frame, so
+        // waiting for one would leave the fallback un-armed forever).
+        // Định dạng desktop biết được ngay từ mô tả duplication — bật fallback GDI trước cả frame
+        // đầu (màn hình HDR tĩnh không bao giờ có frame DXGI, chờ frame sẽ không bao giờ bật được).
+        var mode = _duplication.Description.ModeDescription;
+        if (mode.Format != Format.B8G8R8A8_UNorm)
+        {
+            _gdiFallback = true;
+            _gdiWidth = 0;
+            LogWarning("Desktop output format {Format} is not B8G8R8A8_UNORM (HDR/10-bit) — using GDI BitBlt fallback.", mode.Format);
+        }
     }
 
     /// <summary>
@@ -496,11 +627,79 @@ public class ScreenCaptureSource : ICaptureSource
         }
     }
 
+    /// <summary>
+    /// Opts the process into Per-Monitor-V2 DPI awareness once (best effort: failures are swallowed
+    /// so non-Windows/headless callers still work). Required before the GDI fallback measures the
+    /// monitor rectangle.
+    /// Đăng ký nhận thức DPI Per-Monitor-V2 một lần (best effort: nuốt lỗi để môi trường
+    /// non-Windows/headless vẫn chạy được). Bắt buộc trước khi fallback GDI đo hình chữ nhật monitor.
+    /// </summary>
+    private static void EnsureDpiAwareness()
+    {
+        if (Interlocked.Exchange(ref s_dpiAwarenessAttempted, 1) != 0) return;
+        try
+        {
+            NativeMethods.SetProcessDpiAwarenessContext(
+                NativeMethods.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+        catch (DllNotFoundException) { /* non-Windows: ignore. Ngoài Windows: bỏ qua. */ }
+        catch (EntryPointNotFoundException) { /* pre-1703 Windows: ignore. Windows cũ: bỏ qua. */ }
+    }
+
+    /// <summary>
+    /// Resolves the virtual-screen rectangle of the target monitor from DXGI DesktopCoordinates
+    /// (physical pixels under Per-Monitor-V2 awareness). Win32 EnumDisplayMonitors is not used:
+    /// in remote/mirrored sessions it can report no attached monitors while the GPU outputs are
+    /// still live.
+    /// Tìm hình chữ nhật (toạ độ màn hình ảo) của monitor đích từ DXGI DesktopCoordinates (pixel
+    /// vật lý khi đã đăng ký Per-Monitor-V2). Không dùng Win32 EnumDisplayMonitors: trong phiên
+    /// remote/mirror hàm này có thể báo không có monitor nào gắn dù output GPU vẫn hoạt động.
+    /// </summary>
+    private bool TryGetMonitorRect(out int left, out int top, out int width, out int height)
+    {
+        left = top = width = height = 0;
+        try
+        {
+            var factory = DXGI.CreateDXGIFactory1<IDXGIFactory1>();
+            using (factory)
+            {
+                for (uint a = 0; ; a++)
+                {
+                    var adapterResult = factory.EnumAdapters1(a, out IDXGIAdapter1 adapter);
+                    if (!adapterResult.Success) break;
+                    using (adapter)
+                    {
+                        for (uint o = 0; ; o++)
+                        {
+                            var outputResult = adapter.EnumOutputs(o, out IDXGIOutput output);
+                            if (!outputResult.Success) break;
+                            using (output)
+                            {
+                                var d = output.Description;
+                                if (!d.AttachedToDesktop ||
+                                    !string.Equals(d.DeviceName, _targetDeviceName, StringComparison.OrdinalIgnoreCase))
+                                    continue;
+                                var rc = d.DesktopCoordinates;
+                                left = rc.Left;
+                                top = rc.Top;
+                                width = rc.Right - rc.Left;
+                                height = rc.Bottom - rc.Top;
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception) { /* DXGI unavailable — report failure, caller logs it. */ }
+        return false;
+    }
+
     private void LogError(string message, params object[] args) => _logger?.LogError(message, args);
     private void LogWarning(string message, params object[] args) => _logger?.LogWarning(message, args);
 
-    /// <summary>Win32 helpers for primary-monitor detection (MONITORINFOF_PRIMARY + device name). Helper Win32 để nhận diện màn hình chính.</summary>
-    private static class NativeMethods
+    /// <summary>Win32 helpers for monitor enumeration (device names, rectangles). Helper Win32 để liệt kê monitor (tên thiết bị, hình chữ nhật).</summary>
+    private static class MonitorInfoNative
     {
         [StructLayout(LayoutKind.Sequential)]
         internal struct RECT

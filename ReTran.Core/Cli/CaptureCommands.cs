@@ -105,7 +105,7 @@ public static class CaptureCommands
             return 2;
         }
 
-        using var source = new ScreenCaptureSource(new ScreenTarget(monitor), logger: null);
+        using var source = new ScreenCaptureSource(new ScreenTarget(monitor), new ConsoleErrorLogger());
         Frame? frame = WaitForFirstFrame(source);
         if (frame is null)
         {
@@ -141,7 +141,7 @@ public static class CaptureCommands
         if (!TryGetOption(args, "--out", out string? outPath) || string.IsNullOrWhiteSpace(outPath))
             outPath = Path.Combine(Directory.GetCurrentDirectory(), "capture-window.png");
 
-        using var source = new WindowCaptureSource(new WindowTarget(hwnd), logger: null);
+        using var source = new WindowCaptureSource(new WindowTarget(hwnd), new ConsoleErrorLogger());
         Frame? frame = WaitForFirstFrame(source);
         if (frame is null)
         {
