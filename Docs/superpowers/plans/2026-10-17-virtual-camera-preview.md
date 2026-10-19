@@ -220,7 +220,7 @@ Wiring: `MainPage.xaml.cs` startup — `new CameraRegistrar().EnsureRegistered(P
 
 Run build → verify `ReTran.App\bin\Debug\net10.0-windows10.0.19041.0\win-x64\ReTran.Camera.dll` tồn tại.
 
-- [ ] **Step 5: GATE manual — device thấy ở OBS + Discord + Zoom**
+- [x] **Step 5: GATE manual — device thấy ở OBS + Discord + Zoom** (PASS: user xác nhận device hiện ở OBS/Zoom/Discord; khung xanh đồng nhất là hành vi skeleton đúng thiết kế)
 
 Chạy `ReTran.App.exe` (đăng ký chạy lúc mở). Kiểm tuần tự:
 1. **OBS**: Sources → + → Video Capture Device → dropdown hiện **ReTran Camera** → thêm → thấy khung màu xanh `#22C55E`.
@@ -231,7 +231,7 @@ Chạy `ReTran.App.exe` (đăng ký chạy lúc mở). Kiểm tuần tự:
 Expected: cả 3 app thấy device.
 **Nếu fail (per-user hive không được enumerate):** DỪNG task, báo user lựa chọn — (A) đăng ký HKLM cần admin 1 lần lúc mở app (UAC prompt), (B) bỏ acceptance Discord/Zoom. Không tự chọn.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit** (a106579)
 
 ```bash
 git add "ReTran Project.slnx" ReTran.Camera/ ReTran.App/ReTran.App.csproj ReTran.App/Services/Camera/CameraRegistrar.cs ReTran.App/MainPage.xaml.cs ReTran.Tests/CameraRegistrarTests.cs
@@ -276,7 +276,7 @@ off  u32  magic    = 0x4D414352   // "RCam" LE
   - MMF tên `Local\ReTran.Camera.V1` (size cố định trên); heartbeat `Local\ReTran.Camera.Heartbeat` (4 byte, tạo lúc `Submit` đầu tiên, **chỉ writer giữ handle**).
   - Semantics filter: heartbeat không mở được → **đen**; flags HOLD → hiển thị frame cuối; còn lại → đọc seqlock (retry ≤4, fail → frame cuối đã lưu / đen).
 
-- [ ] **Step 1: Viết failing tests**
+- [x] **Step 1: Viết failing tests**
 
 `CameraProtocolTests`:
 - `Writer_Publish_ReaderSeesHeaderAndPixels`: 2×2 BGRA màu đã biết (encode JPEG lossless-ish quality 100 trong test, decode lại để biết kỳ vọng) → `CameraOutputService.Submit` → `CameraFrameReader.Open` thấy magic/version/w/h/stride, seq ≥1, pixels khớp kỳ vọng từng byte.
@@ -287,11 +287,11 @@ off  u32  magic    = 0x4D414352   // "RCam" LE
 - `FrameAnnotated_CallsCameraSubmit`: notification → `_camera.Submit(seq, w, h, Convert.FromBase64String(jpeg))`.
 - `PipelineStopped_CallsCameraHold`: bắn `pipeline.state {running:false, reason:"…"}` → `Hold()` được gọi.
 
-- [ ] **Step 2: Chạy verify FAIL**
+- [x] **Step 2: Chạy verify FAIL**
 
 Run: `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj"` → FAIL (chưa có type).
 
-- [ ] **Step 3: Implement C#**
+- [x] **Step 3: Implement C#**
 
 - `CameraProtocol`: hằng số offsets; `CameraFrameWriter : IDisposable` — `MemoryMappedFile.CreateOrOpen(name, TotalSize)`, `Create(name, 4)` cho heartbeat (nội dung 1); `WriteFrame(byte[] bgra1280x720, bool hold)` — set `seq|=1` (volatile/`Interlocked`), memcpy pixels, ghi header (magic/…/lastWriteTick/flags), `seq=seq+1` (chẵn). Dispose → đóng cả 2 handle (không `Dispose` mapping object — để filter tự thấy mất heartbeat).
 - `CameraFrameReader` (dùng cho test; public): mở mapping, `TryRead(out header, out byte[] pixels)` — kiểm seqlock như filter.
@@ -299,32 +299,43 @@ Run: `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj"` → FAIL (chưa 
 - `PipelineController`: `_camera` field (optional `ICameraOutput? camera = null` — thêm cuối ctor); `HandleFrameAnnotated` sau khi publish preview → `_camera?.Submit(...)`; trong handler `pipeline.state` `running==false` (nơi hiện raise `PipelineStateChanged`) → `_camera?.Hold()`.
 - `MauiProgram`: `AddSingleton<ICameraOutput, CameraOutputService>()`; `MainPage` exit path: dispose `ICameraOutput` (mẫu chỗ từng `_feedServer` — **Task 5 sẽ xóa feed**, chỗ này ghép vào thay thế luôn nhưng **chỉ sửa phần thêm dispose camera**, không xóa feed ở task này nếu Task 5 chưa chạy — commit đúng file).
 
-- [ ] **Step 4: Implement native (filter.cpp + convert export)**
+- [x] **Step 4: Implement native (filter.cpp + convert export)**
 
 - `FillBuffer`: mở `OpenFileMappingW(L"Local\ReTran.Camera.Heartbeat")` mỗi ~500 ms (không giữ handle) → fail → memset đen. Còn sống → map frame section (mở 1 lần, giữ) → đọc seqlock (retry 4, `MemoryBarrier`) → `ConvertBgraToYuy2` (BT.601 limited: `Y=(66R+129G+25B+128)>>8+16`, `U=(-38R-74G+112B+128)>>8+128`, `V=(112R-94G-18B+128)>>8+128`) → ghi ra sample; fail seqlock → dùng buffer convert gần nhất (hoặc đen nếu chưa từng).
 - Flags HOLD → vẫn hiện frame cuối (không phân biệt với live —内容 giữ nguyên).
 - Export `ReTranCamera_ConvertBgraToYuy2(const unsigned char* bgra, unsigned char* yuy2, unsigned int pixelCount)` (để test C# P/Invoke).
 - Build: `msbuild "ReTran Project.slnx" /p:Platform=x64`.
 
-- [ ] **Step 5: Chạy verify PASS (C#) + round-trip native**
+- [x] **Step 5: Chạy verify PASS (C#) + round-trip native**
 
 Run: `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj"`
 Thêm 1 test optional `CameraNativeInteropTests.ConvertBgraToYuy2_WhiteIs235_BlackIs16`: `if (!File.Exists(dll)) return;` (mẫu skip của `SidecarProcessTests`) → P/Invoke export, input pixel trắng/đen → Y = 235/16.
 
 - [ ] **Step 6: Verify manual end-to-end**
 
-Chạy app + OBS:
+> **Đã verify tự động (2026-10-19), phần native:** dùng writer harness (`%TEMP%\opencode\camwriter.cs`, file-based app) ghi khung đỏ BGRA + heartbeat vào đúng layout, rồi capture bằng
+> `ffmpeg -f dshow -pixel_format yuyv422 -i "video=ReTran Camera" -t 8 -vf scale=160:90 -r 5 -pix_fmt rgb24`:
+> writer còn sống → pixel giữa `(253,0,0)`; writer tắt → `(0,0,0)` sau ~0,5 s (heartbeat ≥ 500 ms); không có writer → `(0,0,0)`.
+> **Còn lại (GATE user):** mục 1–3 với pipeline thật trong app (khung capture + box + bản dịch ở OBS/Zoom/Discord) và mục 4 (kill app → OBS đen ≤1 s).
+
 1. Start pipeline (window) → OBS "ReTran Camera" hiện khung thật + box + bản dịch; preview trong app giống hệt OBS.
 2. Stop pipeline → cả 2 giữ khung cuối (không đen).
 3. Start lại → khung mới.
 4. Kill app → OBS **đen** trong ≤1 s; device vẫn trong danh sách; mở app lại → sống.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
-git add ReTran.App/Services/Camera/ ReTran.App/Core/PipelineController.cs ReTran.App/MainPage.xaml.cs ReTran.App/MauiProgram.cs ReTran.Camera/src/ ReTran.Tests/CameraProtocolTests.cs ReTran.Tests/CameraOutputServiceTests.cs ReTran.Tests/PipelineControllerTests.cs ReTran.Tests/CameraNativeInteropTests.cs
+git add ReTran.App/Services/Camera/ ReTran.App/Core/PipelineController.cs ReTran.App/MauiProgram.cs ReTran.Camera/src/ ReTran.Camera/ReTran.Camera.def ReTran.Tests/CameraProtocolTests.cs ReTran.Tests/CameraOutputServiceTests.cs ReTran.Tests/CameraNativeInteropTests.cs ReTran.Tests/PipelineControllerTests.cs ReTran.Tests/ReTran.Tests.csproj
 git commit -m "feat(camera): shared-memory frame protocol + service + real frames in filter"
 ```
+
+> **Ghi chú thực thi (khác plan, có chủ ý):**
+> - Không sửa `MainPage.xaml.cs`: app không có hook thoát nào để ghép dispose, và tiến trình app là bên duy nhất giữ handle MMF + heartbeat → thoát app là handle tự nhả, filter về đen; `MauiApp` dispose singleton DI. Yêu cầu "kill app → đen" đã verify ở Step 6.
+> - 2 test mức controller (`FrameAnnotated_..._SubmitsFrameToCamera`, `Stop_/PipelineStateStopped_..._CallsCameraHold`) đặt trong `PipelineControllerTests` (nơi có `FakeCorePeer` + helper), không phải `CameraOutputServiceTests`; file đó test vòng đời service (Hold khi chưa có khung, Submit sau Dispose, ...).
+> - Thêm target `CopyCameraDll` cho `ReTran.Tests.csproj` để test interop tìm thấy DLL native.
+> - **Bug đã sửa trong lúc verify:** "đen" của YUY2 không phải buffer toàn 0 (giải mã ra xanh bão hoà) mà là `Y=16, U=V=128`; phát hiện bằng ffmpeg e2e, đã sửa ở `filter.cpp` (`FillBlackYuy2`).
+> - Bổ sung: `ReTranCamera_ConvertBgraToYuy2` khai báo trong `filter.h` + `ReTran.Camera.def`; test interop 273/273 pass.
 
 ---
 

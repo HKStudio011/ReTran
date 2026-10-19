@@ -24,9 +24,12 @@ const LONGLONG kFrameDuration = 333333;
 
 /// Output pin producing the camera frames.
 ///
-/// The skeleton emits a constant green YUY2 pattern; Task 4 replaces the
-/// frame source with the shared-memory feed while keeping the pacing logic.
-/// Also exposes IAMStreamConfig (fixed single format) — capture apps
+/// Frames come from the shared-memory section written by the app
+/// (Local\ReTran.Camera.V1). The heartbeat mapping (Local\ReTran.Camera.Heartbeat)
+/// is created and held by the app only, so a missing heartbeat means the app
+/// exited and the pin must show black instead of a frozen frame. A frame that
+/// cannot be read (seqlock race) keeps the previously converted frame (hold).
+/// Also exposes IAMStreamConfig (fixed single format) - capture apps
 /// (OBS/Zoom/Discord/ffmpeg) require it to query and set the format.
 class CReTranCameraStream : public CSourceStream, public IAMStreamConfig, public IKsPropertySet
 {
@@ -72,10 +75,33 @@ public:
     STDMETHODIMP QuerySupported(REFGUID guidPropSet, DWORD dwPropID, DWORD* pTypeSupport) override;
 
 private:
+    /// Re-checks the app heartbeat (at most every 500 ms) and reopens/closes the frame section on a
+    /// liveness transition. Dò lại heartbeat của app (tối đa mỗi 500 ms) và mở/đóng lại vùng khung
+    /// khi trạng thái sống đổi.
+    void RefreshWriterState(DWORD now);
+    /// Converts the newest complete shared-memory frame into the output buffer. Chuyển khung hoàn
+    /// chỉnh mới nhất trong shared memory vào buffer đầu ra.
+    bool ReadSharedFrame();
+    /// Releases the frame-section handle and view. Giải phóng handle và view của vùng khung.
+    void CloseSharedFrame();
+    /// Fills the output frame with YUY2 limited-range black. Điền khung đầu ra bằng màu đen
+    /// limited-range của YUY2.
+    void FillBlackFrame();
+
     std::vector<BYTE> m_frame;
+    std::vector<BYTE> m_scratch;
+    HANDLE m_frameMapping = nullptr;
+    const BYTE* m_frameView = nullptr;
     LONGLONG m_mediaTime = 0;
     DWORD m_baseMs = 0;
+    DWORD m_lastHeartbeatCheckMs = 0;
+    bool m_writerAlive = false;
 };
+
+/// Converts BGRA32 pixels to YUY2 (BT.601 limited range). Exported for the C# interop test.
+/// Chuyển pixel BGRA32 sang YUY2 (BT.601 limited range). Export để test interop C#.
+extern "C" __declspec(dllexport) void __stdcall ReTranCamera_ConvertBgraToYuy2(
+    const unsigned char* bgra, unsigned char* yuy2, unsigned int pixelCount);
 
 /// The virtual camera filter: a CSource with exactly one output pin.
 class CReTranCamera : public CSource

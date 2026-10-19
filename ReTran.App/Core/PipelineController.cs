@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
 using ReTran_App.Services;
+using ReTran_App.Services.Camera;
 
 namespace ReTran_App.Core;
 
@@ -49,6 +50,7 @@ public sealed class PipelineController
     private readonly TranslationCache _cache;
     private readonly OverlayState _overlay;
     private readonly PreviewState? _preview;
+    private readonly ICameraOutput? _camera;
     private readonly ILogger<PipelineController> _log;
     private readonly SemaphoreSlim _cacheGate = new(1, 1);
     // Giữ handler trong bounds của read-loop: gate wait + truy cập DB tối đa 2 s (lookup và put).
@@ -70,6 +72,12 @@ public sealed class PipelineController
     /// xuất bản từ <c>frame.annotated</c>; <see langword="null"/> tắt xuất bản preview (test cũ
     /// không vỡ).
     /// </param>
+    /// <param name="camera">
+    /// Optional virtual-camera output fed from <c>frame.annotated</c> and held when the pipeline
+    /// stops; <see langword="null"/> disables the camera path. Đầu ra camera ảo tùy chọn được cấp
+    /// khung từ <c>frame.annotated</c> và giữ khung khi pipeline dừng; <see langword="null"/> tắt
+    /// đường camera.
+    /// </param>
     /// <exception cref="ArgumentNullException">Thrown when any reference parameter is null. Ném khi tham số tham chiếu nào đó là null.</exception>
     public PipelineController(
         ICorePeer peer,
@@ -77,7 +85,8 @@ public sealed class PipelineController
         TranslationCache cache,
         OverlayState overlay,
         ILogger<PipelineController> log,
-        PreviewState? preview = null)
+        PreviewState? preview = null,
+        ICameraOutput? camera = null)
     {
         _peer = peer ?? throw new ArgumentNullException(nameof(peer));
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
@@ -85,6 +94,7 @@ public sealed class PipelineController
         _overlay = overlay ?? throw new ArgumentNullException(nameof(overlay));
         _log = log ?? throw new ArgumentNullException(nameof(log));
         _preview = preview;
+        _camera = camera;
     }
 
     /// <summary>
@@ -153,8 +163,12 @@ public sealed class PipelineController
     }
 
     /// <summary>
-    /// Sends <c>core.stop</c> to end the current session; Core treats it as idempotent.
-    /// Gửi <c>core.stop</c> để kết thúc phiên hiện tại; Core coi lệnh này là idempotent.
+    /// Sends <c>core.stop</c> to end the current session; Core treats it as idempotent. The virtual
+    /// camera is then held on the last frame (Core sends no <c>pipeline.state</c> for a normal stop,
+    /// so this is where HOLD is set for a user-initiated stop).
+    /// Gửi <c>core.stop</c> để kết thúc phiên hiện tại; Core coi lệnh này là idempotent. Camera ảo
+    /// sau đó được giữ ở khung cuối (Core không gửi <c>pipeline.state</c> khi dừng bình thường, nên
+    /// đây là chỗ bật HOLD cho lần dừng do người dùng).
     /// </summary>
     /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
     /// <returns>A task that completes once Core acknowledges the stop. Task hoàn tất khi Core xác nhận dừng.</returns>
@@ -163,6 +177,7 @@ public sealed class PipelineController
         await _peer.CallAsync("core.stop", null, ct).ConfigureAwait(false);
         IsRunning = false;
         ActiveSource = null;
+        _camera?.Hold();
     }
 
     /// <summary>
@@ -331,18 +346,31 @@ public sealed class PipelineController
 
     private void HandleFrameAnnotated(JsonNode? @params)
     {
-        if (@params is not JsonObject p || _preview is null) return;
+        if (@params is not JsonObject p) return;
         if (p["jpeg"] is not JsonValue jpegValue || jpegValue.GetValueKind() != JsonValueKind.String)
         {
             return;
         }
         string? jpeg = jpegValue.GetValue<string>();
         if (string.IsNullOrEmpty(jpeg)) return;
-        _preview.Publish(new PreviewFrame(
-            ReadLong(p, "seq"),
-            ReadInt(p, "w"),
-            ReadInt(p, "h"),
-            jpeg));
+
+        long seq = ReadLong(p, "seq");
+        int w = ReadInt(p, "w");
+        int h = ReadInt(p, "h");
+        _preview?.Publish(new PreviewFrame(seq, w, h, jpeg));
+
+        if (_camera is null) return;
+        try
+        {
+            _camera.Submit(seq, w, h, Convert.FromBase64String(jpeg));
+        }
+        catch (Exception ex)
+        {
+            // The camera is a best-effort output: a bad payload must never kill the frame loop or
+            // the preview that was just published. Camera là đầu ra best-effort: payload hỏng không
+            // được giết vòng lặp khung hay preview vừa xuất bản.
+            _log.LogWarning(ex, "Camera submit failed for frame {Seq}.", seq);
+        }
     }
 
     private void HandleFrameTranslated(JsonNode? @params)
@@ -382,6 +410,12 @@ public sealed class PipelineController
             : null;
         IsRunning = running;
         PipelineStateChanged?.Invoke(running, reason);
+        if (!running)
+        {
+            // The loop died on its own: keep the last frame on the camera instead of going black.
+            // Loop tự chết: giữ khung cuối trên camera thay vì chuyển sang đen.
+            _camera?.Hold();
+        }
     }
 
     private void HandleTranslatePut(JsonNode? @params)

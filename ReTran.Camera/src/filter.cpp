@@ -10,23 +10,84 @@
 
 namespace
 {
-/// YUY2 encoding of #22C55E (RGB 34,197,94) under BT.601: Y=136 U=104 V=55.
-const BYTE kGreenY = 136;
-const BYTE kGreenU = 104;
-const BYTE kGreenV = 55;
+/// Shared-memory names mirrored from ReTran.App/Services/Camera/CameraProtocol.cs.
+const wchar_t kFrameMapName[] = L"Local\\ReTran.Camera.V1";
+const wchar_t kHeartbeatMapName[] = L"Local\\ReTran.Camera.Heartbeat";
+
+/// How often the pin re-checks whether the app that feeds the frames is still alive.
+const DWORD kHeartbeatCheckMs = 500;
+
+/// Fixed header layout of the shared-memory frame (see CameraProtocol.cs).
+const int kOffsetMagic = 0;
+const int kOffsetSeq = 24;
+const int kOffsetPixels = 48;
+const unsigned int kFrameMagic = 0x4D414352;
+
+/// Seqlock read attempts before the pin keeps showing its previous frame.
+const int kMaxReadAttempts = 4;
+
+/// YUY2 limited-range black (BT.601). Chroma must be neutral: a zeroed buffer is *not* black, it
+/// decodes to saturated green, so the app-closed state has to be filled field by field.
+const BYTE kBlackY = 16;
+const BYTE kBlackU = 128;
+const BYTE kBlackV = 128;
+
+/// Fills a YUY2 buffer with limited-range black.
+void FillBlackYuy2(BYTE* yuy2, size_t bytes)
+{
+    for (size_t i = 0; i + 3 < bytes; i += 4)
+    {
+        yuy2[i] = kBlackY;
+        yuy2[i + 1] = kBlackU;
+        yuy2[i + 2] = kBlackY;
+        yuy2[i + 3] = kBlackV;
+    }
+}
+
+/// Converts BGRA32 pixels to YUY2 (BT.601 limited range), two pixels per 4-byte group.
+/// U/V are averaged over the pair so a two-pixel group never favours one side.
+void ConvertBgraToYuy2Impl(const BYTE* bgra, BYTE* yuy2, unsigned int pixelCount)
+{
+    for (unsigned int i = 0; i + 1 < pixelCount; i += 2)
+    {
+        const BYTE* p0 = bgra + (static_cast<size_t>(i) * 4);
+        const BYTE* p1 = bgra + (static_cast<size_t>(i + 1) * 4);
+        const int b0 = p0[0], g0 = p0[1], r0 = p0[2];
+        const int b1 = p1[0], g1 = p1[1], r1 = p1[2];
+        BYTE* out = yuy2 + (static_cast<size_t>(i / 2) * 4);
+        out[0] = static_cast<BYTE>((((66 * r0) + (129 * g0) + (25 * b0) + 128) >> 8) + 16);
+        out[2] = static_cast<BYTE>((((66 * r1) + (129 * g1) + (25 * b1) + 128) >> 8) + 16);
+        out[1] = static_cast<BYTE>((((-38 * r0) - (74 * g0) + (112 * b0)
+                                     - (38 * r1) - (74 * g1) + (112 * b1) + 256) >> 9) + 128);
+        out[3] = static_cast<BYTE>((((112 * r0) - (94 * g0) - (18 * b0)
+                                     + (112 * r1) - (94 * g1) - (18 * b1) + 256) >> 9) + 128);
+    }
+}
+}
+
+extern "C" __declspec(dllexport) void __stdcall ReTranCamera_ConvertBgraToYuy2(
+    const unsigned char* bgra, unsigned char* yuy2, unsigned int pixelCount)
+{
+    if (bgra == nullptr || yuy2 == nullptr || pixelCount < 2)
+    {
+        return;
+    }
+    ConvertBgraToYuy2Impl(bgra, yuy2, pixelCount);
 }
 
 CReTranCameraStream::CReTranCameraStream(HRESULT* phr, CSource* pParent, LPCWSTR pName)
     : CSourceStream(NAME("ReTranCameraStream"), phr, pParent, pName)
 {
-    m_frame.resize(static_cast<size_t>(kCameraWidth) * kCameraHeight * 2);
-    for (size_t i = 0; i + 3 < m_frame.size(); i += 4)
-    {
-        m_frame[i] = kGreenY;
-        m_frame[i + 1] = kGreenU;
-        m_frame[i + 2] = kGreenY;
-        m_frame[i + 3] = kGreenV;
-    }
+    // Black until the app publishes its first frame (the app-closed state is also black).
+    // Đen cho tới khi app xuất bản khung đầu tiên (trạng thái app đóng cũng là đen).
+    m_frame.assign(static_cast<size_t>(kCameraWidth) * kCameraHeight * 2, 0);
+    m_scratch.assign(m_frame.size(), 0);
+    FillBlackFrame();
+}
+
+void CReTranCameraStream::FillBlackFrame()
+{
+    FillBlackYuy2(m_frame.data(), m_frame.size());
 }
 
 HRESULT CReTranCameraStream::GetMediaType(int iPosition, CMediaType* pMediaType)
@@ -139,6 +200,21 @@ HRESULT CReTranCameraStream::FillBuffer(IMediaSample* pSample)
     {
         return E_FAIL;
     }
+
+    // Live frames while the app is alive; black once it exits; the last converted frame is kept
+    // when a read loses the seqlock race (hold).
+    // Khung sống khi app còn chạy; đen khi app thoát; giữ khung đã chuyển đổi gần nhất khi đọc
+    // thua seqlock (hold).
+    RefreshWriterState(timeGetTime());
+    if (m_writerAlive)
+    {
+        ReadSharedFrame();
+    }
+    else
+    {
+        FillBlackFrame();
+    }
+
     CopyMemory(pBuffer, m_frame.data(), m_frame.size());
 
     LONGLONG end = m_mediaTime + kFrameDuration;
@@ -150,6 +226,99 @@ HRESULT CReTranCameraStream::FillBuffer(IMediaSample* pSample)
     return S_OK;
 }
 
+void CReTranCameraStream::RefreshWriterState(DWORD now)
+{
+    if (m_lastHeartbeatCheckMs != 0 && (now - m_lastHeartbeatCheckMs) < kHeartbeatCheckMs)
+    {
+        return;
+    }
+    m_lastHeartbeatCheckMs = now;
+
+    // The heartbeat mapping is created and held by the app only, so a failed open means the app
+    // exited. Re-opening the frame section after a transition also picks up a restarted app.
+    // Mapping heartbeat chỉ do app tạo và giữ, nên mở thất bại nghĩa là app đã thoát. Mở lại vùng
+    // khung sau mỗi lần đổi trạng thái cũng bắt được app khởi động lại.
+    HANDLE heartbeat = OpenFileMappingW(FILE_MAP_READ, FALSE, kHeartbeatMapName);
+    const bool alive = (heartbeat != nullptr);
+    if (heartbeat != nullptr)
+    {
+        CloseHandle(heartbeat);
+    }
+
+    if (alive != m_writerAlive)
+    {
+        m_writerAlive = alive;
+        CloseSharedFrame();
+    }
+}
+
+bool CReTranCameraStream::ReadSharedFrame()
+{
+    if (m_frameView == nullptr)
+    {
+        m_frameMapping = OpenFileMappingW(FILE_MAP_READ, FALSE, kFrameMapName);
+        if (m_frameMapping == nullptr)
+        {
+            return false;
+        }
+        m_frameView = static_cast<const BYTE*>(MapViewOfFile(m_frameMapping, FILE_MAP_READ, 0, 0, 0));
+        if (m_frameView == nullptr)
+        {
+            CloseHandle(m_frameMapping);
+            m_frameMapping = nullptr;
+            return false;
+        }
+    }
+
+    const volatile unsigned int* seq =
+        reinterpret_cast<const volatile unsigned int*>(m_frameView + kOffsetSeq);
+    const volatile unsigned int* magic =
+        reinterpret_cast<const volatile unsigned int*>(m_frameView + kOffsetMagic);
+
+    for (int attempt = 0; attempt < kMaxReadAttempts; ++attempt)
+    {
+        const unsigned int before = *seq;
+        if ((before & 1u) != 0)
+        {
+            continue; // writer is mid-copy
+        }
+        MemoryBarrier();
+        if (*magic != kFrameMagic)
+        {
+            continue; // section exists but no frame was published yet
+        }
+
+        // Convert into the scratch buffer so a lost race never leaves a torn frame on screen.
+        // Chuyển đổi vào buffer tạm để lần thua race không để lại khung bị xé trên màn hình.
+        ConvertBgraToYuy2Impl(
+            m_frameView + kOffsetPixels,
+            m_scratch.data(),
+            static_cast<unsigned int>(kCameraWidth) * kCameraHeight);
+        MemoryBarrier();
+
+        if (*seq == before)
+        {
+            m_frame.swap(m_scratch);
+            return true;
+        }
+    }
+    return false;
+}
+
+void CReTranCameraStream::CloseSharedFrame()
+{
+    if (m_frameView != nullptr)
+    {
+        UnmapViewOfFile(const_cast<BYTE*>(m_frameView));
+        m_frameView = nullptr;
+    }
+    if (m_frameMapping != nullptr)
+    {
+        CloseHandle(m_frameMapping);
+        m_frameMapping = nullptr;
+    }
+}
+
 HRESULT CReTranCameraStream::OnThreadCreate()
 {
     timeBeginPeriod(1);
@@ -158,6 +327,7 @@ HRESULT CReTranCameraStream::OnThreadCreate()
 
 HRESULT CReTranCameraStream::OnThreadDestroy()
 {
+    CloseSharedFrame();
     timeEndPeriod(1);
     return S_OK;
 }

@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using ReTran_App.Core;
 using ReTran_App.Data;
 using ReTran_App.Services;
+using ReTran_App.Services.Camera;
 
 public class PipelineControllerTests : IDisposable
 {
@@ -38,7 +39,11 @@ public class PipelineControllerTests : IDisposable
         }
     }
 
-    private PipelineController CreateController(FakeCorePeer peer, OverlayState overlay, PreviewState? preview = null)
+    private PipelineController CreateController(
+        FakeCorePeer peer,
+        OverlayState overlay,
+        PreviewState? preview = null,
+        FakeCameraOutput? camera = null)
     {
         _controllerDb = new RetranDbContext(_options);
         return new PipelineController(
@@ -47,7 +52,8 @@ public class PipelineControllerTests : IDisposable
             new TranslationCache(_controllerDb),
             overlay,
             NullLogger<PipelineController>.Instance,
-            preview);
+            preview,
+            camera);
     }
 
     [Fact]
@@ -158,6 +164,106 @@ public class PipelineControllerTests : IDisposable
         Assert.Equal(1280, frame.W);
         Assert.Equal(720, frame.H);
         Assert.Equal("AQID", frame.JpegBase64);
+    }
+
+    [Fact]
+    public async Task FrameAnnotated_Notification_SubmitsFrameToCamera()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        var camera = new FakeCameraOutput();
+        PipelineController controller = CreateController(peer, new OverlayState(), camera: camera);
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+
+        peer.RaiseNotification("frame.annotated", new JsonObject
+        {
+            ["seq"] = 7,
+            ["w"] = 1280,
+            ["h"] = 720,
+            ["jpeg"] = Convert.ToBase64String(new byte[] { 1, 2, 3 }),
+        });
+
+        (long Seq, int W, int H, byte[] Jpeg) submit = Assert.Single(camera.Submits);
+        Assert.Equal(7, submit.Seq);
+        Assert.Equal(1280, submit.W);
+        Assert.Equal(720, submit.H);
+        Assert.Equal(new byte[] { 1, 2, 3 }, submit.Jpeg);
+        Assert.Equal(0, camera.Holds);
+    }
+
+    [Fact]
+    public async Task FrameAnnotated_UndecodablePayload_DoesNotThrowAndSkipsCamera()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        var camera = new FakeCameraOutput();
+        var preview = new PreviewState();
+        PipelineController controller = CreateController(peer, new OverlayState(), preview, camera);
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+
+        // Not base64: the camera path must swallow it (best-effort output) and the preview must
+        // still get the frame, so a broken JPEG can never kill the notification loop.
+        // Không phải base64: đường camera phải nuốt lỗi (đầu ra best-effort) và preview vẫn nhận
+        // khung, để một JPEG hỏng không thể giết vòng lặp thông báo.
+        peer.RaiseNotification("frame.annotated", new JsonObject
+        {
+            ["seq"] = 8,
+            ["w"] = 1280,
+            ["h"] = 720,
+            ["jpeg"] = "not base64 !!",
+        });
+
+        Assert.Empty(camera.Submits);
+        Assert.NotNull(preview.Latest);
+        Assert.Equal(8, preview.Latest!.Seq);
+    }
+
+    [Fact]
+    public async Task Stop_CallsCameraHold()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        var camera = new FakeCameraOutput();
+        PipelineController controller = CreateController(peer, new OverlayState(), camera: camera);
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+
+        await controller.StopAsync(CancellationToken.None);
+
+        Assert.Equal(1, camera.Holds);
+    }
+
+    [Fact]
+    public async Task PipelineStateStopped_Notification_CallsCameraHold()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        var camera = new FakeCameraOutput();
+        PipelineController controller = CreateController(peer, new OverlayState(), camera: camera);
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+
+        peer.RaiseNotification("pipeline.state", new JsonObject
+        {
+            ["running"] = false,
+            ["reason"] = "sidecar-exited",
+        });
+
+        Assert.Equal(1, camera.Holds);
+    }
+
+    [Fact]
+    public async Task Stop_WithoutCamera_DoesNotThrow()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        PipelineController controller = CreateController(peer, new OverlayState());
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+
+        await controller.StopAsync(CancellationToken.None);
     }
 
     [Fact]
@@ -351,6 +457,17 @@ public class PipelineControllerTests : IDisposable
         peer.RaiseExited(0);
 
         Assert.Null(controller.ActiveSource);
+    }
+
+    /// <summary>Records what the controller pushes to the virtual-camera output. Ghi lại những gì controller đẩy ra camera ảo.</summary>
+    private sealed class FakeCameraOutput : ICameraOutput
+    {
+        public List<(long Seq, int W, int H, byte[] Jpeg)> Submits { get; } = [];
+        public int Holds { get; private set; }
+
+        public void Submit(long seq, int w, int h, byte[] jpeg) => Submits.Add((seq, w, h, jpeg));
+        public void Hold() => Holds++;
+        public void Dispose() { }
     }
 
     private sealed class FakeCorePeer : ICorePeer

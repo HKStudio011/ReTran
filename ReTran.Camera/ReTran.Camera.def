@@ -7,3 +7,4 @@ EXPORTS
     DllUnregisterServer   PRIVATE
     ReTranCamera_Register   PRIVATE
     ReTranCamera_Unregister PRIVATE
+    ReTranCamera_ConvertBgraToYuy2 PRIVATE
