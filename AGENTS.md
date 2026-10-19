@@ -23,30 +23,32 @@
 ReTran Project/
 ├── ReTran Project.slnx        # solution: ReTran.App + ReTran.Core + ReTran.OCR pyproj (no build) + ReTran.Tests
 ├── ReTran.App/                # .NET 10 MAUI Blazor Hybrid — controller surface / UI shell
-│   ├── Components/            # Razor components (pages: control /, overlay /overlay)
-│   ├── Services/              # JsInteropService, OverlayFeedServer (127.0.0.1:17863 + SSE for OBS)
-│   ├── Core/                  # CoreProcessClient, OverlayState, DemoFeed
+│   ├── Components/            # Razor components (page: control /)
+│   ├── Services/              # JsInteropService, TranslationCache, Camera/ (virtual-camera shared memory + service), OverlayWindow/
+│   ├── Core/                  # CoreProcessClient, PipelineController, PreviewState, OverlayState
 │   ├── vite-project/          # Vite + TypeScript + Tailwind v4 frontend → builds to ../wwwroot/build
-│   └── wwwroot/               # static assets + vite build output + overlay/ (static OBS page)
+│   └── wwwroot/               # static assets + vite build output
 ├── ReTran.Core/               # headless C# engine (NO UI): ReTran.Core.csproj, net10.0-windows console
-│   ├── Cli/ Config/ JsonRpc/ OcrClient/  # (flattened, no src/ split)
+│   ├── Cli/ Config/ JsonRpc/ OcrClient/ Serve/ Capture/ Ocr/  # (flattened, no src/ split)
 │   └── Program.cs
+├── ReTran.Camera/             # native DirectShow virtual-camera source filter (C++/MSVC x64, per-user HKCU registration)
 ├── ReTran.OCR/                # Python OCR sidecar project `retran-core` — uv-managed .venv (CPython 3.13)
 │   └── hook/                  # (planned) Rust cdylib for exclusive-fullscreen game capture
 ├── ReTran.Tests/              # xUnit v3 test project (core + app unit tests)
 └── Docs/                      # design notes, decisions; superpowers/specs + superpowers/plans
 ```
 
-Current state: M0 IPC backbone done (App launches Core, Core spawns sidecar, all pingable). M1 Capture done in sandbox, merged. App UI done: control page `/`, transparent `/overlay`, local overlay HTTP+SSE for OBS Browser Source (`http://127.0.0.1:17863/overlay`). Rust hook planned, not started.
+Current state: M0 IPC backbone done (App launches Core, Core spawns sidecar, all pingable). M1 Capture done in sandbox, merged. App UI done: control page `/` with a large live preview. M2–M5 done: OCR spotting + translation cache, GDI/HDR capture fallback, GPU OCR (paddle cu129), and the **virtual camera** — the App publishes the annotated frame into shared memory and the native `ReTran.Camera` DirectShow filter serves it to OBS/Zoom/Discord (keeps the last frame on Stop, shows black when the app exits). The old OBS HTTP overlay feed (`127.0.0.1:17863`) is gone. Rust hook planned, not started.
 
 ## Tech Stack & Role of Each Language
 
 | Language                          | Role                                                                                                                                                                                                                                                           | Status                                               |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| **C#** (.NET 10)            | App shell (MAUI Blazor Hybrid controller surface) + headless core process (`ReTran.Core`, net10.0-windows console): Windows capture interop, JSON-RPC peer, OCR sidecar client, translation orchestration; EF Core + SQLite persistence in the App (planned) | done (M0 backbone, M1 capture, App UI)               |
+| **C#** (.NET 10)            | App shell (MAUI Blazor Hybrid controller surface) + headless core process (`ReTran.Core`, net10.0-windows console): Windows capture interop, JSON-RPC peer, OCR sidecar client, translation orchestration, annotated-frame rendering (GDI+ JPEG) and the virtual-camera writer; EF Core + SQLite persistence in the App (planned) | done (M0 backbone, M1 capture, App UI, virtual camera) |
+| **C++** (MSVC x64)          | Native DirectShow source filter `ReTran.Camera.dll` (virtual camera): reads the App's shared-memory frame (seqlock + heartbeat), converts BGRA→YUY2 1280×720@30, registered per-user in HKCU | done (M5) |
 | **TypeScript / JavaScript** | UI logic in the WebView (overlay drawing, result display); built by Vite from`ReTran.App/vite-project`                                                                                                                                                       | scaffolded                                           |
 | **HTML / CSS**              | WebView markup and styling (Tailwind v4)                                                                                                                                                                                                                       | scaffolded                                           |
-| **Python**                  | OCR sidecar (`retran-core`): long-lived PaddleOCR process spawned by the C# core, JSON-RPC over stdio; local translation models later                                                                                                                        | scaffolded (pyproject + uv .venv)                    |
+| **Python**                  | OCR sidecar (`retran-core`): long-lived PaddleOCR process spawned by the C# core, JSON-RPC over stdio; local translation models later                                                                                                                        | working (PP-OCR mobile, paddlepaddle-gpu cu129, warmup on serve) |
 | **Rust**                    | Native hook DLL for exclusive fullscreen game capture (OBS-style D3D11 Present hook, injected into the game process)                                                                                                                                           | planned —`cargo` not installed on dev machine yet |
 
 ## Product Pipeline
@@ -54,7 +56,7 @@ Current state: M0 IPC backbone done (App launches Core, Core spawns sidecar, all
 ```
 capture (screen / window / game) → OCR text spotting (boxes + text)
   → translation → display in app UI (annotated frame + translated text)
-  → optional: export annotated frame to OBS
+  → publish the annotated frame as the "ReTran Camera" virtual camera (OBS/Zoom/Discord)
 ```
 
 ### Capture (3 modes, all required)
@@ -84,9 +86,9 @@ Initial approach: **PaddleOCR** (https://github.com/PaddlePaddle/PaddleOCR) — 
 
 Diff-based: only newly appearing text lines are sent to the translator. Results persist in SQLite (EF Core) **owned by the App** (Core performs cache lookups over IPC), keyed per content context — the game/app process name for window/hook capture, `screen:<monitor>` for full-screen capture — plus (text, src, dst). Translation must never block the capture/OCR pipeline.
 
-### OBS Export
+### Virtual Camera (OBS/Zoom/Discord)
 
-Export the overlay to OBS via a **Browser Source** pointing at the App's local overlay server (`http://127.0.0.1:17863/overlay`, HTTP+SSE, `OverlayFeedServer`). obs-websocket image-source updates are the fallback, not the primary path. Keep frame rate modest; full 60fps streaming is not a first milestone.
+Export the annotated frame through the **"ReTran Camera" virtual camera** instead of the removed HTTP overlay feed: the App renders the annotated frame in Core (JPEG, ≤1280 wide, ≤10 fps), the App decodes it and writes BGRA32 1280×720 into shared memory (`Local\ReTran.Camera.V1`, header + seqlock; heartbeat `Local\ReTran.Camera.Heartbeat` held by the writer only), and the native DirectShow source filter `ReTran.Camera.dll` (C++/MSVC, per-user HKCU registration, YUY2 1280×720@30) serves it to any capture app. Lifecycle: pipeline Stop keeps the last frame (HOLD flag); the App exiting makes the heartbeat vanish → the filter outputs black while the device stays listed. Letterbox (black bars) instead of cropping when the source is not 16:9. The in-app preview pane mirrors the same frame. Keep the frame rate modest (~10 fps); full 60 fps is not a first milestone.
 
 ## Data & Persistence
 
@@ -104,7 +106,7 @@ The app runs **while the user is gaming and streaming** — every component must
 | OCR (GPU, PP-OCR mobile default) | throttled to ~3 fps, VRAM < 1 GB, drop frames if busy                    |
 | Translation                      | diff-based (only new text), cached, fully async — never blocks pipeline |
 | UI/overlay updates               | throttled to 10–15 fps                                                  |
-| OBS export                       | ~10 fps image source updates                                             |
+| Virtual camera output            | ~10 fps frame updates (1280×720 YUY2@30 stream to OBS/Zoom/Discord)      |
 | Total extra footprint            | < 8% CPU, < 500 MB RAM while gaming + streaming                          |
 
 Every milestone must measure against this budget with a real game running and record numbers in `Docs/performance.md`. No feature ships if it breaks the budget without an approved tradeoff.

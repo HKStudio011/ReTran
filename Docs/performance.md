@@ -538,6 +538,117 @@ Scripts đo nằm trong `%TEMP%\opencode\` của session: `warmup_probe4.ps1` (s
 
 ---
 
+## M5 — Camera ảo + Preview (2026-10-19)
+
+### Bối cảnh đo
+
+| Thành phần | Giá trị | Nguồn |
+| --- | --- | --- |
+| CPU | Intel Core i5-13400F, 10 cores / 16 logical processors | `Win32_Processor` |
+| GPU | NVIDIA GeForce RTX 5060 Ti (CC 12.0, driver API 13.4 / runtime 12.9) | `Win32_VideoController` + log paddle |
+| Nguồn capture | **màn hình 0** 1920×1080 (HDR → đường GDI fallback), **game Reverse: 1999 đang render** (GPU ~8 %) | UI app + `Get-Process` + `\GPU Engine` |
+| OBS | 32.2.2, canvas 1920×1080@60, source DShow tên `'OCR'` = device **ReTran Camera** (log mở device `13:17:31`); phiên này **không** stream/record | `%APPDATA%\obs-studio\logs` |
+| Nền máy | 79–88 % CPU (Taskmgr, NVIDIA Broadcast, RustDesk, Docker, Brave, Avast…). Số CPU dưới đây là **CPU-seconds per-process** (ít nhạy contention hơn wall-clock) | `Get-Counter \Processor(_Total)` |
+| Thời lượng | 2 cửa sổ liên tiếp: 279,4 s và 129,8 s, sampler 1 Hz | CSV `%TEMP%\opencode\perf_samples*.csv` |
+
+GATE Task 4 (user, 2026-10-19): PASS cả 4 mục — OBS thấy khung thật + box + bản dịch; Stop giữ khung cuối; Start lại có khung mới; kill app → OBS đen ≤1 s, device vẫn trong danh sách, mở lại app → sống.
+
+### Số đo (app + core + OCR, pipeline chạy, camera phát 8,5 fps)
+
+| Process | CPU avg / max (%16 luồng) | CPU avg (1 core) | RAM avg / max | VRAM max |
+| --- | --- | --- | --- | --- |
+| ReTran.App | 3,05 / 5,47 | 0,49 core | 325 / 373 MB | 43 MB |
+| ReTran.Core | 11,56 / 17,09 | 1,85 core | 923 / 1803 MB | 0 |
+| OCR sidecar (cả 2 process) | 7,81 / 10,94 | 1,25 core | 1996 / 2025 MB | 362 MB |
+| OBS (preview 1080p60 + source camera) | 5,24 / 7,32 | 0,84 core | 244 MB | 1869 MB |
+| **Tổng app+core+ocr** | **22,42 / 33,50 %** | **3,59 core** | **3244 / 4116 MB** | **405 MB** |
+
+- Camera ảo (đếm từ `seq` shared memory): **8,48–8,58 fps**.
+- RAM Core **sawtooth 586 → 1803 → 586 MB** (cấp phát buffer lớn theo khung, không phải leak).
+- Sidecar là **2 process**: trampoline venv ~4 MB (`.Path` khớp filter) + interpreter thật ~2 GB (`CommandLine` khớp) — lọc process bằng `.Path` sẽ **đo thiếu** CPU sidecar (bài học đo).
+- Chưa tính vào tổng: process con **WebView2** (`msedgewebview2.exe`) của app + các process con khác.
+
+### Đối chiếu budget
+
+| Budget | Đo được | Kết luận |
+| --- | --- | --- |
+| Tổng CPU < 8 % (16 luồng) | 22,42 % avg / 33,50 % max | **FAIL (2,8×)** |
+| Tổng RAM < 500 MB | 3244 MB avg / 4116 MB max | **FAIL (6,5×)** |
+| OCR VRAM < 1 GB | 362 MB | PASS |
+| Annotator ≤ 10 ms/khung | **~63 ms CPU/khung** (0,41 core ÷ 6,52 khung/s chênh A−B); wall-clock ~117 ms/khung so với timer 100 ms | **FAIL (~6×)** |
+| IPC `frame.annotated` ≤ 1,5 MB/s | **2,58–3,05 MB/s** (306–364 KB/khung × 8,5 fps) | **FAIL (~2×)** |
+| UI/camera ~10 fps | 8,5 fps | PASS (≈) |
+| Capture < 2 % CPU | chưa tách riêng khỏi Core (Core tổng 11,6 %) | chưa kết luận |
+| Camera filter CPU trong OBS | chưa tách được (OBS tổng 0,84 core) | chưa kết luận |
+
+### A/B — chi phí nằm ở đâu (Core scripted `--serve`, cùng nguồn màn hình, không app)
+
+Cơ chế cần biết: annotate loop chạy theo `CoreConfig.CaptureFps` (**10**, đọc lúc Core khởi động); tham số `captureFps` của `core.start` **mới chỉ validate, chưa nối vào capture source** (capture luôn 10 fps — comment trong `ParseStart`). Nên đổi config chỉ đổi nhịp **annotate**.
+
+| Lượt | Cấu hình | box/khung | annotated fps | IPC MB/s | KB/khung | Core CPU avg / max (1 core) | Core RAM avg / max |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| A | annotate 10 fps, all-miss | — | 8,52 | 2,58 | 306,5 | 73,4 / 112,4 % | 452 / 774 MB |
+| B | annotate 2 fps, all-miss | — | 2,00 | 0,59 | 281,3 | 32,5 / 41,6 % | 369 / 529 MB |
+| X | annotate 10 fps, màn hình đổi liên tục (game render) | — | 8,48 | 3,05 | 363,6 | 85,1 / 104,6 % | 473 / 788 MB |
+| Y | annotate 10 fps, **all-hit** (mô phỏng cache app có sẵn) | — | 8,42 | 2,61 | 314,4 | 83,4 / 102,6 % | 379 / 498 MB |
+| Z | annotate 10 fps, màn hình giàu chữ (Notepad 260 dòng, maximize) | — | 8,48 | 2,71 | 323,7 | 81,3 / 98,9 % | 377 / 530 MB |
+| W | annotate 10 fps, **có đếm box** | **76,9** (max 84) | 8,78 | 2,93 | 337,6 | 80,8 / 102,8 % | 369 / 546 MB |
+
+- **Đường annotate ≈ 0,41 core ở 8,5 fps** (A − B = 40,9 điểm ÷ 6,52 khung/s ⇒ **~63 ms CPU/khung**) và tạo 2,58 MB/s ⇒ vượt cả budget IPC lẫn budget 10 ms/khung.
+- Suy ra phần còn lại: B = 32,5 điểm (gồm 2 khung annotate/s) ⇒ **≈ 0,2 core** cho capture loop + chu kỳ OCR + IO.
+- Lượt B giữ nguyên số `frame.translated` (170 vs 178) ⇒ A/B tách đúng đường annotate, không đụng chu kỳ OCR.
+- X (màn hình động) và Z (màn hình giàu chữ) **không** làm Core tăng vọt: 0,85 / 0,81 core — dải 0,73–0,85 core cho mọi trạng thái màn hình đã thử.
+- Y (cache all-hit) **không** làm chu kỳ OCR dày lên: `cache_requests` 0,77/s so với 1,05/s ở X ⇒ chu kỳ bị chặn bởi OCR (~1 s/chu kỳ), không bởi bước dịch.
+- W đếm được **~77 box/khung** trên màn hình thật (game + cửa sổ app/chat) — dùng để hiệu chỉnh mô hình chi phí bên dưới.
+
+### Mô hình chi phí annotate (micro-benchmark GDI+)
+
+Tái lập đúng thân `FrameAnnotator.Annotate` (downscale 1920×1080 → 1280×720, vẽ N box với 9 lượt `DrawString`/box, JPEG q70, base64) bằng PowerShell + System.Drawing, lấy ảnh chụp màn hình thật làm nguồn, 5 lần/N:
+
+| Bước | 0 box | 50 box | 150 box |
+| --- | --- | --- | --- |
+| downscale (`DrawImage`) | 9,7 | 8,5 | 8,3 ms |
+| **vẽ box + text (9 lượt/box)** | 6,8 | 22,9 | **54,8 ms** |
+| JPEG q70 encode | 7,1 | 5,6 | 4,7 ms |
+| base64 | 3,6\* | 0,3 | 0,4 ms |
+| **tổng** | **27,1** | **37,3** | **68,2 ms** |
+| JPEG KB | 47,9 | 212,3 | 387,2 KB |
+
+\* 3,6 ms là JIT lần đầu của `ToBase64String`; các lượt sau ~0,3–0,4 ms ⇒ base64 không đáng kể.
+
+- **Vẽ box/text ≈ 0,32 ms/box** (9 lượt `DrawString`/box: 8 lượt viền đen + 1 lượt chữ trắng) — ở màn hình thật (W: 77 box) chiếm ~25 ms/khung.
+- Chi phí **cố định ~44 ms/khung**: downscale (~8,5) + JPEG (~5) + copy BGRA full-res vào `Bitmap` theo từng dòng (`Marshal.Copy`, 1080 dòng) + dựng chuỗi JSON (~338 KB → ~700 KB UTF-16) + ghi pipe + GC.
+- Mô hình khớp W: 44 + 0,32×77 ≈ 69 ms/khung = đúng số suy từ đo ((80,8 − 20) ÷ 8,78).
+
+### Chênh lệch app-driven vs scripted — kết luận
+
+Core khi app chạy **1,85 core** (218 ms/khung) so với **0,73–0,85 core** (~92 ms/khung) khi scripted. Đã **loại** bằng thực nghiệm: cache hit (Y), màn hình động (X), mật độ chữ trên màn hình (Z), sidecar (process riêng, không tính vào CPU Core). Phần chênh khớp với hai yếu tố chưa tách được riêng:
+
+1. **Nhiều box hơn khi app chạy**: màn hình lúc đo chứa *chính preview của app và preview OBS* (đã vẽ bản dịch) nên OCR bắt được cả text gốc lẫn text dịch; mô hình 0,32 ms/box ⇒ ~200 box ≈ +40 ms/khung.
+2. **Contention**: cửa sổ app-driven chạy khi nền 79–88 % CPU (thêm app + WebView2 + preview OBS 60 fps), so với 59–71 % ở các lượt scripted; đường annotate là memory-bound (copy 8 MB + GDI+ + JPEG + chuỗi lớn) nên CPU-seconds tăng theo mức tranh chấp cache/memory.
+
+Cả hai đều trỏ về **cùng chỗ sửa** (giảm khối lượng vẽ mỗi khung + giảm copy/chuỗi/transport), không phải capture hay OCR.
+
+### Ghi chú / hạn chế đo
+
+1. **Thiếu VRAM cho Core/App đo bằng counter `GPU Process Memory`** — Core/App ở 0 (chỉ OBS/sidecar hiện), nên VRAM thật của app (D3D/WebView) có thể cao hơn số 43 MB.
+2. **`captureFps` chưa nối vào capture source** (xem trên) — muốn hạ nhịp capture phải sửa code; A/B chỉ tách được annotate.
+3. **Google 429** vẫn là blocker của dòng dịch (như M4): scripted all-miss liên tục fail `translate failed ... HTTP 429`.
+4. **PASS/FAIL ở đây so với budget AGENTS.md §Performance** (< 8 % CPU, < 500 MB RAM, ≤10 ms/khung, ≤1,5 MB/s). Không mục nào PASS ở CPU/RAM/annotate/IPC ⇒ **cần tradeoff được duyệt hoặc fix trước khi coi M5 "ship"** — chi tiết hướng fix ở báo cáo session.
+5. Số đo cũ (M4) **không so chéo tuyệt đối** được: M4 đo CPU `paddlepaddle` (25 s/khung, gần như không đốt Core) còn M5 đo GPU paddle (1,3 s/khung, chu kỳ dày hơn nhiều).
+6. **Nội dung màn hình không được kiểm soát giữa các lượt** (màn hình thật của user: game, cửa sổ chat, OBS preview…). Đây là lý do W đếm box để hiệu chỉnh mô hình; muốn so tuyệt đối phải cố định nội dung màn hình.
+7. **Đường gửi ảnh cho OCR dùng PNG full-res base64** (`BgraPngEncoder.ToPngBase64`, `OcrLoop.cs:206`) — encode PNG 1920×1080 tốn kém hơn JPEG nhiều lần, là ứng viên fix cho phần "capture + chu kỳ OCR ≈ 0,2 core" (chưa đo riêng trong mục này).
+
+### Lệnh reproduce (session-scoped)
+
+- `%TEMP%\opencode\perf_sample.ps1` / `perf_sample2.ps1` — sampler CPU/RAM/VRAM + fps camera từ `seq` (bản 2 lọc sidecar bằng `CommandLine` của CIM).
+- `%TEMP%\opencode\ab_annotate.ps1` — A/B annotate (`-Single -SingleLabel ... -CacheMode miss|hit`): spawn Core `--serve`, trả cache, đếm frame/byte/box (`frame.translated`), đo Core CPU/RAM.
+- `%TEMP%\opencode\screen_activity.ps1` — hash ảnh chụp màn hình 2 s/lần + GPU util của game + CPU máy (đối chứng "màn hình có đổi không").
+- `%TEMP%\opencode\annotate_bench.ps1` — micro-benchmark GDI+ tái lập `FrameAnnotator` (downscale / vẽ N box / JPEG / base64).
+- CSV thô: `%TEMP%\opencode\perf_samples.csv`, `perf_samples2.csv`, `ab_annotate_*.csv`.
+
+---
+
 ## M1 capture baseline
 
 (chưa đo — ghi tại milestone có capture loop chạy thật)

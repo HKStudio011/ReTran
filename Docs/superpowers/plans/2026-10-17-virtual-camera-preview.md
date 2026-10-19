@@ -311,12 +311,12 @@ Run: `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj"` → FAIL (chưa 
 Run: `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj"`
 Thêm 1 test optional `CameraNativeInteropTests.ConvertBgraToYuy2_WhiteIs235_BlackIs16`: `if (!File.Exists(dll)) return;` (mẫu skip của `SidecarProcessTests`) → P/Invoke export, input pixel trắng/đen → Y = 235/16.
 
-- [ ] **Step 6: Verify manual end-to-end**
+- [x] **Step 6: Verify manual end-to-end**
 
 > **Đã verify tự động (2026-10-19), phần native:** dùng writer harness (`%TEMP%\opencode\camwriter.cs`, file-based app) ghi khung đỏ BGRA + heartbeat vào đúng layout, rồi capture bằng
 > `ffmpeg -f dshow -pixel_format yuyv422 -i "video=ReTran Camera" -t 8 -vf scale=160:90 -r 5 -pix_fmt rgb24`:
 > writer còn sống → pixel giữa `(253,0,0)`; writer tắt → `(0,0,0)` sau ~0,5 s (heartbeat ≥ 500 ms); không có writer → `(0,0,0)`.
-> **Còn lại (GATE user):** mục 1–3 với pipeline thật trong app (khung capture + box + bản dịch ở OBS/Zoom/Discord) và mục 4 (kill app → OBS đen ≤1 s).
+> **GATE user (2026-10-19): PASS cả 4 mục** — (1) OBS hiện khung thật + box + bản dịch; (2) Stop giữ khung cuối; (3) Start lại có khung mới; (4) kill app → OBS đen ≤1 s, device vẫn trong danh sách, mở lại app → sống. Bằng chứng phụ: OBS log `13:17:31: video device: ReTran Camera` (OBS mở đúng filter của mình).
 
 1. Start pipeline (window) → OBS "ReTran Camera" hiện khung thật + box + bản dịch; preview trong app giống hệt OBS.
 2. Stop pipeline → cả 2 giữ khung cuối (không đen).
@@ -390,19 +390,21 @@ Note: card dùng `CameraRegistrar.DeviceName` (nguồn duy nhất) + test `Devic
 
 **Interfaces:** — (docs only)
 
-- [ ] **Step 1: Đo với game thật (window source, model đã cache)**
+- [x] **Step 1: Đo với game thật** — 2026-10-19, nguồn **màn hình 0** (deviation: plan ghi "window source"), game *Reverse: 1999* đang render, OBS preview + device *ReTran Camera* (không stream). Hai cửa sổ 279,4 s + 129,8 s, sampler 1 Hz (`perf_sample*.ps1` → `%TEMP%\opencode\perf_samples*.csv`):
+  - app 0,49 core / 325 MB; **Core 1,85 core / 923 MB** (sawtooth 586↔1803, không leak); sidecar 1,25 core / 1996 MB / **362 MB VRAM**; OBS 0,84 core; **tổng app+core+ocr = 22,42 % CPU (3,59 core) / 3244 MB**; camera **8,5 fps**.
+  - Đối chiếu budget: CPU **FAIL** (2,8×), RAM **FAIL** (6,5×), OCR VRAM **PASS**, annotate **~63 ms/khung** (FAIL 10 ms), IPC **2,58–3,05 MB/s** (FAIL 1,5), camera ~10 fps PASS.
+  - Tách chi phí bằng A/B/X/Y/Z/W + micro-benchmark GDI+: **annotate ≈ 0,41 core @8,5 fps** = ~44 ms cố định + **0,32 ms/box** (77 box trên màn hình thật); capture+OCR+IO ≈ 0,2 core; chênh app-driven (1,85 vs 0,85 core) còn lại do số box + contention.
+  - Toàn bộ số + phân tích: `Docs/performance.md` §"M5 — Camera ảo + Preview".
 
-Chạy app + pipeline ≥2 phút, game/vid đang chạy, ghi số: CPU% trung bình app + core + python (Task Manager/`typeperf`), annotator ms/khung (log tạm), IPC MB/s (log tạm byte `frame.annotated`), camera filter CPU% trong OBS, preview mượt. So budget §Global: < 8% CPU tổng, ≤10 ms/khung, ≤1.5 MB/s.
+- [x] **Step 2: Ghi `Docs/performance.md`** — mục "M5 — Camera ảo + Preview": bối cảnh, bảng số app/core/ocr/obs, bảng đối chiếu budget (PASS/FAIL), bảng A/B/X/Y/Z/W, mô hình chi phí annotate, kết luận chênh lệch, ghi chú hạn chế + lệnh reproduce. **Kết luận: 2 budget FAIL (CPU/RAM) + annotate/IPC FAIL ⇒ cần fix hoặc tradeoff được duyệt** (hướng fix đề xuất ở báo cáo).
 
-- [ ] **Step 2: Ghi `Docs/performance.md`** — bảng số đo + kết luận pass/fail (fail → ghi tradeoff cần duyệt).
+- [x] **Step 3: Cập nhật `AGENTS.md`** — mục OBS Export → **Virtual Camera** (browser source gỡ, ReTran Camera là đường ra, giữ khung cuối/đen khi app thoát, letterbox); Repository Layout thêm `ReTran.Camera/`; Tech Stack thêm hàng **C++** + cập nhật C#/Python; budget row "OBS export" → "Virtual camera output".
 
-- [ ] **Step 3: Cập nhật `AGENTS.md`** — mục OBS Export: browser source bị gỡ, camera ảo là đường ra; Repository Layout + Tech Stack.
-
-- [ ] **Step 4: Chạy acceptance checklist của spec §8** (7 mục) — tự check 1,3(với OBS),5,6; nhờ user check 1 (Zoom/Discord), 2, 4 (layout nhìn OK).
+- [ ] **Step 4: Chạy acceptance checklist của spec §8** (7 mục) — tự check: §8.1 OBS device + khung thật ✓ (GATE Task 4 + log OBS `13:17:31`); §8.3 Start/Stop/giữ khung ✓ (GATE); §8.5 port 17863 không còn listener ✓ + `Overlay.razor` đã xoá ✓ (chỉ còn file build cũ trong `bin/Release`); §8.6 code overlay local (`Services/OverlayWindow/*`) còn nguyên ✓. **Cần user xác nhận**: §8.1 Zoom/Discord có thấy device không; §8.2 đổi nguồn (window ↔ screen) camera có theo kịp không; §8.4 layout trang điều khiển (demo badge đã bỏ từ commit `cd0b7fb` ⇒ mục demo coi như n/a).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add Docs/performance.md AGENTS.md Docs/superpowers/specs/2026-10-17-virtual-camera-preview-design.md
+git add Docs/performance.md AGENTS.md Docs/superpowers/plans/2026-10-17-virtual-camera-preview.md
 git commit -m "docs: record camera/preview performance and update AGENTS"
 ```
