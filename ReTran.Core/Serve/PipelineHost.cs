@@ -443,13 +443,13 @@ public sealed class PipelineHost : IAsyncDisposable
                 if (!session.AnnotBuffer.TryTakeLatest(out Frame? frame) || frame is null) continue;
                 try
                 {
-                    byte[] jpeg = annotator.Annotate(frame, session.Snapshot.TryGet());
+                    AnnotatedFrame annotated = annotator.Annotate(frame, session.Snapshot.TryGet());
                     await _server.NotifyAsync("frame.annotated", new JsonObject
                     {
                         ["seq"] = seq,
-                        ["w"] = frame.Width,
-                        ["h"] = frame.Height,
-                        ["jpeg"] = Convert.ToBase64String(jpeg),
+                        ["w"] = annotated.Width,
+                        ["h"] = annotated.Height,
+                        ["jpeg"] = Convert.ToBase64String(annotated.Jpeg),
                     });
                     seq++;
                 }

@@ -60,9 +60,19 @@ public sealed class AnnotationSnapshot
 }
 
 /// <summary>
-/// Renders a captured frame with its text boxes and translations as JPEG bytes (single source of
-/// truth for both the local preview and the virtual camera). Vẽ khung chụp kèm box text và bản
-/// dịch thành bytes JPEG (nguồn sự thật duy nhất cho preview local và camera ảo).
+/// Annotated frame: JPEG bytes plus the output size. Khung đã ghi chú: byte JPEG kèm kích thước
+/// đầu ra.
+/// </summary>
+/// <param name="Jpeg">JPEG-encoded frame (quality 70). Khung mã hoá JPEG (quality 70).</param>
+/// <param name="Width">Output width in pixels (≤ 1280). Chiều rộng đầu ra (pixel, ≤ 1280).</param>
+/// <param name="Height">Output height in pixels. Chiều cao đầu ra (pixel).</param>
+public sealed record AnnotatedFrame(byte[] Jpeg, int Width, int Height);
+
+/// <summary>
+/// Renders a captured frame with its text boxes and translations as <see cref="AnnotatedFrame"/>
+/// (single source of truth for both the local preview and the virtual camera). Vẽ khung chụp
+/// kèm box text và bản dịch thành <see cref="AnnotatedFrame"/> (nguồn sự thật duy nhất cho
+/// preview local và camera ảo).
 /// </summary>
 public interface IFrameAnnotator
 {
@@ -71,8 +81,9 @@ public interface IFrameAnnotator
     /// snapshot is available, encode JPEG quality 70. Ghi chú một khung: thu nhỏ về tối đa 1280
     /// rộng, vẽ box/bản dịch khi có snapshot, mã hoá JPEG quality 70.
     /// </summary>
-    /// <param name="frame">Captured BGRA frame (caller keeps ownership). Khung BGRA đã chụp (người gọi giữ quyền sở hữu).</param>
+    /// <param name="frame">Captured BGRA frame (caller keeps ownership; it is not copied).
+    /// Khung BGRA đã chụp (người gọi giữ quyền sở hữu; khung không được sao chép).</param>
     /// <param name="snapshot">Text regions to draw, or <see langword="null"/> for a plain frame. Vùng text cần vẽ, hoặc <see langword="null"/> cho khung thường.</param>
-    /// <returns>JPEG bytes. Bytes JPEG.</returns>
-    byte[] Annotate(Frame frame, AnnotSnapshot? snapshot);
+    /// <returns>The annotated frame (JPEG bytes + output size). Khung đã ghi chú (bytes JPEG + kích thước đầu ra).</returns>
+    AnnotatedFrame Annotate(Frame frame, AnnotSnapshot? snapshot);
 }

@@ -49,7 +49,12 @@ public class PipelineHostTests
     {
         public byte[] Result { get; set; } = [1, 2, 3];
 
-        public byte[] Annotate(Frame frame, AnnotSnapshot? snapshot) => Result;
+        /// <summary>Output size the fake reports; defaults to TinyFrame's 2×2. Kích thước fake báo ra; mặc định 2×2 như TinyFrame.</summary>
+        public int Width { get; set; } = 2;
+        public int Height { get; set; } = 2;
+
+        public AnnotatedFrame Annotate(Frame frame, AnnotSnapshot? snapshot) =>
+            new(Result, Width, Height);
     }
 
     /// <summary>
