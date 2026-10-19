@@ -64,12 +64,23 @@ def handle_line(line: str, handlers: Dict[str, Handler]) -> Optional[str]:
 
 
 def serve(handlers: Dict[str, Handler]) -> None:
-    """Read request lines from stdin and write response lines to stdout until EOF.
+    """Read request lines from stdin and write one response line to stdout until EOF.
+
+    Both directions are forced to UTF-8 first: on Windows a redirected pipe
+    defaults to the ANSI codepage (cp1252), which would make ``print`` raise
+    UnicodeEncodeError — killing the sidecar — on any non-ASCII OCR text.
 
     Args:
         handlers: Mapping of method name to handler callable.
     """
     import sys
+
+    # reconfigure() is Python 3.7+ and absent on exotic stdout proxies.
+    # reconfigure() là Python 3.7+ và không có trên một số stdout giả lập.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stdin.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
 
     for line in sys.stdin:
         out = handle_line(line, handlers)
