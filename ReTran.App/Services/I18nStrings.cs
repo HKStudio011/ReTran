@@ -102,6 +102,9 @@ public static class I18nStrings
         ["overlay.font.medium"] = "Trung bình",
         ["overlay.font.large"] = "Lớn",
         ["overlay.note.fullscreen"] = "Game exclusive fullscreen không thể hiện overlay — chạy borderless windowed để dùng tính năng này.",
+        ["home.card.camera"] = "Camera ảo",
+        ["home.camera.note"] = "Tự chạy cùng pipeline: bấm Bắt đầu là có khung hình, chọn thiết bị này trong OBS/Zoom/Discord.",
+        ["home.camera.device"] = "Thiết bị: {0}",
     };
 
     /// <summary>English strings, keyed by dotted ids. Chuỗi tiếng Anh, khóa dạng chấm.</summary>
@@ -200,6 +203,9 @@ public static class I18nStrings
         ["overlay.font.medium"] = "Medium",
         ["overlay.font.large"] = "Large",
         ["overlay.note.fullscreen"] = "Exclusive-fullscreen games cannot show the overlay — run borderless windowed to use this feature.",
+        ["home.card.camera"] = "Virtual camera",
+        ["home.camera.note"] = "Runs with the pipeline: press Start and pick this device in OBS/Zoom/Discord.",
+        ["home.camera.device"] = "Device: {0}",
     };
 
     /// <summary>

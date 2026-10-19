@@ -44,6 +44,16 @@ public sealed class CameraRegistrar
     public static string DefaultDllPath => Path.Combine(AppContext.BaseDirectory, "ReTran.Camera.dll");
 
     /// <summary>
+    /// Friendly name the native filter registers; capture apps list it under this name.
+    /// Tên hiển thị mà filter native đăng ký; các app capture liệt kê nó dưới tên này.
+    /// </summary>
+    /// <remarks>
+    /// Must stay identical to <c>kCameraFriendlyName</c> in ReTran.Camera/src/guids.cpp.
+    /// Phải trùng với <c>kCameraFriendlyName</c> trong ReTran.Camera/src/guids.cpp.
+    /// </remarks>
+    public const string DeviceName = "ReTran Camera";
+
+    /// <summary>
     /// Ensures the virtual camera is registered using <see cref="DefaultDllPath"/>; never throws.
     /// Đảm bảo camera ảo đã đăng ký bằng <see cref="DefaultDllPath"/>; không bao giờ ném lỗi.
     /// </summary>

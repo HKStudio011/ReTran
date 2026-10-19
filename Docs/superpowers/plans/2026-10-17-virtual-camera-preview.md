@@ -353,28 +353,31 @@ git commit -m "feat(camera): shared-memory frame protocol + service + real frame
 - Consumes: Task 2/4 (preview + camera đã thay thế đầu ra OBS).
 - Produces: không — đây là tháo gỡ.
 
-- [ ] **Step 1: Xóa + sửa, giữ các tham chiếu còn lại**
+- [x] **Step 1: Xóa + sửa, giữ các tham chiếu còn lại** (feed đã xoá ở `cd0b7fb`; còn sót `Components/Pages/Overlay.razor` với `@page "/overlay"` — dead code từ path OBS cũ, overlay trong app render bằng `Win32OverlayHost`, đã xoá nốt ở commit này → gate 0 kết quả)
 
 Grep gate: `grep -r "OverlayFeedServer\|IOverlayFeedServer\|17863\|/overlay" ReTran.App ReTran.Tests` → **0 kết quả** (trừ commit history). Lưu ý: chuỗi `"/overlay"` trong route Razor trang overlay cũng nằm trong `wwwroot/overlay` + routing — xóa luôn.
 
-- [ ] **Step 2: Sửa UpdateStopper + test**
+- [x] **Step 2: Sửa UpdateStopper + test** (`cd0b7fb`)
 
 - `UpdateStopper`: bỏ param `IOverlayFeedServer feed`, bỏ bước (3); update XML doc (song ngữ, nêu feed đã bị lược bỏ theo spec camera).
 - `UpdateStopperTests`: bỏ `AssertFeedDisposed`, ctor 3→2 deps.
 
-- [ ] **Step 3: Chạy verify**
+- [x] **Step 3: Chạy verify** (`cd0b7fb`; chạy lại sau khi xoá trang thừa: build 0 error, 274/274 test, gate 0 kết quả)
 
 Run: `dotnet build "ReTran Project.slnx"` && `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj"` && grep gate ở Step 1.
 Expected: xanh, 0 tham chiếu.
 
-- [ ] **Step 4: Chạy tay** — app mở → không còn lắng nghe 17863 (`netstat -ano | findstr 17863` rỗng), card Camera ảo hiển thị.
+- [x] **Step 4: Chạy tay** — app mở → không còn lắng nghe 17863 (`netstat -ano | findstr 17863` rỗng), card Camera ảo hiển thị.
+  Verify (tự động): mở `ReTran.App.exe` → `netstat` **không có** dòng nào chứa 17863; chụp cửa sổ app (PrintWindow) thấy card **"Camera ảo"** với `Thiết bị: ReTran Camera` + ghi chú "Tự chạy cùng pipeline…"; tắt app → không còn tiến trình Core/sidecar mồ côi.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
-git add -A ReTran.App ReTran.Tests
-git commit -m "feat(app)!: remove HTTP overlay feed, camera card replaces OBS card"
+git rm -f ReTran.App/Components/Pages/Overlay.razor
+git add ReTran.App/Components/Pages/Home.razor ReTran.App/Services/I18nStrings.cs ReTran.App/Services/Camera/CameraRegistrar.cs ReTran.Tests/CameraRegistrarTests.cs
+git commit -m "feat(app)!: delete leftover /overlay page; add virtual-camera card"
 ```
+Note: card dùng `CameraRegistrar.DeviceName` (nguồn duy nhất) + test `DeviceName_MatchesTheNameRegisteredByTheNativeFilter` đọc `ReTran.Camera/src/guids.cpp` để chốt không lệch tên với `kCameraFriendlyName`.
 
 ---
 

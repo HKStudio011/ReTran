@@ -1,6 +1,7 @@
 ﻿@page "/"
 @using ReTran_App.Core
 @using ReTran_App.Services
+@using ReTran_App.Services.Camera
 @inject ReTran_App.Core.PreviewState Preview
 @inject ReTran_App.Services.JsInteropService Js
 @inject ReTran_App.Services.I18nService L
@@ -111,6 +112,11 @@
         </div>
 
         <p class="text-sm text-secondary">@(L["overlay.note.fullscreen"])</p>
+    </Card>
+
+    <Card Title="@(L["home.card.camera"])">
+        <p class="text-sm text-surface m-0">@(L.Fmt("home.camera.device", CameraRegistrar.DeviceName))</p>
+        <p class="text-sm text-secondary m-0">@(L["home.camera.note"])</p>
     </Card>
 
     <Card Title="@(L["home.card.translation"])">
