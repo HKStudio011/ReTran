@@ -143,23 +143,32 @@ public sealed class PipelineHost : IAsyncDisposable
             _session = session;
 
             // Subscribe the annotation handler BEFORE the OcrLoop starts (Task.Run below) so it
-            // always runs first on FrameArrived and clones the frame before OcrLoop can dispose it.
+            // always runs first on FrameArrived and copies the frame into a pooled buffer before
+            // OcrLoop can dispose the source frame. LatestFrameBuffer.Push (drop old) and
+            // AnnotateLoopAsync (finally) both dispose the pooled frame, so buffers return to the
+            // session pool exactly once.
             // Đăng handler ghi chú TRƯỚC khi OcrLoop chạy (Task.Run bên dưới) để nó luôn chạy đầu
-            // trên FrameArrived và clone khung trước khi OcrLoop có thể dispose nó.
+            // trên FrameArrived và sao chép khung vào buffer từ pool trước khi OcrLoop có thể
+            // dispose khung nguồn. LatestFrameBuffer.Push (drop cũ) và AnnotateLoopAsync (finally)
+            // đều dispose frame từ pool nên buffer được trả về pool phiên đúng một lần.
             if (_annotator is not null)
             {
                 IFrameAnnotator annotator = _annotator;
+                IPixelPool pixelPool = session.PixelPool!;
                 EventHandler<FrameArrivedEventArgs> onAnnotFrame = (_, e) =>
                 {
                     try
                     {
+                        byte[] source = e.Frame.Pixels;
+                        byte[] buffer = pixelPool.Rent(source.Length);
+                        Array.Copy(source, buffer, source.Length);
                         session.AnnotBuffer!.Push(Frame.FromBgra(
-                            e.Frame.Width, e.Frame.Height, (byte[])e.Frame.Pixels.Clone()));
+                            e.Frame.Width, e.Frame.Height, buffer, pixelPool));
                     }
                     catch (Exception ex)
                     {
                         // Annotation is best-effort and must never break capture. Ghi chú là best-effort, không bao giờ được làm hỏng capture.
-                        _stderr.WriteLine($"warn: annotation frame clone failed: {ex.Message}");
+                        _stderr.WriteLine($"warn: annotation frame copy failed: {ex.Message}");
                     }
                 };
                 session.AnnotHandler = onAnnotFrame;
@@ -576,6 +585,7 @@ public sealed class PipelineHost : IAsyncDisposable
             Cts = new CancellationTokenSource();
             Snapshot = snapshot;
             AnnotBuffer = trackAnnotatedFrames ? new LatestFrameBuffer() : null;
+            PixelPool = trackAnnotatedFrames ? new BgraPool() : null;
         }
 
         public ICaptureSource Source { get; }
@@ -586,6 +596,9 @@ public sealed class PipelineHost : IAsyncDisposable
 
         /// <summary>Cloned-frame buffer feeding the annotation loop; <see langword="null"/> when annotation is off. Buffer khung clone nuôi vòng ghi chú; <see langword="null"/> khi tắt ghi chú.</summary>
         public LatestFrameBuffer? AnnotBuffer { get; }
+
+        /// <summary>Pool reusing the BGRA annotate buffers; <see langword="null"/> when annotation is off. Pool tái sử dụng buffer BGRA cho ghi chú; <see langword="null"/> khi tắt ghi chú.</summary>
+        public IPixelPool? PixelPool { get; }
 
         /// <summary>Annotation loop task (null when annotation is off). Task vòng ghi chú (null khi tắt ghi chú).</summary>
         public Task? AnnotLoop { get; set; }
