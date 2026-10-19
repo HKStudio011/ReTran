@@ -1,25 +1,13 @@
 ﻿<?xml version="1.0" encoding="utf-8" ?>
 <ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
              xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
-             xmlns:local="clr-namespace:ReTran_App"
              xmlns:components="clr-namespace:ReTran_App.Components"
              x:Class="ReTran_App.MainPage">
 
-    <Grid RowDefinitions="Auto,*">
-        <VerticalStackLayout Grid.Row="0" Spacing="6" Padding="12">
-            <HorizontalStackLayout Spacing="8">
-                <Button x:Name="StartCoreButton" AutomationId="startCoreButton" Text="Start Core" Clicked="OnStartCoreClicked" />
-                <Button x:Name="PingButton" AutomationId="pingButton" Text="Ping" Clicked="OnPingClicked" IsEnabled="False" />
-                <Button x:Name="StopButton" AutomationId="stopButton" Text="Stop" Clicked="OnStopClicked" IsEnabled="False" />
-            </HorizontalStackLayout>
-            <Label x:Name="StatusLabel" AutomationId="coreStatusLabel" Text="Core: stopped" FontSize="12" />
-        </VerticalStackLayout>
-
-        <BlazorWebView Grid.Row="1" x:Name="blazorWebView" HostPage="wwwroot/index.html">
-            <BlazorWebView.RootComponents>
-                <RootComponent Selector="#app" ComponentType="{x:Type components:Routes}" />
-            </BlazorWebView.RootComponents>
-        </BlazorWebView>
-    </Grid>
+    <BlazorWebView x:Name="blazorWebView" HostPage="wwwroot/index.html">
+        <BlazorWebView.RootComponents>
+            <RootComponent Selector="#app" ComponentType="{x:Type components:Routes}" />
+        </BlazorWebView.RootComponents>
+    </BlazorWebView>
 
 </ContentPage>

@@ -27,8 +27,6 @@ namespace ReTran_App
             builder.Services.AddSingleton<ToastService>();
             builder.Services.AddSingleton<OverlayState>();
             builder.Services.AddSingleton<PreviewState>();
-            builder.Services.AddSingleton<OverlayFeedServer>();
-            builder.Services.AddSingleton<IOverlayFeedServer>(sp => sp.GetRequiredService<OverlayFeedServer>());
 
             // Local game overlay: layered Win32 window + window/monitor anchor tracker.
             // Overlay game local: cửa sổ layered Win32 + tracker neo theo cửa sổ/monitor.

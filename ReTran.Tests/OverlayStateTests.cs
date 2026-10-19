@@ -16,16 +16,4 @@ public class OverlayStateTests
         Assert.Equal("b", state.Latest!.Boxes[0].Text);
         Assert.Equal(2, events);
     }
-
-    [Fact]
-    public void DemoFeed_Publishes_Within2Seconds()
-    {
-        var state = new OverlayState();
-        using var feed = new DemoFeed(state, intervalMs: 200);
-        feed.Start();
-        SpinWait.SpinUntil(() => state.Latest is not null, 2000);
-        feed.Stop();
-        Assert.NotNull(state.Latest);
-        Assert.NotEmpty(state.Latest!.Boxes);
-    }
 }

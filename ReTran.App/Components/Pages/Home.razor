@@ -1,9 +1,7 @@
 ﻿@page "/"
 @using ReTran_App.Core
 @using ReTran_App.Services
-@inject ReTran_App.Core.OverlayState State
 @inject ReTran_App.Core.PreviewState Preview
-@inject ReTran_App.Services.OverlayFeedServer FeedServer
 @inject ReTran_App.Services.JsInteropService Js
 @inject ReTran_App.Services.I18nService L
 @inject ReTran_App.Services.AppSettingsService Settings
@@ -29,10 +27,6 @@
             <span class="absolute inset-0 flex items-center justify-center text-sm text-secondary opacity-60">@(L["home.preview.idle"])</span>
         }
         <span class="absolute top-2 left-2 px-2 py-0.5 rounded text-xs font-semibold text-black @PreviewBadgeClass">@PreviewBadgeText</span>
-        @if (_feed is not null)
-        {
-            <span class="absolute top-9 left-2 px-2 py-0.5 rounded text-xs font-semibold text-black bg-[#f97316]">@(L["home.preview.demo"])</span>
-        }
     </div>
 
     <Card Title="@(L["home.card.pipeline"])">
@@ -132,31 +126,6 @@
         <p class="text-sm text-secondary">@(L["settings.note.srcNextStart"])</p>
     </Card>
 
-    <Card Title="Demo pipeline">
-        <div class="flex gap-2 flex-wrap">
-            <button class="btn btn-primary" @onclick="StartDemo" disabled="@_running">@(L["home.btn.startDemo"])</button>
-            <button class="btn btn-outline-secondary" @onclick="StopDemo" disabled="@(!_running)">@(L["home.btn.stopDemo"])</button>
-        </div>
-        <p class="text-sm text-secondary">@StatusText</p>
-    </Card>
-
-    <Card Title="OBS">
-        <div class="flex items-center gap-2 flex-wrap">
-            <span class="text-sm text-surface">@(L["home.label.obsUrl"])</span>
-            <code class="px-2 py-1 rounded bg-background border text-sm text-surface break-all">@ObsUrl</code>
-            <button class="btn btn-outline-primary" @onclick="CopyUrlAsync">@(L["home.btn.copy"])</button>
-            @if (CopyStatusText.Length > 0)
-            {
-                <span class="text-sm text-secondary">@CopyStatusText</span>
-            }
-        </div>
-        @if (FeedServer.Port == 0)
-        {
-            <p class="text-sm text-danger">@(L["home.status.feedNotRunning"])</p>
-        }
-        <iframe src="@ObsUrl" title="@(L["home.iframe.title"])" class="w-full max-w-[480px] h-[270px] rounded border"></iframe>
-    </Card>
-
     <Card Title="@(L["home.card.theme"])">
         <div class="flex gap-2 flex-wrap">
             <button class="btn btn-outline-secondary" @onclick='() => SetThemeAsync("light")'>@(L["home.btn.theme.light"])</button>
@@ -193,9 +162,6 @@
     private string _pipelineState = "stopped"; // "stopped" | "running" | "coreError"
     private string? _coreReason;
     private string? _pipelineError;
-    private ReTran_App.Core.DemoFeed? _feed;
-    private bool _running;
-    private string? _copyState;      // "copied" | "failed" | null
     private string? _themeStateKind; // "theme" | "themeFail" | "color" | "colorFail"
     private string? _themeStateValue;
     private bool _overlayOn;
@@ -208,9 +174,7 @@
     /// Preview refresh cap: ≥100 ms/lần (~10 fps) — data-URL nặng trong WebView không được rẽ nhánh mỗi frame.
     private const long PreviewMinIntervalMs = 100;
 
-    private string ObsUrl => $"http://127.0.0.1:{FeedServer.Port}/overlay";
-
-    // Badge preview: pipeline running -> xanh, còn lại -> vàng (demo có badge riêng đè bên dưới).
+    // Badge preview: pipeline running -> xanh, còn lại -> vàng.
     private string PreviewBadgeText => _pipelineState == "running"
         ? L["home.preview.running"]
         : L["home.preview.stopped"];
@@ -237,17 +201,6 @@
     };
 
     // Trạng thái tính từ state + L → tự đổi ngôn ngữ khi L.Changed.
-    private string StatusText => _running
-        ? L.Fmt("home.status.demoRunning", SourceLabel())
-        : L["home.status.demoStopped"];
-
-    private string CopyStatusText => _copyState switch
-    {
-        "copied" => L["home.status.copied"],
-        "failed" => L["home.status.copyFailed"],
-        _ => string.Empty,
-    };
-
     private string ThemeStatusText => _themeStateKind switch
     {
         "theme" => L.Fmt("home.status.theme", _themeStateValue ?? string.Empty),
@@ -339,7 +292,6 @@
 
     private async Task StartPipelineAsync()
     {
-        if (_running) StopDemo(); // tránh 2 nguồn publish cùng OverlayState (plan M4)
         _pipelineError = null;
         try
         {
@@ -446,51 +398,11 @@
         }
     }
 
-    private void StartDemo()
-    {
-        if (_feed is not null) return;
-        _feed = new ReTran_App.Core.DemoFeed(State);
-        _feed.Start();
-        _running = true;
-    }
-
-    private void StopDemo()
-    {
-        if (_feed is null) return;
-        _feed.Stop();
-        _feed.Dispose();
-        _feed = null;
-        _running = false;
-    }
-
-    private string SourceLabel() => !string.IsNullOrEmpty(_windowHwnd)
-        ? $"Window ({_windowHwnd})"
-        : $"screen:{(int.TryParse(_monitorId, out int monitor) ? monitor : 0)}";
-
-    private async Task CopyUrlAsync()
-    {
-        try
-        {
-            await Js.InvokeVoidAsync("copyText", ObsUrl);
-            _copyState = "copied";
-        }
-        catch (Exception)
-        {
-            _copyState = "failed";
-        }
-    }
-
     public void Dispose()
     {
         L.Changed -= OnLangChanged;
         Pipeline.PipelineStateChanged -= OnPipelineStateChanged;
         Preview.Changed -= OnPreviewChanged;
-        if (_feed is not null)
-        {
-            _feed.Stop();
-            _feed.Dispose();
-            _feed = null;
-        }
     }
 
     private async Task SetThemeAsync(string theme)

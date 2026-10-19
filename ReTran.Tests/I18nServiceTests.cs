@@ -33,9 +33,9 @@ public class I18nServiceTests
     {
         var svc = Create();
         svc.Set("vi");
-        var s = svc.Fmt("home.status.demoRunning", "screen:0");
-        Assert.Contains("screen:0", s);
-        Assert.Contains("Demo:", s);
+        var s = svc.Fmt("home.status.coreError", "boom");
+        Assert.Contains("boom", s);
+        Assert.Contains("Lỗi core", s);
     }
 
     [Fact]
