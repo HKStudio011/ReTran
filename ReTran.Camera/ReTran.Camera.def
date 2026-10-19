@@ -1,0 +1,9 @@
+LIBRARY ReTran.Camera
+
+EXPORTS
+    DllGetClassObject     PRIVATE
+    DllCanUnloadNow       PRIVATE
+    DllRegisterServer     PRIVATE
+    DllUnregisterServer   PRIVATE
+    ReTranCamera_Register   PRIVATE
+    ReTranCamera_Unregister PRIVATE
