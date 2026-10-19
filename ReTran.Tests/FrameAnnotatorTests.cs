@@ -153,8 +153,18 @@ public class FrameAnnotatorTests
         Assert.Equal(640, decoded.Width);
     }
 
+    /// <summary>
+    /// Guards managed-allocation churn per annotate pass only. The removed `CopyPixels` cost
+    /// lived in native GDI+ memory plus CPU time and is not observable through
+    /// <c>GC.GetAllocatedBytesForCurrentThread</c>; the copy-elimination property is instead
+    /// evidenced by the core CPU probe recorded in Docs/performance.md §M5-fix.
+    /// Chỉ chặn churn cấp phát managed mỗi lượt ghi chú. Chi phí của `CopyPixels` cũ nằm ở bộ
+    /// nhớ native GDI+ kèm thời gian CPU, không đo được qua
+    /// <c>GC.GetAllocatedBytesForCurrentThread</c>; thuộc tính "không còn copy" được chứng minh
+    /// bằng probe CPU core ghi trong Docs/performance.md §M5-fix.
+    /// </summary>
     [Fact]
-    public void Annotate_LargeFrame_DoesNotCopyFullPixels()
+    public void Annotate_LargeFrame_ManagedAllocationStaysBounded()
     {
         using Frame frame = SolidFrame(1920, 1080, 10, 20, 30);
         var annotator = new FrameAnnotator();
@@ -164,12 +174,10 @@ public class FrameAnnotatorTests
         AnnotatedFrame annotated = annotator.Annotate(frame, null);
         long delta = GC.GetAllocatedBytesForCurrentThread() - before;
 
-        // The frame is 1920×1080×4 ≈ 8.3 MB. Measured: pre-fix CopyPixels kept ~33 KB managed
-        // per pass (its cost is native GDI+ memory + time churn), so keep per-pass managed
-        // allocation bounded well below the frame size.
-        // Khung là 1920×1080×4 ≈ 8,3 MB. Số đo: CopyPixels cũ giữ ~33 KB managed mỗi lượt
-        // (chi phí của nó nằm ở bộ nhớ native GDI+ và thời gian), nên giữ phần cấp phát
-        // managed mỗi lượt bị chặn dưới kích thước khung.
+        // The frame is 1920×1080×4 ≈ 8.3 MB; measured ~33 KB managed per pass pre-fix, so a
+        // 4 MB ceiling catches any future full-frame managed copy without naming the pin.
+        // Khung là 1920×1080×4 ≈ 8,3 MB; đo được ~33 KB managed mỗi lượt trước fix, nên trần
+        // 4 MB bắt được mọi copy managed toàn khung về sau mà không phụ thuộc cài đặt pin.
         Assert.True(delta < 4_000_000,
             $"allocated {delta} bytes per annotate pass of 1920×1080 (limit 4 MB)");
         Assert.Equal(1280, annotated.Width);
