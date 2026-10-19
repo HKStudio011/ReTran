@@ -84,7 +84,9 @@
 
 - [ ] **Step 1: Viết test RED** trong `FrameAnnotatorTests.cs`:
   - `Annotate_ReturnsAnnotatedSize_NotSourceSize`: `SolidFrame(2560,1440,…)` → `AnnotatedFrame` có `Width == 1280`, `Height == 720` (JPEG decode ra đúng cỡ này).
-  - `Annotate_DrawsPillBehindText`: frame **trắng** 640×360 + box `(0.1,0.1,0.3,0.1,"Hello","Xin chào")` → decode JPEG → đếm pixel tối (`R,G,B < 60`) trong dải dưới box (`y ≈ 36+2..36+2+fontHeight`, `x` quanh 58..200) `> 200`; và đếm pixel **trắng** (`> 230` cả 3 kênh) **bên trong** vùng pill đó `> 50` (chữ trắng vẽ trên nền tối).
+  - `Annotate_DrawsPillBehindText`: frame **trắng** 640×360 + box `(0.1,0.1,0.3,0.1,"Hello","Xin chào")` → decode JPEG → box ở `x=64, y=36, w=192, h=36`, text ở `ly = 36+36+2 = 74`, font 12,8 px ⇒ pill ≈ `x 62..124, y 73..90`.
+    - **Pill tồn tại**: đếm pixel tối (`R,G,B < 60`) trong vùng `x 60..135, y 73..92` → `> 200`.
+    - **Chữ trắng trên pill**: đếm pixel trắng (`> 230` cả 3 kênh) trong vùng `x 64..120, y 76..88` → `> 20` (vùng này nằm trong pill nên pixel trắng chỉ có thể là chữ).
   - `Annotate_LargeFrame_DoesNotCopyFullPixels`: frame 1920×1080, warm-up 1 lần, đo `GC.GetAllocatedBytesForCurrentThread()` trước/sau lần 2 → delta **< 4 MB** (trước fix ~8,5 MB do `CopyPixels`).
   - Cập nhật 4 call site cũ sang `AnnotatedFrame` (`.Jpeg`), giữ nguyên assert hiện có.
 - [ ] **Step 2: Chạy RED**: `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj" -- --filter-class "FrameAnnotatorTests"` → 3 test mới fail (record chưa có / pill chưa có / allocation > 4 MB).
