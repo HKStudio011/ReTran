@@ -36,6 +36,8 @@ public sealed class SidecarProcess : IAsyncDisposable, ISidecarRpc
             WorkingDirectory = Path.Combine(workingDir, "ReTran.OCR"),
             CreateNoWindow = true,
         };
+        // Skip PaddleX's model-host connectivity check (adds ~4s to first model load offline).
+        psi.EnvironmentVariables["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True";
         psi.ArgumentList.Add("-m");
         psi.ArgumentList.Add("retran_core");
         psi.ArgumentList.Add("serve");

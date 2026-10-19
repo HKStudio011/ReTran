@@ -506,6 +506,38 @@ Get-CimInstance Win32_Processor; Get-CimInstance Win32_ComputerSystem; Get-CimIn
 
 ---
 
+## OCR GPU + HDR capture (2026-10-19)
+
+### Bối cảnh đo
+
+- User báo "dịch và OCR không hoạt động" trên máy dev (RTX 5060 Ti, 2 monitor **HDR**, session remote).
+- Hai nguyên nhân gốc đo được:
+  1. `ScreenCaptureSource` bỏ qua desktop HDR — DXGI duplication trả `R16G16B16A16_Float`, không có frame BGRA → source chết sau 5 s chờ frame đầu (`capture screen` CLI timeout).
+  2. `paddlepaddle` trên Windows là bản **CPU-only** (`is_compiled_with_cuda() == False`) → inference ~25 s/khung, vượt `OcrPipeline.Timeout` 30 s khi máy có tải → mọi chu kỳ bị "cycle skipped".
+- Fix: GDI BitBlt fallback (`ScreenCaptureSource`) + `paddlepaddle-gpu==3.3.1` từ index chính thức `paddlepaddle.org.cn/packages/stable/cu129` (Blackwell sm_120 cần CUDA ≥ 12.8; PyPI chỉ có `paddlepaddle-gpu` 2.6.2) + `nvidia-cudnn-cu12==9.9.0.52` (wheel Windows của paddle **không** bundle cuDNN) + đăng ký `site-packages/nvidia/*/bin` vào DLL search path trong `paddle_engine._create` + sidecar warmup fire-and-forget khi core `--serve` khởi động.
+
+### Số liệu — OCR một ảnh fixture (cửa sổ thật 1424×745, 124 text box)
+
+| Đường chạy | Thời gian |
+| --- | --- |
+| CPU `paddlepaddle 3.3.1` (trước) | 25 060 ms |
+| GPU `paddlepaddle-gpu 3.3.1` cu129 (sau) | **1 304 ms** (19×) |
+| Lần gọi đầu tiên incl. CUDA context init | ~30,5 s (warmup che trước khi pipeline chạy) |
+| `capture screen` GDI 1920×1080 (PNG encode inline) | ~1 s/frame; 638 frame trong loop 122 s |
+
+Máy: RTX 5060 Ti, CC 12.0, driver API 13.4 / runtime 12.9.
+
+### Pipeline serve end-to-end (scripted stdio, notepad fixture, google auto→vi)
+
+- `core.start` → `frame.annotated` đầu **+0,9 s**; `frame.translated` đầu **+6,6 s** (boxes = 84); chu kỳ OCR ~1 s; `translate.request_cache` round-trip OK.
+- **Chưa đo với game thật** (chỉ desktop + notepad) và **chưa đo VRAM** sidecar — hai số này còn thiếu so với budget AGENTS.md.
+
+### Lệnh reproduce (session-scoped)
+
+Scripts đo nằm trong `%TEMP%\opencode\` của session: `warmup_probe4.ps1` (sidecar trực tiếp: ping → dummy → ảnh thật, in `elapsed_ms`) và `pipeline_test6/7.ps1` (core `--serve`, trả `translate.request_cache`, đếm `frame.annotated`/`frame.translated`). Derive lại theo mô tả nếu không còn file.
+
+---
+
 ## M1 capture baseline
 
 (chưa đo — ghi tại milestone có capture loop chạy thật)
