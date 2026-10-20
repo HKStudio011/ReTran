@@ -13,12 +13,15 @@ using ReTran.Core.Translate;
 /// Serve-mode orchestrator: implements the <c>core.start</c> / <c>core.stop</c> /
 /// <c>core.list_sources</c> contract (spec §3.1), runs one <see cref="OcrLoop"/> session at a
 /// time in the background, pushes <c>pipeline.state {running, reason}</c> notifications when the
-/// loop dies on its own (spec §3.3), and — when a frame annotator is configured — emits
-/// <c>frame.annotated {seq,w,h,jpeg}</c> for the preview/virtual camera.
+/// loop dies on its own (spec §3.3), and — when a frame annotator is configured — publishes each
+/// annotated JPEG into the preview shared memory (<see cref="PreviewProtocol.MapName"/>) and emits
+/// the slim <c>frame.annotated {seq,w,h}</c> notification that tells the App to read it.
 /// Điều phối viên serve mode: cung cấp hợp đồng <c>core.start</c> / <c>core.stop</c> /
 /// <c>core.list_sources</c> (spec §3.1), chạy nền mỗi phiên <see cref="OcrLoop"/> một lần tại một
 /// thời điểm, đẩy thông báo <c>pipeline.state {running, reason}</c> khi loop tự chết (spec §3.3),
-/// và — khi có bộ ghi chú khung — emit <c>frame.annotated {seq,w,h,jpeg}</c> cho preview/camera ảo.
+/// và — khi có bộ ghi chú khung — xuất bản từng JPEG đã ghi chú vào shared memory preview
+/// (<see cref="PreviewProtocol.MapName"/>) rồi emit thông báo gọn <c>frame.annotated {seq,w,h}</c>
+/// báo cho App đọc nó.
 /// </summary>
 /// <remarks>
 /// Normal start/stop answer within their own request — no <c>pipeline.state</c> is sent for them.
@@ -41,6 +44,13 @@ public sealed class PipelineHost : IAsyncDisposable
     /// <summary>Annotation loop rate in fps (≤ capture fps). Tốc độ vòng ghi chú theo fps (≤ capture fps).</summary>
     private readonly int _annotatorFps;
 
+    /// <summary>
+    /// Shared-memory name of the preview channel; <see langword="null"/> means
+    /// <see cref="PreviewProtocol.MapName"/>. Tên shared memory của channel preview;
+    /// <see langword="null"/> nghĩa là <see cref="PreviewProtocol.MapName"/>.
+    /// </summary>
+    private readonly string? _previewMapName;
+
     private Session? _session;
 
     /// <summary>
@@ -62,6 +72,12 @@ public sealed class PipelineHost : IAsyncDisposable
     /// <c>frame.annotated</c>; <see langword="null"/> tắt vòng ghi chú (test cũ không vỡ).
     /// </param>
     /// <param name="annotatorFps">Annotation rate in fps (1..60). Tốc độ ghi chú theo fps (1..60).</param>
+    /// <param name="previewMapName">
+    /// Shared-memory name of the preview channel; <see langword="null"/> uses
+    /// <see cref="PreviewProtocol.MapName"/> (tests pass a unique name to stay isolated).
+    /// Tên shared memory của channel preview; <see langword="null"/> dùng
+    /// <see cref="PreviewProtocol.MapName"/> (test truyền tên riêng để không đụng nhau).
+    /// </param>
     /// <exception cref="ArgumentNullException">Thrown when a non-nullable reference parameter is null. Ném khi tham số tham chiếu bắt buộc nào đó là null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">Thrown when <paramref name="annotatorFps"/> is outside 1..60. Khi <paramref name="annotatorFps"/> ngoài khoảng 1..60.</exception>
     public PipelineHost(
@@ -71,7 +87,8 @@ public sealed class PipelineHost : IAsyncDisposable
         TextWriter stderr,
         Func<OcrLoopOptions, ICaptureSource>? sourceFactory = null,
         IFrameAnnotator? annotator = null,
-        int annotatorFps = 10)
+        int annotatorFps = 10,
+        string? previewMapName = null)
     {
         ArgumentNullException.ThrowIfNull(registry);
         ArgumentNullException.ThrowIfNull(server);
@@ -85,6 +102,7 @@ public sealed class PipelineHost : IAsyncDisposable
         _sourceFactory = sourceFactory;
         _annotator = annotator;
         _annotatorFps = annotatorFps;
+        _previewMapName = previewMapName;
     }
 
     /// <summary>
@@ -154,6 +172,11 @@ public sealed class PipelineHost : IAsyncDisposable
             if (_annotator is not null)
             {
                 IFrameAnnotator annotator = _annotator;
+                // Created before the annotation loop starts; a creation failure only turns the
+                // preview channel off (the loop then emits nothing), never the rest of the pipeline.
+                // Tạo trước khi vòng ghi chú chạy; tạo lỗi chỉ tắt channel preview (loop không emit
+                // gì), không ảnh hưởng phần còn lại của pipeline.
+                session.PreviewWriter = TryCreatePreviewWriter();
                 IPixelPool pixelPool = session.PixelPool!;
                 EventHandler<FrameArrivedEventArgs> onAnnotFrame = (_, e) =>
                 {
@@ -434,11 +457,14 @@ public sealed class PipelineHost : IAsyncDisposable
 
     /// <summary>
     /// Annotation loop: at <see cref="_annotatorFps"/>, takes the latest cloned frame, renders it
-    /// through <paramref name="annotator"/> and pushes <c>frame.annotated {seq,w,h,jpeg}</c>
-    /// (seq restarts at 1 each session). Ends with the session token; never throws.
+    /// through <paramref name="annotator"/>, writes the JPEG into the preview shared memory and then
+    /// pushes the slim <c>frame.annotated {seq,w,h}</c> (seq restarts at 1 each session). A frame
+    /// whose shared-memory write failed is dropped — without it the App would read a stale frame.
+    /// Ends with the session token; never throws.
     /// Vòng ghi chú: theo <see cref="_annotatorFps"/>, lấy khung clone mới nhất, vẽ qua
-    /// <paramref name="annotator"/> rồi đẩy <c>frame.annotated {seq,w,h,jpeg}</c> (seq bắt đầu
-    /// lại từ 1 mỗi phiên). Kết thúc theo token phiên; không bao giờ ném.
+    /// <paramref name="annotator"/>, ghi JPEG vào shared memory preview rồi đẩy thông báo gọn
+    /// <c>frame.annotated {seq,w,h}</c> (seq bắt đầu lại từ 1 mỗi phiên). Khung ghi shared memory
+    /// lỗi sẽ bị bỏ — nếu không App sẽ đọc phải khung cũ. Kết thúc theo token phiên; không bao giờ ném.
     /// </summary>
     private async Task AnnotateLoopAsync(Session session, IFrameAnnotator annotator, CancellationToken token)
     {
@@ -453,12 +479,12 @@ public sealed class PipelineHost : IAsyncDisposable
                 try
                 {
                     AnnotatedFrame annotated = annotator.Annotate(frame, session.Snapshot.TryGet());
+                    if (!TryPublishPreview(session, annotated)) continue;
                     await _server.NotifyAsync("frame.annotated", new JsonObject
                     {
                         ["seq"] = seq,
                         ["w"] = annotated.Width,
                         ["h"] = annotated.Height,
-                        ["jpeg"] = Convert.ToBase64String(annotated.Jpeg),
                     });
                     seq++;
                 }
@@ -481,6 +507,70 @@ public sealed class PipelineHost : IAsyncDisposable
         finally
         {
             if (session.AnnotHandler is { } handler) session.Source.FrameArrived -= handler;
+        }
+    }
+
+    /// <summary>
+    /// Creates the session's preview writer, or returns <see langword="null"/> (with a warning) when
+    /// the shared memory cannot be created. Preview is best-effort: the capture/OCR loop keeps
+    /// running either way. Tạo writer preview của phiên, hoặc trả <see langword="null"/> (kèm cảnh
+    /// báo) khi không tạo được shared memory. Preview là best-effort: loop capture/OCR vẫn chạy.
+    /// </summary>
+    private PreviewChannelWriter? TryCreatePreviewWriter()
+    {
+        try
+        {
+            return new PreviewChannelWriter(_previewMapName);
+        }
+        catch (Exception ex)
+        {
+            _stderr.WriteLine($"warn: preview channel unavailable: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Publishes one annotated JPEG into the preview shared memory. Returns false when there is no
+    /// channel or the write failed — in which case the caller drops the frame instead of notifying
+    /// (a notification would make the App read a stale frame). Xuất bản một JPEG đã ghi chú vào
+    /// shared memory preview. Trả false khi không có channel hoặc ghi lỗi — bên gọi bỏ khung thay
+    /// vì notify (notify sẽ khiến App đọc phải khung cũ).
+    /// </summary>
+    /// <remarks>
+    /// An oversize or otherwise failing write disables the channel for the rest of the session
+    /// rather than retrying every tick; the loop itself never dies.
+    /// Ghi quá cỡ hoặc lỗi sẽ tắt channel cho hết phiên thay vì thử lại mỗi tick; bản thân loop
+    /// không bao giờ chết.
+    /// </remarks>
+    private bool TryPublishPreview(Session session, AnnotatedFrame annotated)
+    {
+        PreviewChannelWriter? writer = session.PreviewWriter;
+        if (writer is null) return false;
+
+        try
+        {
+            writer.Write(annotated.Width, annotated.Height, annotated.Jpeg);
+            return true;
+        }
+        catch (ObjectDisposedException)
+        {
+            // The session is winding down and EndSession already released the section: drop quietly.
+            // Phiên đang kết thúc và EndSession đã giải phóng vùng nhớ: bỏ khung, không báo lỗi.
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _stderr.WriteLine($"warn: preview channel write failed ({ex.Message}); disabling the preview channel.");
+            session.PreviewWriter = null;
+            try
+            {
+                writer.Dispose();
+            }
+            catch (Exception disposeEx)
+            {
+                _stderr.WriteLine($"warn: preview channel dispose failed: {disposeEx.Message}");
+            }
+            return false;
         }
     }
 
@@ -518,9 +608,9 @@ public sealed class PipelineHost : IAsyncDisposable
 
     /// <summary>
     /// Clears the session slot (only when it is still the current one), disposes the annotation
-    /// frame buffer and the capture source once, and disposes the session token source. Xóa slot
-    /// phiên (chỉ khi vẫn là phiên hiện tại), dispose buffer khung ghi chú và capture source đúng
-    /// một lần, và dispose token source của phiên.
+    /// frame buffer, the preview writer and the capture source once, and disposes the session token
+    /// source. Xóa slot phiên (chỉ khi vẫn là phiên hiện tại), dispose buffer khung ghi chú, writer
+    /// preview và capture source đúng một lần, và dispose token source của phiên.
     /// </summary>
     private void EndSession(Session session)
     {
@@ -530,6 +620,22 @@ public sealed class PipelineHost : IAsyncDisposable
             session.Cts.Dispose(); // under the lock: serialized against StopAsync's Cancel
         }
         session.AnnotBuffer?.Dispose();
+
+        // The writer's own lock serializes this against an in-flight annotate write, so tearing the
+        // section down here cannot pull the mapping out from under it.
+        // Lock của writer tuần tự hoá việc này với lần ghi đang chạy của vòng ghi chú, nên dỡ vùng
+        // nhớ ở đây không thể rút mapping khỏi tay nó.
+        PreviewChannelWriter? previewWriter = session.PreviewWriter;
+        session.PreviewWriter = null;
+        try
+        {
+            previewWriter?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            _stderr.WriteLine($"warn: preview channel dispose failed: {ex.Message}");
+        }
+
         DisposeSourceOnce(session);
     }
 
@@ -599,6 +705,14 @@ public sealed class PipelineHost : IAsyncDisposable
 
         /// <summary>Pool reusing the BGRA annotate buffers; <see langword="null"/> when annotation is off. Pool tái sử dụng buffer BGRA cho ghi chú; <see langword="null"/> khi tắt ghi chú.</summary>
         public IPixelPool? PixelPool { get; }
+
+        /// <summary>
+        /// Preview shared-memory writer feeding the App; <see langword="null"/> when annotation is
+        /// off, creation failed, or the channel was disabled by a failed write.
+        /// Writer shared memory preview cấp dữ liệu cho App; <see langword="null"/> khi tắt ghi chú,
+        /// khi tạo lỗi, hoặc khi channel bị tắt do ghi lỗi.
+        /// </summary>
+        public PreviewChannelWriter? PreviewWriter { get; set; }
 
         /// <summary>Annotation loop task (null when annotation is off). Task vòng ghi chú (null khi tắt ghi chú).</summary>
         public Task? AnnotLoop { get; set; }

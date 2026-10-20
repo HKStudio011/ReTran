@@ -10,6 +10,7 @@ using ReTran.Core.OcrClient;
 using ReTran.Core.Serve;
 using ReTran.Core.Translate;
 using Xunit;
+using AppPreview = ReTran_App.Services.Preview;
 using Frame = ReTran.Core.Capture.Frame;
 
 namespace RetranCore.Tests;
@@ -160,6 +161,9 @@ public class PipelineHostTests
         return registry;
     }
 
+    /// <summary>Fresh preview shared-memory name per test so parallel runs never collide. Tên shared memory preview mới cho mỗi test để chạy song song không đụng nhau.</summary>
+    private static string UniquePreviewMapName(string stem) => $@"Local\ReTran.Preview.Test.{stem}.{Guid.NewGuid():N}";
+
     private static Frame TinyFrame() => Frame.FromBgra(2, 2, new byte[16]);
 
     private static JsonObject SpotResult(params string[] texts)
@@ -192,7 +196,8 @@ public class PipelineHostTests
         List<FakeCaptureSource>? sources = null,
         TextWriter? stderr = null,
         Func<OcrLoopOptions, ICaptureSource>? sourceFactory = null,
-        IFrameAnnotator? annotator = null)
+        IFrameAnnotator? annotator = null,
+        string? previewMapName = null)
     {
         Func<OcrLoopOptions, ICaptureSource>? factory = sourceFactory;
         if (factory is null && sources is not null)
@@ -205,7 +210,8 @@ public class PipelineHostTests
                 return source;
             };
         }
-        return new PipelineHost(rpc, registry, server, stderr ?? new StringWriter(), factory, annotator);
+        return new PipelineHost(rpc, registry, server, stderr ?? new StringWriter(), factory, annotator,
+            previewMapName: previewMapName);
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition, string what, int timeoutMs = 10_000)
@@ -443,14 +449,15 @@ public class PipelineHostTests
     }
 
     [Fact]
-    public async Task Start_EmitsFrameAnnotated_WithJpegPayload()
+    public async Task Start_EmitsSlimFrameAnnotated_AndWritesJpegToSharedMemory()
     {
         await using var peer = new Peer();
         var sources = new List<FakeCaptureSource>();
+        string previewMapName = UniquePreviewMapName("annotated");
         await using var host = CreateHost(
             new FakeSidecarRpc { NextResult = SpotResult() },
             RegistryWith(new CountingTranslator()), peer.Server, sources,
-            annotator: new FakeAnnotator());
+            annotator: new FakeAnnotator(), previewMapName: previewMapName);
 
         JsonNode? started = await host.StartAsync(StartParams(), CancellationToken.None);
         Assert.True(started!["running"]!.GetValue<bool>());
@@ -459,8 +466,19 @@ public class PipelineHostTests
         Assert.Equal(1, frame!["seq"]!.GetValue<long>());
         Assert.Equal(2, frame["w"]!.GetValue<int>());   // TinyFrame 2x2
         Assert.Equal(2, frame["h"]!.GetValue<int>());
-        byte[] jpeg = Convert.FromBase64String(frame["jpeg"]!.GetValue<string>());
-        Assert.Equal(new byte[] { 1, 2, 3 }, jpeg);
+        // The JPEG no longer rides the wire: the notification only says "read the section".
+        // JPEG không còn đi trên wire: thông báo chỉ nói "hãy đọc vùng nhớ".
+        Assert.Null(frame["jpeg"]);
+
+        Assert.True(AppPreview.PreviewChannelReader.TryOpen(
+            previewMapName, out AppPreview.PreviewChannelReader? reader));
+        using (reader)
+        {
+            Assert.True(reader!.TryRead(out AppPreview.PreviewChannelFrame mmf));
+            Assert.Equal(new byte[] { 1, 2, 3 }, mmf.Jpeg);
+            Assert.Equal(2, mmf.Width);
+            Assert.Equal(2, mmf.Height);
+        }
     }
 
     [Fact]
@@ -471,7 +489,7 @@ public class PipelineHostTests
         await using var host = CreateHost(
             new FakeSidecarRpc { NextResult = SpotResult() },
             RegistryWith(new CountingTranslator()), peer.Server, sources,
-            annotator: new FakeAnnotator());
+            annotator: new FakeAnnotator(), previewMapName: UniquePreviewMapName("stop"));
 
         JsonNode? started = await host.StartAsync(StartParams(), CancellationToken.None);
         Assert.True(started!["running"]!.GetValue<bool>());

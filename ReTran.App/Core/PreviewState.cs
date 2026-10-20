@@ -1,9 +1,11 @@
 namespace ReTran_App.Core;
 
 /// <summary>
-/// One annotated frame ready for the preview pane (data-URL JPEG straight from
-/// <c>frame.annotated</c>). Một khung đã ghi chú sẵn cho ô preview (JPEG data-URL nguyên từ
-/// <c>frame.annotated</c>).
+/// One annotated frame ready for the preview pane: a base64 data-URL JPEG that the App assembled
+/// from the preview shared memory after Core's <c>frame.annotated {seq,w,h}</c> notification told it
+/// to read the section.
+/// Một khung đã ghi chú sẵn cho ô preview: JPEG data-URL base64 do App dựng từ shared memory
+/// preview sau khi thông báo <c>frame.annotated {seq,w,h}</c> của Core báo đọc vùng nhớ.
 /// </summary>
 /// <param name="Seq">Monotonic frame number from Core, restarts at 1 per session. Số khung tăng dần từ Core, bắt đầu lại từ 1 mỗi phiên.</param>
 /// <param name="W">Frame width in pixels. / Chiều rộng khung hình theo pixel.</param>

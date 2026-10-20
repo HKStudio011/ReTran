@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
 using ReTran_App.Services;
 using ReTran_App.Services.Camera;
+using ReTran_App.Services.Preview;
 
 namespace ReTran_App.Core;
 
@@ -52,9 +53,19 @@ public sealed class PipelineController
     private readonly PreviewState? _preview;
     private readonly ICameraOutput? _camera;
     private readonly ILogger<PipelineController> _log;
+    private readonly string _previewMapName;
     private readonly SemaphoreSlim _cacheGate = new(1, 1);
     // Giữ handler trong bounds của read-loop: gate wait + truy cập DB tối đa 2 s (lookup và put).
     private static readonly TimeSpan CacheGateTimeout = TimeSpan.FromSeconds(2);
+
+    /// <summary>How long to wait before retrying a preview section that Core has not created yet. Thời gian chờ trước khi thử lại vùng preview mà Core chưa tạo.</summary>
+    private static readonly TimeSpan PreviewOpenRetry = TimeSpan.FromSeconds(1);
+
+    private PreviewChannelReader? _previewReader;
+    private DateTime _nextPreviewOpenUtc;
+    // Guard chống phát lại: seq thông báo đã xử lý, và seq seqlock của vùng nhớ đã đọc.
+    private long _lastPreviewSeq;
+    private long _lastMmfSeq;
     private bool _handlersWired;
 
     /// <summary>
@@ -78,6 +89,11 @@ public sealed class PipelineController
     /// khung từ <c>frame.annotated</c> và giữ khung khi pipeline dừng; <see langword="null"/> tắt
     /// đường camera.
     /// </param>
+    /// <param name="previewMapName">
+    /// Shared-memory name of the preview channel Core writes; tests pass a unique name to stay
+    /// isolated. Tên shared memory của channel preview mà Core ghi; test truyền tên riêng để không
+    /// đụng nhau.
+    /// </param>
     /// <exception cref="ArgumentNullException">Thrown when any reference parameter is null. Ném khi tham số tham chiếu nào đó là null.</exception>
     public PipelineController(
         ICorePeer peer,
@@ -86,7 +102,8 @@ public sealed class PipelineController
         OverlayState overlay,
         ILogger<PipelineController> log,
         PreviewState? preview = null,
-        ICameraOutput? camera = null)
+        ICameraOutput? camera = null,
+        string previewMapName = PreviewProtocol.MapName)
     {
         _peer = peer ?? throw new ArgumentNullException(nameof(peer));
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
@@ -95,6 +112,7 @@ public sealed class PipelineController
         _log = log ?? throw new ArgumentNullException(nameof(log));
         _preview = preview;
         _camera = camera;
+        _previewMapName = string.IsNullOrWhiteSpace(previewMapName) ? PreviewProtocol.MapName : previewMapName;
     }
 
     /// <summary>
@@ -129,6 +147,13 @@ public sealed class PipelineController
     /// cài đặt đã lưu (qua <see cref="AppSettingsService.Load"/>) và nguồn đã cho. <c>ocrFps</c>/
     /// <c>captureFps</c> được bỏ qua để Core dùng mặc định của nó.
     /// </summary>
+    /// <remarks>
+    /// Starting a session clears the annotated-frame guards before <c>core.start</c> is sent,
+    /// because Core restarts both its <c>frame.annotated</c> seq and the preview section for every
+    /// session.
+    /// Mỗi lần start phiên sẽ xoá guard của khung ghi chú trước khi gửi <c>core.start</c>, vì Core
+    /// khởi động lại cả seq <c>frame.annotated</c> lẫn vùng preview cho mỗi phiên.
+    /// </remarks>
     /// <param name="source">Capture source for the session. Nguồn capture cho phiên.</param>
     /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
     /// <returns>A task that completes once Core acknowledges the start. Task hoàn tất khi Core xác nhận start.</returns>
@@ -157,6 +182,16 @@ public sealed class PipelineController
                 ["dst"] = settings.Dst,
             },
         };
+
+        // Cleared before core.start is sent (never after it returns) because Core restarts its
+        // frame.annotated seq at 1 and rewrites the preview section from scratch for every session:
+        // without this, the first frames of the new session would look like replays of the old one.
+        // Xoá trước khi gửi core.start (không phải sau khi nó trả về) vì Core khởi động lại seq
+        // frame.annotated từ 1 và ghi lại vùng preview từ đầu cho mỗi phiên: nếu không, những khung
+        // đầu của phiên mới sẽ bị coi là phát lại của phiên cũ.
+        _lastPreviewSeq = 0;
+        _lastMmfSeq = 0;
+
         await _peer.CallAsync("core.start", @params, ct).ConfigureAwait(false);
         IsRunning = true;
         ActiveSource = source;
@@ -344,25 +379,45 @@ public sealed class PipelineController
         }
     }
 
+    /// <summary>
+    /// Turns one slim <c>frame.annotated {seq,w,h}</c> notification into a preview frame and a
+    /// camera submit by reading the JPEG out of the preview shared memory. Notifications never
+    /// throw: an absent section, a torn read or an out-of-order seq simply drops the frame.
+    /// Biến một thông báo gọn <c>frame.annotated {seq,w,h}</c> thành khung preview và một lần nạp
+    /// camera bằng cách đọc JPEG từ shared memory preview. Thông báo không bao giờ ném: thiếu vùng
+    /// nhớ, đọc bị xé, hay seq sai thứ tự đều chỉ bỏ khung đó.
+    /// </summary>
     private void HandleFrameAnnotated(JsonNode? @params)
     {
         if (@params is not JsonObject p) return;
-        if (p["jpeg"] is not JsonValue jpegValue || jpegValue.GetValueKind() != JsonValueKind.String)
-        {
-            return;
-        }
-        string? jpeg = jpegValue.GetValue<string>();
-        if (string.IsNullOrEmpty(jpeg)) return;
 
         long seq = ReadLong(p, "seq");
-        int w = ReadInt(p, "w");
-        int h = ReadInt(p, "h");
-        _preview?.Publish(new PreviewFrame(seq, w, h, jpeg));
+        // Core may replay a notification for a frame the App already handled; a repeated or older
+        // seq must not re-publish. Core có thể phát lại thông báo của khung App đã xử lý; seq lặp
+        // hoặc cũ hơn không được xuất bản lại.
+        if (seq <= _lastPreviewSeq) return;
+
+        PreviewChannelReader? reader = EnsurePreviewChannel();
+        if (reader is null || !reader.TryRead(out PreviewChannelFrame frame)) return;
+        // Two notifications can describe the same write (Core notifies once per write, but the App
+        // may drain them out of step); the seqlock counter tells them apart.
+        // Hai thông báo có thể nói về cùng một lần ghi; bộ đếm seqlock giúp phân biệt.
+        if (frame.Seq <= _lastMmfSeq) return;
+
+        _lastMmfSeq = frame.Seq;
+        _lastPreviewSeq = seq;
+
+        // The bytes and the dimensions must come from the same snapshot, so both are taken from
+        // the shared memory frame; only the seq (which restarts per session) comes from the wire.
+        // Byte và kích thước phải đến từ cùng một ảnh chụp, nên cả hai lấy từ khung trong shared
+        // memory; chỉ seq (khởi động lại mỗi phiên) lấy từ wire.
+        _preview?.Publish(new PreviewFrame(
+            seq, frame.Width, frame.Height, Convert.ToBase64String(frame.Jpeg)));
 
         if (_camera is null) return;
         try
         {
-            _camera.Submit(seq, w, h, Convert.FromBase64String(jpeg));
+            _camera.Submit(seq, frame.Width, frame.Height, frame.Jpeg);
         }
         catch (Exception ex)
         {
@@ -371,6 +426,30 @@ public sealed class PipelineController
             // được giết vòng lặp khung hay preview vừa xuất bản.
             _log.LogWarning(ex, "Camera submit failed for frame {Seq}.", seq);
         }
+    }
+
+    /// <summary>
+    /// Returns the open preview reader, opening it at most once per second while Core has not
+    /// created the section yet (Core may still be starting, or may have restarted).
+    /// Trả reader preview đang mở, hoặc thử mở tối đa một lần mỗi giây khi Core chưa tạo vùng nhớ
+    /// (Core có thể đang khởi động, hoặc đã khởi động lại).
+    /// </summary>
+    /// <returns>The reader, or <see langword="null"/> when the section is not available yet. Reader, hoặc <see langword="null"/> khi vùng nhớ chưa sẵn sàng.</returns>
+    private PreviewChannelReader? EnsurePreviewChannel()
+    {
+        PreviewChannelReader? reader = _previewReader;
+        if (reader is not null) return reader;
+
+        if (DateTime.UtcNow < _nextPreviewOpenUtc) return null;
+
+        if (!PreviewChannelReader.TryOpen(_previewMapName, out reader) || reader is null)
+        {
+            _nextPreviewOpenUtc = DateTime.UtcNow.Add(PreviewOpenRetry);
+            return null;
+        }
+
+        _previewReader = reader;
+        return reader;
     }
 
     private void HandleFrameTranslated(JsonNode? @params)

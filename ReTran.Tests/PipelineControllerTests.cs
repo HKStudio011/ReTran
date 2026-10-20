@@ -6,6 +6,8 @@ using ReTran_App.Core;
 using ReTran_App.Data;
 using ReTran_App.Services;
 using ReTran_App.Services.Camera;
+using ReTran_App.Services.Preview;
+using CoreServe = ReTran.Core.Serve;
 
 public class PipelineControllerTests : IDisposable
 {
@@ -39,11 +41,15 @@ public class PipelineControllerTests : IDisposable
         }
     }
 
+    /// <summary>Unique per-test preview section name so runs never touch the real channel. Tên vùng preview riêng cho mỗi test để không chạm channel thật.</summary>
+    private static string UniquePreviewName(string stem) => $@"Local\ReTran.Preview.Test.{stem}.{Guid.NewGuid():N}";
+
     private PipelineController CreateController(
         FakeCorePeer peer,
         OverlayState overlay,
         PreviewState? preview = null,
-        FakeCameraOutput? camera = null)
+        FakeCameraOutput? camera = null,
+        string? previewMapName = null)
     {
         _controllerDb = new RetranDbContext(_options);
         return new PipelineController(
@@ -53,7 +59,8 @@ public class PipelineControllerTests : IDisposable
             overlay,
             NullLogger<PipelineController>.Instance,
             preview,
-            camera);
+            camera,
+            previewMapName ?? UniquePreviewName("controller"));
     }
 
     [Fact]
@@ -141,21 +148,28 @@ public class PipelineControllerTests : IDisposable
     }
 
     [Fact]
-    public async Task FrameAnnotated_Notification_PublishesPreview()
+    public async Task FrameAnnotated_SlimNotification_PublishesPreviewAndCameraFromSharedMemory()
     {
+        string mapName = UniquePreviewName("roundtrip");
+        byte[] jpeg = [1, 2, 3, 4, 5];
+        using var writer = new CoreServe.PreviewChannelWriter(mapName);
+        writer.Write(1280, 720, jpeg);
+
         var peer = new FakeCorePeer { IsStarted = true };
         var preview = new PreviewState();
-        PipelineController controller = CreateController(peer, new OverlayState(), preview);
+        var camera = new FakeCameraOutput();
+        PipelineController controller = CreateController(peer, new OverlayState(), preview, camera, mapName);
         await controller.StartAsync(
             new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
             CancellationToken.None);
 
+        // Core now notifies with {seq,w,h} only: the JPEG itself travels via the shared memory.
+        // Core giờ chỉ notify {seq,w,h}: JPEG đi qua shared memory thay vì qua JSON.
         peer.RaiseNotification("frame.annotated", new JsonObject
         {
             ["seq"] = 42,
             ["w"] = 1280,
             ["h"] = 720,
-            ["jpeg"] = "AQID",
         });
 
         PreviewFrame? frame = preview.Latest;
@@ -163,61 +177,126 @@ public class PipelineControllerTests : IDisposable
         Assert.Equal(42, frame!.Seq);
         Assert.Equal(1280, frame.W);
         Assert.Equal(720, frame.H);
-        Assert.Equal("AQID", frame.JpegBase64);
-    }
+        Assert.Equal(jpeg, Convert.FromBase64String(frame.JpegBase64));
 
-    [Fact]
-    public async Task FrameAnnotated_Notification_SubmitsFrameToCamera()
-    {
-        var peer = new FakeCorePeer { IsStarted = true };
-        var camera = new FakeCameraOutput();
-        PipelineController controller = CreateController(peer, new OverlayState(), camera: camera);
-        await controller.StartAsync(
-            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
-            CancellationToken.None);
-
-        peer.RaiseNotification("frame.annotated", new JsonObject
-        {
-            ["seq"] = 7,
-            ["w"] = 1280,
-            ["h"] = 720,
-            ["jpeg"] = Convert.ToBase64String(new byte[] { 1, 2, 3 }),
-        });
-
+        // The camera receives the very same bytes (not base64-decoded, the raw JPEG).
+        // Camera nhận đúng những byte đó (không phải base64 giải mã, mà là JPEG thô).
         (long Seq, int W, int H, byte[] Jpeg) submit = Assert.Single(camera.Submits);
-        Assert.Equal(7, submit.Seq);
+        Assert.Equal(42, submit.Seq);
         Assert.Equal(1280, submit.W);
         Assert.Equal(720, submit.H);
-        Assert.Equal(new byte[] { 1, 2, 3 }, submit.Jpeg);
-        Assert.Equal(0, camera.Holds);
+        Assert.Equal(jpeg, submit.Jpeg);
     }
 
     [Fact]
-    public async Task FrameAnnotated_UndecodablePayload_DoesNotThrowAndSkipsCamera()
+    public async Task FrameAnnotated_MissingPreviewSection_NoPublishNoThrow()
     {
+        string mapName = UniquePreviewName("absent"); // no writer ever created this section
+
         var peer = new FakeCorePeer { IsStarted = true };
-        var camera = new FakeCameraOutput();
         var preview = new PreviewState();
-        PipelineController controller = CreateController(peer, new OverlayState(), preview, camera);
+        var camera = new FakeCameraOutput();
+        PipelineController controller = CreateController(peer, new OverlayState(), preview, camera, mapName);
         await controller.StartAsync(
             new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
             CancellationToken.None);
 
-        // Not base64: the camera path must swallow it (best-effort output) and the preview must
-        // still get the frame, so a broken JPEG can never kill the notification loop.
-        // Không phải base64: đường camera phải nuốt lỗi (đầu ra best-effort) và preview vẫn nhận
-        // khung, để một JPEG hỏng không thể giết vòng lặp thông báo.
         peer.RaiseNotification("frame.annotated", new JsonObject
         {
-            ["seq"] = 8,
+            ["seq"] = 1,
             ["w"] = 1280,
             ["h"] = 720,
-            ["jpeg"] = "not base64 !!",
         });
 
+        Assert.Null(preview.Latest);
         Assert.Empty(camera.Submits);
+    }
+
+    [Fact]
+    public async Task FrameAnnotated_StaleOrRepeatedNotificationSeq_Ignored()
+    {
+        string mapName = UniquePreviewName("stale");
+        using var writer = new CoreServe.PreviewChannelWriter(mapName);
+        writer.Write(1280, 720, [1, 2, 3]);
+
+        var peer = new FakeCorePeer { IsStarted = true };
+        var preview = new PreviewState();
+        var camera = new FakeCameraOutput();
+        PipelineController controller = CreateController(peer, new OverlayState(), preview, camera, mapName);
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+
+        peer.RaiseNotification("frame.annotated", new JsonObject { ["seq"] = 5, ["w"] = 1280, ["h"] = 720 });
+        Assert.Single(camera.Submits);
+
+        writer.Write(1280, 720, [9, 9, 9]); // MMF updated but the notification is a stale replay
+
+        peer.RaiseNotification("frame.annotated", new JsonObject { ["seq"] = 5, ["w"] = 1280, ["h"] = 720 });
+        peer.RaiseNotification("frame.annotated", new JsonObject { ["seq"] = 4, ["w"] = 1280, ["h"] = 720 });
+
+        // Neither the repeated seq nor the older seq may re-publish or re-submit.
+        // Seq lặp lại lẫn seq cũ hơn không được publish hay submit lại.
+        Assert.Single(camera.Submits);
         Assert.NotNull(preview.Latest);
-        Assert.Equal(8, preview.Latest!.Seq);
+        Assert.Equal([1, 2, 3], Convert.FromBase64String(preview.Latest!.JpegBase64));
+    }
+
+    [Fact]
+    public async Task FrameAnnotated_SameMmfFrame_SecondNotificationSkipped()
+    {
+        string mapName = UniquePreviewName("sameframe");
+        using var writer = new CoreServe.PreviewChannelWriter(mapName);
+        writer.Write(1280, 720, [7, 7, 7]);
+
+        var peer = new FakeCorePeer { IsStarted = true };
+        var preview = new PreviewState();
+        var camera = new FakeCameraOutput();
+        PipelineController controller = CreateController(peer, new OverlayState(), preview, camera, mapName);
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+
+        // Two notifications but only one MMF write happened: the second must not re-publish an
+        // identical frame to preview/camera.
+        // Hai thông báo nhưng chỉ một lần ghi MMF: lần hai không được re-publish khung giống hệt
+        // cho preview/camera.
+        peer.RaiseNotification("frame.annotated", new JsonObject { ["seq"] = 1, ["w"] = 1280, ["h"] = 720 });
+        peer.RaiseNotification("frame.annotated", new JsonObject { ["seq"] = 2, ["w"] = 1280, ["h"] = 720 });
+
+        Assert.Single(camera.Submits);
+        Assert.Equal(1, preview.Latest!.Seq); // second notification skipped: latest stays seq 1
+        Assert.Equal([7, 7, 7], Convert.FromBase64String(preview.Latest.JpegBase64));
+    }
+
+    [Fact]
+    public async Task NewSession_RestartsSeqNotifications_AcceptedAgain()
+    {
+        string mapName = UniquePreviewName("restart");
+        using var writer = new CoreServe.PreviewChannelWriter(mapName);
+        writer.Write(1280, 720, [1, 1, 1]);
+
+        var peer = new FakeCorePeer { IsStarted = true };
+        var preview = new PreviewState();
+        var camera = new FakeCameraOutput();
+        PipelineController controller = CreateController(peer, new OverlayState(), preview, camera, mapName);
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+        peer.RaiseNotification("frame.annotated", new JsonObject { ["seq"] = 3, ["w"] = 1280, ["h"] = 720 });
+        Assert.Single(camera.Submits);
+
+        // A fresh session restarts the notification seq at 1 (Core semantics); the new start must
+        // reset the stale guard so sessions after the first still publish.
+        // Phiên mới khởi động lại seq thông báo từ 1 (đặc tả Core); lần start mới phải reset guard
+        // để các phiên sau phiên đầu vẫn publish được.
+        await controller.StopAsync(CancellationToken.None);
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+        peer.RaiseNotification("frame.annotated", new JsonObject { ["seq"] = 1, ["w"] = 1280, ["h"] = 720 });
+
+        Assert.Equal(2, camera.Submits.Count);
     }
 
     [Fact]
