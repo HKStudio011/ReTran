@@ -15,7 +15,13 @@ namespace ReTran.Core.Cli;
 /// <param name="Hwnd">Window handle for window capture. Handle cửa sổ khi bắt cửa sổ.</param>
 /// <param name="Fps">OCR tick rate, 1..60. Tần suất tick OCR, 1..60.</param>
 /// <param name="MaxFrames">Stop after this many processed frames; 0 = unlimited. Dừng sau số khung đã xử lý; 0 = không giới hạn.</param>
-public sealed record OcrLoopOptions(bool UseWindow, int Monitor, nint Hwnd, int Fps, int MaxFrames);
+/// <param name="CaptureFps">
+/// Capture source frame rate in fps (>= 1). This cadences the capture only — the annotation loop
+/// keeps its own serve-start rate (<c>PipelineHost</c> <c>annotatorFps</c>).
+/// Tần suất khung của capture source (>= 1). Chỉ nhịp capture — vòng ghi chú giữ nhịp riêng từ lúc
+/// serve start (<c>annotatorFps</c> của <c>PipelineHost</c>).
+/// </param>
+public sealed record OcrLoopOptions(bool UseWindow, int Monitor, nint Hwnd, int Fps, int MaxFrames, int CaptureFps = 10);
 
 /// <summary>
 /// Continuous OCR loop engine: capture buffer -> periodic tick -> pipeline -> cycle sink.
@@ -116,7 +122,10 @@ public static class OcrLoop
     /// Creates the capture source described by <paramref name="options"/>.
     /// Tạo capture source theo <paramref name="options"/>.
     /// </summary>
-    /// <param name="options">Parsed loop options. Tùy chọn loop đã parse.</param>
+    /// <param name="options">
+    /// Parsed loop options; <see cref="OcrLoopOptions.CaptureFps"/> becomes the source frame rate.
+    /// Tùy chọn loop đã parse; <see cref="OcrLoopOptions.CaptureFps"/> thành tần suất của source.
+    /// </param>
     /// <returns>The source (not started). Source (chưa Start).</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">Monitor index out of range. Chỉ số màn hình ngoài khoảng.</exception>
@@ -124,8 +133,8 @@ public static class OcrLoop
     {
         ArgumentNullException.ThrowIfNull(options);
         return options.UseWindow
-            ? new WindowCaptureSource(new WindowTarget(options.Hwnd), logger: null)
-            : new ScreenCaptureSource(new ScreenTarget(options.Monitor), logger: null);
+            ? new WindowCaptureSource(new WindowTarget(options.Hwnd), logger: null, fps: options.CaptureFps)
+            : new ScreenCaptureSource(new ScreenTarget(options.Monitor), logger: null, fps: options.CaptureFps);
     }
 
     /// <summary>

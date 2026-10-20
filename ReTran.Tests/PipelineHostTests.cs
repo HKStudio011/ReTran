@@ -528,6 +528,43 @@ public class PipelineHostTests
     }
 
     [Fact]
+    public async Task Start_CaptureFps_FlowsToSourceFactory()
+    {
+        OcrLoopOptions? captured = null;
+        await using var host = CreateHost(
+            new FakeSidecarRpc(), RegistryWith(new CountingTranslator()), new JsonRpcServer(),
+            sourceFactory: opts =>
+            {
+                captured = opts;
+                var source = new FakeCaptureSource();
+                source.Raise(TinyFrame());
+                return source;
+            });
+
+        var parameters = StartParams();
+        parameters["captureFps"] = 5;
+        JsonNode? started = await host.StartAsync(parameters, CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+
+        Assert.NotNull(captured);
+        Assert.Equal(5, captured!.CaptureFps);
+    }
+
+    [Fact]
+    public async Task Start_CaptureFpsZero_InvalidParams()
+    {
+        await using var host = CreateHost(
+            new FakeSidecarRpc(), RegistryWith(new CountingTranslator()), new JsonRpcServer());
+
+        var parameters = StartParams();
+        parameters["captureFps"] = 0;
+        var ex = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(parameters, CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InvalidParams, ex.Code);
+        Assert.Contains("captureFps", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Start_FpsMissing_UsesCoreConfigDefault()
     {
         OcrLoopOptions? captured = null;
@@ -552,5 +589,6 @@ public class PipelineHostTests
         Assert.NotNull(captured);
         Assert.Equal(CoreConfig.LoadFrom(CoreConfig.DefaultPath).OcrFps, captured!.Fps);
         Assert.True(captured.Fps >= 1);
+        Assert.Equal(CoreConfig.LoadFrom(CoreConfig.DefaultPath).CaptureFps, captured!.CaptureFps);
     }
 }

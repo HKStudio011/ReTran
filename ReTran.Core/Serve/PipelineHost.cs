@@ -403,10 +403,12 @@ public sealed class PipelineHost : IAsyncDisposable
         {
             throw new RpcMethodException(RpcErrorCodes.InvalidParams, "'ocrFps' must be an integer 1..60.");
         }
-        // captureFps is accepted+validated per spec §3.1 but not yet plumbed into the capture
-        // source (OcrLoopOptions has no field; OcrLoop.CreateSource uses the source default 10).
-        // captureFps được nhận+kiểm tra theo spec §3.1 nhưng chưa truyền vào capture source
-        // (OcrLoopOptions không có field; OcrLoop.CreateSource dùng default 10 của source).
+        // captureFps feeds the capture source via ToOptions (spec §3.1). It changes only the
+        // capture cadence: the annotation loop keeps ticking at _annotatorFps, fixed from
+        // CoreConfig.CaptureFps at serve start.
+        // captureFps được cấp vào capture source qua ToOptions (spec §3.1). Nó chỉ đổi nhịp
+        // capture: vòng ghi chú vẫn tick theo _annotatorFps, cố định từ CoreConfig.CaptureFps
+        // lúc serve start.
         int captureFps = config.CaptureFps;
         if (p["captureFps"] is JsonValue captureValue
             && (!captureValue.TryGetValue<int>(out captureFps) || captureFps < 1))
@@ -679,7 +681,13 @@ public sealed class PipelineHost : IAsyncDisposable
         int OcrFps,
         int CaptureFps)
     {
-        public OcrLoopOptions ToOptions() => new(UseWindow, Monitor, Hwnd, OcrFps, 0);
+        /// <summary>
+        /// Builds the loop options; <see cref="StartSpec.CaptureFps"/> only cadences the capture
+        /// source — the annotation loop keeps its serve-start <c>annotatorFps</c>.
+        /// Tạo tùy chọn loop; <see cref="StartSpec.CaptureFps"/> chỉ nhịp capture source — vòng ghi
+        /// chú giữ <c>annotatorFps</c> từ lúc serve start.
+        /// </summary>
+        public OcrLoopOptions ToOptions() => new(UseWindow, Monitor, Hwnd, OcrFps, 0, CaptureFps);
     }
 
     /// <summary>Per-start state: source, loop token, background task, and once-flags. Trạng thái mỗi lần start: source, token loop, task nền và cờ once.</summary>
