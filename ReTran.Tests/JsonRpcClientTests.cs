@@ -356,10 +356,12 @@ public class JsonRpcClientTests
     [Fact]
     public async Task CallAsync_200KB_Params_RoundtripIntact()
     {
-        // frame.annotated carries a ~200 KB base64 JPEG on one JSON line — a reader with any
-        // buffer/line limit would truncate it. Exercises the same read/write path both ways.
-        // frame.annotated mang JPEG base64 ~200 KB trên một dòng JSON — reader có giới hạn
-        // buffer/dòng là cắt mất. Đi qua cùng đường read/write theo cả hai chiều.
+        // One JSON line can carry a ~200 KB payload (bulk requests such as translate.put with many
+        // entries, responses with large result arrays) — a reader with any buffer/line limit would
+        // truncate it. Exercises the same read/write path both ways.
+        // Một dòng JSON có thể mang payload ~200 KB (request khối như translate.put nhiều entry,
+        // response có mảng kết quả lớn) — reader có giới hạn buffer/dòng là cắt mất. Đi qua cùng
+        // đường read/write theo cả hai chiều.
         var input = new BlockingTextReader();
         var output = new RecordingWriter();
         await using var client = new JsonRpcClient(input, output);

@@ -92,7 +92,16 @@ public sealed class PreviewChannelWriter : IDisposable
     /// Tạo (hoặc mở) vùng preview; test truyền tên riêng để không đụng nhau.
     /// </summary>
     /// <param name="mapName">Shared-memory name, or <see langword="null"/>/blank for <see cref="PreviewProtocol.MapName"/>. Tên shared memory, hoặc <see langword="null"/> rỗng để dùng <see cref="PreviewProtocol.MapName"/>.</param>
-    /// <exception cref="IOException">Thrown when a foreign section already owns the name with a different size. Ném khi một vùng lạ đã chiếm tên với kích thước khác.</exception>
+    /// <remarks>
+    /// When the name already exists, Windows adopts that mapping's existing size rather than
+    /// resizing it — <see cref="MemoryMappedFile.CreateOrOpen(string, long, MemoryMappedFileAccess)"/>
+    /// does not fail on a size mismatch. A section too small for <see cref="PreviewProtocol.TotalSize"/>
+    /// therefore surfaces later as the view/allocation failure the host already reports as a warning.
+    /// Khi tên đã tồn tại, Windows dùng luôn kích thước của mapping sẵn có chứ không resize —
+    /// <see cref="MemoryMappedFile.CreateOrOpen(string, long, MemoryMappedFileAccess)"/> không lỗi
+    /// khi kích thước khác. Vùng quá nhỏ cho <see cref="PreviewProtocol.TotalSize"/> vì thế chỉ lộ
+    /// ra sau đó dưới dạng lỗi tạo view/cấp phát mà host đã báo cảnh báo.
+    /// </remarks>
     public PreviewChannelWriter(string? mapName = null)
     {
         string name = string.IsNullOrWhiteSpace(mapName) ? PreviewProtocol.MapName : mapName;
@@ -100,6 +109,18 @@ public sealed class PreviewChannelWriter : IDisposable
             name, PreviewProtocol.TotalSize, MemoryMappedFileAccess.ReadWrite);
         _view = _section.CreateViewAccessor(
             0, PreviewProtocol.TotalSize, MemoryMappedFileAccess.ReadWrite);
+
+        // The seqlock counter belongs to the SECTION, not to the writer instance: a session may end
+        // while an App-side reader keeps the section (and its last frame) alive, so a new writer must
+        // continue from the counter already in the header. Rounding down to even discards a half
+        // written (odd) value from a crashed writer, and the first write still lands strictly above
+        // the last stable frame — so a stale previous-session frame can never out-rank a new one.
+        // Bộ đếm seqlock thuộc về VÙNG NHỚ, không phải từng instance writer: phiên có thể kết thúc
+        // trong khi reader phía App vẫn giữ vùng nhớ (và khung cuối), nên writer mới phải tiếp tục
+        // từ bộ đếm đang có trong header. Làm tròn xuống số chẵn để bỏ giá trị dở dang (lẻ) của
+        // writer bị chết, và lần ghi đầu vẫn cao hơn hẳn khung ổn định cuối — nên khung cũ của
+        // phiên trước không bao giờ xếp trên khung của phiên mới.
+        _seq = _view.ReadUInt32(PreviewProtocol.OffsetSeq) & ~1u;
     }
 
     /// <summary>

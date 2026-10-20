@@ -81,6 +81,50 @@ public class PreviewChannelTests
     }
 
     [Fact]
+    public void SecondWriterGeneration_ContinuesSequenceAndPayload()
+    {
+        // The section outlives a writer generation (the App's reader keeps it open across sessions),
+        // so the seqlock counter must be continuous per SECTION: an old-session frame must never
+        // out-rank a new-session frame. Regression for the poisoned-guard scenario, where a stale
+        // notification after a session restart made the App freeze preview/camera until the new
+        // writer's counter caught up with the old session's last seq.
+        // Vùng nhớ sống lâu hơn một thế hệ writer (reader phía App giữ nó qua các phiên), nên bộ đếm
+        // seqlock phải liên tục theo VÙNG NHỚ: khung của phiên cũ không bao giờ được xếp trên khung
+        // của phiên mới. Test hồi quy cho kịch bản "guard bị nhiễm độc": một thông báo cũ sau khi
+        // restart phiên từng làm App đóng băng preview/camera cho tới khi bộ đếm writer mới đuổi kịp
+        // seq cuối của phiên cũ.
+        string mapName = UniqueName("generations");
+        var first = new CorePreview.PreviewChannelWriter(mapName);
+        Assert.True(PreviewChannelReader.TryOpen(mapName, out PreviewChannelReader? reader));
+        using (reader)
+        {
+            first.Write(2, 2, [1, 1, 1]);
+            first.Write(2, 2, [2, 2, 2]);
+            Assert.True(reader!.TryRead(out PreviewChannelFrame frame));
+            Assert.Equal([2, 2, 2], frame.Jpeg);
+            long lastOfFirstGeneration = frame.Seq;
+            Assert.Equal(4L, lastOfFirstGeneration); // two writes: 2 then 4
+
+            // The session ends but the App's reader keeps the section (and its last frame) alive,
+            // so the next writer adopts it instead of starting from a zeroed counter.
+            // Phiên kết thúc nhưng reader phía App vẫn giữ vùng nhớ (và khung cuối), nên writer kế
+            // tiếp dùng lại nó thay vì bắt đầu từ bộ đếm 0.
+            first.Dispose();
+
+            using var second = new CorePreview.PreviewChannelWriter(mapName);
+            second.Write(2, 2, [3, 3, 3]);
+
+            Assert.True(reader.TryRead(out PreviewChannelFrame afterRestart));
+            Assert.Equal([3, 3, 3], afterRestart.Jpeg);
+            Assert.Equal(2, afterRestart.Width);
+            Assert.Equal(2, afterRestart.Height);
+            Assert.True(
+                afterRestart.Seq > lastOfFirstGeneration,
+                $"seq must keep increasing across writer generations: {lastOfFirstGeneration} -> {afterRestart.Seq}");
+        }
+    }
+
+    [Fact]
     public void Write_OversizeJpeg_Throws()
     {
         using var writer = new CorePreview.PreviewChannelWriter(UniqueName("frame"));
