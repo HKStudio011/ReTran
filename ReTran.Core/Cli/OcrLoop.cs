@@ -203,7 +203,7 @@ public static class OcrLoop
                 {
                     using (frame)
                     {
-                        string b64 = BgraPngEncoder.ToPngBase64(frame);
+                        string b64 = BgraJpegEncoder.ToJpegBase64(frame);
                         JsonObject result = await pipeline.SpotAsync(b64, ct);
                         seq++;
                         await sink.OnCycleAsync(seq, frame.Width, frame.Height, result, ct);

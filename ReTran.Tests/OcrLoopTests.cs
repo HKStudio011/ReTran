@@ -15,11 +15,15 @@ public class OcrLoopTests
         private readonly Func<int, CancellationToken, Task<JsonNode?>> _onCall;
         private int _calls;
 
+        /// <summary>Params of the most recent call (null before the first). Tham số lần gọi gần nhất.</summary>
+        public JsonNode? LastParams;
+
         public FakeRpc(Func<int, CancellationToken, Task<JsonNode?>>? onCall = null)
             => _onCall = onCall ?? ((_, _) => Task.FromResult<JsonNode?>(SpotResult("HI")));
 
         public Task<JsonNode?> CallAsync(string method, JsonNode? @params, CancellationToken ct)
         {
+            LastParams = @params;
             int call = Interlocked.Increment(ref _calls);
             return _onCall(call, ct);
         }
@@ -119,6 +123,32 @@ public class OcrLoopTests
         Assert.NotNull(parsed["new_texts"]);
         Assert.Equal(1, parsed["spots_count"]!.GetValue<int>());
         Assert.Equal(5, parsed["elapsed_ms"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task RunAsync_PayloadSentToSpot_IsJpegNotPng()
+    {
+        var options = new OcrLoopOptions(false, 0, 0, Fps: 1, MaxFrames: 1);
+        using var source = new FakeCaptureSource();
+        source.Raise(TinyFrame()); // delivered on Start; consumed by the first-frame wait
+        var rpc = new FakeRpc();
+        var pipeline = new OcrPipeline(rpc, new OcrDiff());
+        var stdout = new SyncTextWriter();
+        var stderr = new StringWriter();
+
+        Task<int> run = Task.Run(() =>
+            OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr, CancellationToken.None));
+
+        await Task.Delay(400, TestContext.Current.CancellationToken); // first frame consumed
+        source.Raise(TinyFrame()); // cycle 1 -> SpotAsync payload recorded
+        Assert.True(await stdout.WaitForLineCount(1, TimeSpan.FromSeconds(10)), "no line 1");
+        Assert.Equal(0, await run);
+
+        string b64 = rpc.LastParams!["image"]!.GetValue<string>();
+        byte[] payload = Convert.FromBase64String(b64);
+        Assert.True(payload.Length > 4);
+        Assert.Equal(new byte[] { 0xFF, 0xD8 }, payload[..2]);   // JPEG SOI marker
+        Assert.NotEqual(new byte[] { 0x89, 0x50, 0x4E, 0x47 }, payload[..4]); // not the PNG signature
     }
 
     [Fact]

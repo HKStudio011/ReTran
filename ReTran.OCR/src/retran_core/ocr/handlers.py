@@ -6,7 +6,7 @@ from typing import Any, Callable, Optional
 
 from ..jsonrpc import RpcInvalidParams
 from .engine import OcrEngine
-from .image import decode_png_b64
+from .image import decode_image_b64
 
 Handler = Callable[[Optional[dict]], Any]
 
@@ -24,10 +24,10 @@ def make_spot_handler(engine: OcrEngine) -> Handler:
 
     def spot(params: Optional[dict]) -> dict:
         if not isinstance(params, dict) or not isinstance(params.get("image"), str) or not params["image"]:
-            raise RpcInvalidParams("missing or invalid 'image' (non-empty base64 PNG string)")
+            raise RpcInvalidParams("missing or invalid 'image' (non-empty base64 PNG/JPEG string)")
         t0 = time.perf_counter()
         try:
-            image_bgr = decode_png_b64(params["image"])
+            image_bgr = decode_image_b64(params["image"])
         except ValueError as exc:
             raise RpcInvalidParams(str(exc)) from exc
         spots = engine.spot(image_bgr)

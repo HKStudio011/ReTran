@@ -29,23 +29,23 @@ public sealed class OcrPipeline
     }
 
     /// <summary>
-    /// Calls sidecar ocr.spot with a base64 PNG and returns {spots, elapsed_ms, new_texts}.
-    /// Gọi ocr.spot với PNG base64 và trả về {spots, elapsed_ms, new_texts}.
+    /// Calls sidecar ocr.spot with a base64 JPEG (or PNG) image and returns {spots, elapsed_ms, new_texts}.
+    /// Gọi ocr.spot với ảnh JPEG (hoặc PNG) base64 và trả về {spots, elapsed_ms, new_texts}.
     /// </summary>
-    /// <param name="pngBase64">Base64-encoded PNG without data-url prefix. PNG base64 không prefix data-url.</param>
+    /// <param name="imageBase64">Base64-encoded JPEG or PNG without data-url prefix. JPEG hoặc PNG base64 không prefix data-url.</param>
     /// <param name="ct">Caller cancellation token. Token hủy của caller.</param>
     /// <exception cref="TimeoutException">Thrown when <see cref="Timeout"/> elapses. Khi hết <see cref="Timeout"/>.</exception>
     /// <exception cref="SidecarRpcException">Propagated from the sidecar. Được đẩy ra từ sidecar.</exception>
     /// <exception cref="InvalidOperationException">Thrown when the reply has no spots array. Khi phản hồi thiếu mảng spots.</exception>
-    public async Task<JsonObject> SpotAsync(string pngBase64, CancellationToken ct = default)
+    public async Task<JsonObject> SpotAsync(string imageBase64, CancellationToken ct = default)
     {
-        ArgumentNullException.ThrowIfNull(pngBase64);
+        ArgumentNullException.ThrowIfNull(imageBase64);
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(Timeout);
         JsonNode? result;
         try
         {
-            result = await _rpc.CallAsync("ocr.spot", new JsonObject { ["image"] = pngBase64 }, cts.Token);
+            result = await _rpc.CallAsync("ocr.spot", new JsonObject { ["image"] = imageBase64 }, cts.Token);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {

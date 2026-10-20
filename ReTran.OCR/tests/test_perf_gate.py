@@ -54,7 +54,7 @@ import io
 
 from PIL import Image
 
-from retran_core.ocr.image import MAX_INPUT_DIM, decode_png_b64
+from retran_core.ocr.image import MAX_INPUT_DIM, decode_image_b64
 
 
 def _png_b64(w: int, h: int) -> str:
@@ -66,15 +66,15 @@ def _png_b64(w: int, h: int) -> str:
 
 def test_downscale_caps_long_side_at_max_input_dim():
     assert MAX_INPUT_DIM == 1280
-    arr = decode_png_b64(_png_b64(1920, 1080))
+    arr = decode_image_b64(_png_b64(1920, 1080))
     assert arr.shape == (720, 1280, 3)  # 1920x1080 -> 1280x720, aspect kept
 
 
 def test_downscale_leaves_small_input_untouched():
-    arr = decode_png_b64(_png_b64(800, 600))
+    arr = decode_image_b64(_png_b64(800, 600))
     assert arr.shape == (600, 800, 3)
 
 
 def test_downscale_handles_extreme_aspect_ratio():
-    arr = decode_png_b64(_png_b64(2000, 500))
+    arr = decode_image_b64(_png_b64(2000, 500))
     assert arr.shape == (320, 1280, 3)

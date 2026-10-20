@@ -12,7 +12,7 @@ from PIL import Image
 from retran_core.jsonrpc import RpcInvalidParams, handle_line
 from retran_core.ocr.engine import Spot
 from retran_core.ocr.handlers import make_spot_handler
-from retran_core.ocr.image import decode_png_b64
+from retran_core.ocr.image import decode_image_b64
 
 
 def _png_b64(w: int = 64, h: int = 32, color: tuple[int, int, int] = (255, 255, 255)) -> str:
@@ -20,6 +20,25 @@ def _png_b64(w: int = 64, h: int = 32, color: tuple[int, int, int] = (255, 255, 
     buf = io.BytesIO()
     Image.new("RGB", (w, h), color).save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _jpeg_b64(
+    w: int = 64,
+    h: int = 32,
+    color: tuple[int, int, int] = (255, 255, 255),
+    quality: int = 85,
+) -> str:
+    """Encode a solid-color RGB JPEG as base64 ASCII."""
+    buf = io.BytesIO()
+    Image.new("RGB", (w, h), color).save(buf, format="JPEG", quality=quality)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _gradient_rgb(w: int = 200, h: int = 120) -> Image.Image:
+    """Deterministic RGB gradient (JPEG does real work but stays close to the source)."""
+    ramp = np.tile(np.linspace(0, 255, w).astype(np.uint8), (h, 1))
+    arr = np.stack([ramp, ramp[:, ::-1], np.full((h, w), 128, dtype=np.uint8)], axis=2)
+    return Image.fromarray(arr, mode="RGB")
 
 
 class FakeEngine:
@@ -36,17 +55,38 @@ class FakeEngine:
         ]
 
 
-def test_decode_png_b64_returns_bgr_uint8():
-    arr = decode_png_b64(_png_b64(color=(255, 0, 0)))  # pure red RGB
+def test_decode_image_b64_accepts_png():
+    arr = decode_image_b64(_png_b64(color=(255, 0, 0)))  # pure red RGB
     assert arr.dtype == np.uint8
     assert arr.shape == (32, 64, 3)
     assert int(arr[0, 0, 2]) == 255  # red is channel 2 in BGR
     assert int(arr[0, 0, 0]) == 0
 
 
-def test_decode_png_b64_invalid_raises_value_error():
+def test_decode_image_b64_accepts_jpeg():
+    arr = decode_image_b64(_jpeg_b64(color=(255, 0, 0)))  # pure red RGB
+    assert arr.dtype == np.uint8
+    assert arr.shape == (32, 64, 3)
+    assert int(arr[..., 2].mean()) >= 250  # red channel survives q85 (BGR index 2)
+    assert int(arr[..., 0].mean()) <= 5
+
+
+def test_decode_image_b64_jpeg_close_to_png():
+    img = _gradient_rgb()
+    png_buf, jpeg_buf = io.BytesIO(), io.BytesIO()
+    img.save(png_buf, format="PNG")
+    img.save(jpeg_buf, format="JPEG", quality=85)
+    png_arr = decode_image_b64(base64.b64encode(png_buf.getvalue()).decode("ascii"))
+    jpeg_arr = decode_image_b64(base64.b64encode(jpeg_buf.getvalue()).decode("ascii"))
+    mae = float(np.mean(np.abs(png_arr.astype(np.int16) - jpeg_arr.astype(np.int16))))
+    assert mae < 3
+
+
+def test_decode_image_b64_invalid_raises_value_error():
     with pytest.raises(ValueError):
-        decode_png_b64("not-valid-base64!!")
+        decode_image_b64("not-valid-base64!!")
+    with pytest.raises(ValueError):
+        decode_image_b64(base64.b64encode(b"definitely not an image").decode("ascii"))
 
 
 def test_spot_handler_returns_spots_and_elapsed():

@@ -29,11 +29,11 @@ def _text_png_b64() -> str:
 
 
 def test_paddle_spot_finds_hello():
-    from retran_core.ocr.image import decode_png_b64
+    from retran_core.ocr.image import decode_image_b64
     from retran_core.ocr.paddle_engine import PaddleOcrEngine
 
     engine = PaddleOcrEngine(lang="en")
-    spots = engine.spot(decode_png_b64(_text_png_b64()))
+    spots = engine.spot(decode_image_b64(_text_png_b64()))
     assert len(spots) > 0
     joined = " ".join(s.text.upper() for s in spots)
     assert "HELLO" in joined  # Rec model may split lines; require the word somewhere
