@@ -87,7 +87,7 @@
   - `Annotate_DrawsPillBehindText`: frame **trắng** 640×360 + box `(0.1,0.1,0.3,0.1,"Hello","Xin chào")` → decode JPEG → box ở `x=64, y=36, w=192, h=36`, text ở `ly = 36+36+2 = 74`, font 12,8 px ⇒ pill ≈ `x 62..124, y 73..90`.
     - **Pill tồn tại**: đếm pixel tối (`R,G,B < 60`) trong vùng `x 60..135, y 73..92` → `> 200`.
     - **Chữ trắng trên pill**: đếm pixel trắng (`> 230` cả 3 kênh) trong vùng `x 64..120, y 76..88` → `> 20` (vùng này nằm trong pill nên pixel trắng chỉ có thể là chữ).
-  - `Annotate_LargeFrame_DoesNotCopyFullPixels`: frame 1920×1080, warm-up 1 lần, đo `GC.GetAllocatedBytesForCurrentThread()` trước/sau lần 2 → delta **< 4 MB** (trước fix ~8,5 MB do `CopyPixels`).
+  - `Annotate_LargeFrame_ManagedAllocationStaysBounded` (brief đặt tên `Annotate_LargeFrame_DoesNotCopyFullPixels` — đã đổi theo `31efb20`): frame 1920×1080, warm-up 1 lần, đo `GC.GetAllocatedBytesForCurrentThread()` trước/sau lần 2 → delta **< 4 MB** (trước fix ~8,5 MB do `CopyPixels`).
   - Cập nhật 4 call site cũ sang `AnnotatedFrame` (`.Jpeg`), giữ nguyên assert hiện có.
 - [ ] **Step 2: Chạy RED**: `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj" -- --filter-class "FrameAnnotatorTests"` → 3 test mới fail (record chưa có / pill chưa có / allocation > 4 MB).
 - [ ] **Step 3: Implement**
@@ -249,7 +249,7 @@
 - [x] **Step 4: Cập nhật `AGENTS.md`** (nếu user duyệt revision) + revision note trong spec. — user duyệt in principle; đã thêm 2 hàng budget (annotate ≤ 40 ms/khung @ ~60 box; JSON-RPC stdio ≈ 0 cho khung qua MMF, khác ≤ 1,5 MB/s) + note sidecar; spec camera/preview có `## Revision (2026-10-21)` (khung qua `Local\ReTran.Preview.V1`, `frame.annotated` = `{seq,w,h}`).
 - [x] **Step 5: Commit** — `docs: record M5 hot-path fixes and revised budgets`
 
-**Kết quả Task 6 (2026-10-21, docs-only):** scripted — Core 0,455–0,46 core (PASS ≤ 0,55) · IPC 0,058 MB/s (PASS theo budget ≤ 1,5; mốc DoD 0,05 chỉ hụt 0,008) · `ann_line` 0,1 KB (PASS ≤ 0,2) · Core RAM max 321–330 MB (thấp hơn baseline 546). **Annotate 37,6 ms @63 box không đạt 27 ms** (sàn GDI+ ~19–22 ms cố định: downscale ~9 + JPEG ~5 + dest/ToArray) → revision **≤ 40 ms/khung @ ~60 box** (user duyệt in principle, đã ghi AGENTS.md). **Sidecar Paddle ~1,25 core / ~2 GB là blocker duy nhất còn lại của budget tổng** (open item — chờ user quyết ONNX Runtime hay giữ Paddle). App-driven **chưa đo lại — pending user session**.
+**Kết quả Task 6 (2026-10-21, docs-only):** scripted — Core 0,455–0,46 core (PASS ≤ 0,55) · IPC 0,058 MB/s (PASS theo budget ≤ 1,5; mốc DoD 0,05 chỉ hụt 0,008) · `ann_line` 0,1 KB (PASS ≤ 0,2) · Core RAM max 321–330 MB (thấp hơn baseline 546). **Annotate 37,6 ms @63 box không đạt 27 ms** (sàn GDI+ ~19–22 ms cố định: downscale ~9 + JPEG ~5 + dest/ToArray) → revision **≤ 40 ms/khung @ ~60 box** (user duyệt in principle, đã ghi AGENTS.md). **Sidecar Paddle ~1,25 core / ~2 GB (app-driven 19/10, không đo lại) là blocker duy nhất còn lại của budget tổng** (open item — chờ user quyết ONNX Runtime hay giữ Paddle). App-driven **chưa đo lại — pending user session**.
 
 ---
 

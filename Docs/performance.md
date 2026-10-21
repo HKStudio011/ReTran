@@ -647,7 +647,7 @@ Cả hai đều trỏ về **cùng chỗ sửa** (giảm khối lượng vẽ m�
 - `%TEMP%\opencode\annotate_bench.ps1` — micro-benchmark GDI+ tái lập `FrameAnnotator` (downscale / vẽ N box / JPEG / base64).
 - CSV thô: `%TEMP%\opencode\perf_samples.csv`, `perf_samples2.csv`, `ab_annotate_*.csv`.
 
-> **Ghi chú (2026-10-21):** các CSV của lượt M5 (19/10) **đã bị dọn cùng `%TEMP%`** — đường dẫn ở danh sách trên chỉ còn giá trị mô tả phương pháp, derive lại theo mô tả nếu cần; CSV các lượt sau (20–21/10) còn trong `%TEMP%\opencode`. Script đo mới nằm trong SDD workspace + bench project (xem §M5-fix — Lệnh reproduce).
+> **Ghi chú (2026-10-21):** các CSV của lượt M5 (19/10) **đã bị dọn cùng `%TEMP%`** — đường dẫn ở danh sách trên chỉ còn giá trị mô tả phương pháp, derive lại theo mô tả nếu cần; CSV lượt 20/10 còn trong `%TEMP%\opencode`; **CSV T6c/T6d/T6e (21/10 — nguồn bảng trước→sau của §M5-fix) nằm cạnh probe script trong SDD workspace**: `.superpowers/sdd/2026-10-19-pipeline-perf-fix/probe_T6{c,d,e}_*.csv`. Script đo mới nằm trong SDD workspace + bench project (xem §M5-fix — Lệnh reproduce).
 
 ---
 
@@ -713,6 +713,7 @@ A/B post-fix (T6c 10 fps vs T6d 2 fps: 46,0 % vs 11,0 %, 8,77 vs 1,72 fps, **cù
 ### Lệnh reproduce (M5-fix)
 
 - SDD workspace: `.superpowers/sdd/2026-10-19-pipeline-perf-fix/probe_after.ps1` (đo) + `probe_diag.ps1` (chẩn đoán stall stderr).
+- CSV thô T6c/T6d/T6e: `.superpowers/sdd/2026-10-19-pipeline-perf-fix/probe_T6{c,d,e}_*.csv` (cạnh probe script — nguồn bảng trước→sau ở trên).
 - Benchmark code thật: `C:\Users\trucn\AppData\Local\Temp\opencode\annotbench\` — `dotnet run -c Debug` (reference `ReTran.Core`; nằm trong `%TEMP%` nên có thể bị dọn như các script cũ).
 - Script `%TEMP%\opencode\` cũ của M5 **đã bị dọn 2026-10-21** (xem ghi chú ở mục reproduce của §M5).
 
