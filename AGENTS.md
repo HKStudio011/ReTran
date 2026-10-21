@@ -35,7 +35,8 @@ ReTran Project/
 ├── ReTran.OCR/                # Python OCR sidecar project `retran-core` — uv-managed .venv (CPython 3.13)
 │   └── hook/                  # (planned) Rust cdylib for exclusive-fullscreen game capture
 ├── ReTran.Tests/              # xUnit v3 test project (core + app unit tests)
-└── Docs/                      # design notes, decisions; superpowers/specs + superpowers/plans
+├── Docs/                      # design notes, decisions; superpowers/specs + superpowers/plans
+└── Tools/Perf/                # script đo perf (probe, diag, benchmark annotate, CSV số đo)
 ```
 
 Current state: M0 IPC backbone done (App launches Core, Core spawns sidecar, all pingable). M1 Capture done in sandbox, merged. App UI done: control page `/` with a large live preview. M2–M5 done: OCR spotting + translation cache, GDI/HDR capture fallback, GPU OCR (paddle cu129), and the **virtual camera** — the App publishes the annotated frame into shared memory and the native `ReTran.Camera` DirectShow filter serves it to OBS/Zoom/Discord (keeps the last frame on Stop, shows black when the app exits). The old OBS HTTP overlay feed (`127.0.0.1:17863`) is gone. Rust hook planned, not started.

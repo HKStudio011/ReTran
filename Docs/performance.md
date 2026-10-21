@@ -712,9 +712,9 @@ A/B post-fix (T6c 10 fps vs T6d 2 fps: 46,0 % vs 11,0 %, 8,77 vs 1,72 fps, **cù
 
 ### Lệnh reproduce (M5-fix)
 
-- SDD workspace: `.superpowers/sdd/2026-10-19-pipeline-perf-fix/probe_after.ps1` (đo) + `probe_diag.ps1` (chẩn đoán stall stderr).
-- CSV thô T6c/T6d/T6e: `.superpowers/sdd/2026-10-19-pipeline-perf-fix/probe_T6{c,d,e}_*.csv` (cạnh probe script — nguồn bảng trước→sau ở trên).
-- Benchmark code thật: `C:\Users\trucn\AppData\Local\Temp\opencode\annotbench\` — `dotnet run -c Debug` (reference `ReTran.Core`; nằm trong `%TEMP%` nên có thể bị dọn như các script cũ).
+- Probe (đo) + probe chẩn đoán stall stderr: `Tools/Perf/probe_after.ps1`, `Tools/Perf/probe_diag.ps1` — hướng dẫn + điều kiện đo xem `Tools/Perf/README.md`.
+- CSV thô T6c/T6d/T6e: `Tools/Perf/data/probe_T6{c,d,e}_*.csv` (nguồn bảng trước→sau ở trên; kèm `probe_T6b_*.csv` — bằng chứng run bị stall stderr). CSV khác của round fix 20–21/10 cũng nằm trong `Tools/Perf/data/`.
+- Benchmark code thật: `Tools/Perf/annotbench/` — `dotnet run -c Debug --project Tools/Perf/annotbench` (reference `ReTran.Core`).
 - Script `%TEMP%\opencode\` cũ của M5 **đã bị dọn 2026-10-21** (xem ghi chú ở mục reproduce của §M5).
 
 ---
