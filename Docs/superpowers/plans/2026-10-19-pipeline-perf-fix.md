@@ -238,7 +238,7 @@
 ### Task 6: Đo lại + docs + đề xuất revision budget
 
 **Files:**
-- Modify: `Docs/performance.md` (mục mới `### M5-fix — sau tối ưu (2026-10-…)`)
+- Modify: `Docs/performance.md` (mục mới `M5-fix — sau tối ưu (2026-10-…)` — `##` trong performance.md)
 - Modify: `AGENTS.md` (budget rows — **chỉ sau khi user duyệt**)
 - Modify: `Docs/superpowers/specs/2026-10-17-virtual-camera-preview-design.md` (ghi revision: preview qua MMF, payload `frame.annotated` mới, link plan này)
 - Modify: plan này (tick + số cuối)

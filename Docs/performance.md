@@ -637,7 +637,7 @@ Cả hai đều trỏ về **cùng chỗ sửa** (giảm khối lượng vẽ m�
 4. **PASS/FAIL ở đây so với budget AGENTS.md §Performance** (< 8 % CPU, < 500 MB RAM, ≤10 ms/khung, ≤1,5 MB/s). Không mục nào PASS ở CPU/RAM/annotate/IPC ⇒ **cần tradeoff được duyệt hoặc fix trước khi coi M5 "ship"** — chi tiết hướng fix ở báo cáo session.
 5. Số đo cũ (M4) **không so chéo tuyệt đối** được: M4 đo CPU `paddlepaddle` (25 s/khung, gần như không đốt Core) còn M5 đo GPU paddle (1,3 s/khung, chu kỳ dày hơn nhiều).
 6. **Nội dung màn hình không được kiểm soát giữa các lượt** (màn hình thật của user: game, cửa sổ chat, OBS preview…). Đây là lý do W đếm box để hiệu chỉnh mô hình; muốn so tuyệt đối phải cố định nội dung màn hình.
-7. **Đường gửi ảnh cho OCR lúc đo dùng PNG full-res base64** (`BgraPngEncoder.ToPngBase64`, `OcrLoop.cs:206`) — encode PNG 1920×1080 tốn kém hơn JPEG nhiều lần. **Đã fix (T4, 2026-10-21): giờ gửi JPEG q85** (`BgraJpegEncoder.ToJpegBase64`), sidecar `decode_image_b64` nhận cả PNG lẫn JPEG.
+7. **Đường gửi ảnh cho OCR lúc đo dùng PNG full-res base64** (`BgraPngEncoder.ToPngBase64`, `OcrLoop.cs` — dòng 206 ở bản trước T4, nay :215) — encode PNG 1920×1080 tốn kém hơn JPEG nhiều lần. **Đã fix (T4, 2026-10-21): giờ gửi JPEG q85** (`BgraJpegEncoder.ToJpegBase64`), sidecar `decode_image_b64` nhận cả PNG lẫn JPEG.
 
 ### Lệnh reproduce (session-scoped)
 
@@ -647,7 +647,7 @@ Cả hai đều trỏ về **cùng chỗ sửa** (giảm khối lượng vẽ m�
 - `%TEMP%\opencode\annotate_bench.ps1` — micro-benchmark GDI+ tái lập `FrameAnnotator` (downscale / vẽ N box / JPEG / base64).
 - CSV thô: `%TEMP%\opencode\perf_samples.csv`, `perf_samples2.csv`, `ab_annotate_*.csv`.
 
-> **Ghi chú (2026-10-21):** các script/CSV `%TEMP%\opencode\*` ở danh sách trên **đã bị temp cleanup xoá** — đường dẫn chỉ còn giá trị mô tả phương pháp; derive lại theo mô tả nếu cần. Script đo mới nằm trong SDD workspace + bench project (xem §M5-fix — Lệnh reproduce).
+> **Ghi chú (2026-10-21):** các CSV của lượt M5 (19/10) **đã bị dọn cùng `%TEMP%`** — đường dẫn ở danh sách trên chỉ còn giá trị mô tả phương pháp, derive lại theo mô tả nếu cần; CSV các lượt sau (20–21/10) còn trong `%TEMP%\opencode`. Script đo mới nằm trong SDD workspace + bench project (xem §M5-fix — Lệnh reproduce).
 
 ---
 
@@ -673,10 +673,10 @@ Cả hai đều trỏ về **cùng chỗ sửa** (giảm khối lượng vẽ m�
 | `rpc_MBps` (stdout) | 2,93 | **0,058** | 0,063 |
 | `ann_w`×`ann_h` | 1920×1080 (bug: báo khung nguồn) | **1280×720** | 1280×720 |
 | preview MMF `Local\ReTran.Preview.V1` | — | seq 1744, 1280×720, **JPEG 154 KB, magic `FF D8` OK** | 157 513 B, magic OK |
-| `translated` / `cache_requests` | — | 171 / 2 | 178 / 2 |
-| sidecar (process/RAM) | 1,25 core / ~2 GB / 362 MB VRAM | 2 process / ~2,0 GB | 2 process / ~1,97 GB |
+| `translated` / `cache_requests` | — | 171 / 2 | 178 / 1 |
+| sidecar (process/RAM) | 1,25 core / ~2 GB / 362 MB VRAM (app-driven 19/10, không đo lại) | 2 process / ~2,0 GB | 2 process / ~1,73 GB |
 
-A/B post-fix (T6c 10 fps vs T6d 2 fps: 46,0 % vs 11,0 %, 8,77 vs 1,72 fps) cho slope ≈ 4,9 điểm/khung ≈ 49 ms/khung — **bị thổi phồng** bởi chênh tần chu kỳ OCR giữa hai lượt (3,9 vs 2,3 chu kỳ/s); số ms/khung chính xác dùng benchmark code thật bên dưới.
+A/B post-fix (T6c 10 fps vs T6d 2 fps: 46,0 % vs 11,0 %, 8,77 vs 1,72 fps, **cùng nội dung màn hình — 63 box = 63 box**) cho slope ≈ 4,9 điểm/khung ≈ 49 ms/khung — slope so sánh được nhờ cùng nội dung, nhưng **bị thổi phồng** bởi chênh tần chu kỳ OCR giữa hai lượt (3,9 vs 2,3 chu kỳ/s); số ms/khung chính xác dùng benchmark code thật bên dưới.
 
 ### Benchmark code thật (Debug, frame synthetic 1920×1080, 20 reps/N, avg / p50 / min)
 
@@ -689,18 +689,18 @@ A/B post-fix (T6c 10 fps vs T6d 2 fps: 46,0 % vs 11,0 %, 8,77 vs 1,72 fps) cho s
 | 300 box | 86,40 ms | 79,41 | 61,12 | 314,0 KB |
 
 - **Sàn GDI+ đo được ≈ 19–22 ms cố định/khung:** downscale ~9 ms + JPEG ~5 ms + dest/ToArray — không giảm thêm được nếu giữ GDI+ + JPEG 1280-wide.
-- **Reconciliation (trước vs sau):** pre-fix ≈ 37,6 − ~20 ms (vẽ 9 lượt `DrawString` thay vì pill: 33 ms @77 box → 9 ms) − ~6 ms (copy BGRA + JSON/base64/pipe) ≈ **63–68 ms/khung** — khớp baseline đo được 63–69 ms/khung (M5: A/B ~63 ms, suy từ W ~69 ms).
+- **Reconciliation (trước vs sau):** pre-fix ≈ 37,6 (post-fix) **+ ~24** (vẽ 9 lượt `DrawString` @77 box: 33 ms so với pill 9 ms) **+ ~5** (copy BGRA + dựng JSON/base64 + ghi pipe) ≈ **66–68 ms** — khớp baseline đo được 63–69 ms/khung (M5: A/B ~63 ms, suy từ W ~69 ms).
 
 ### Đối chiếu budget (scripted; camera/VRAM không đo lại round này)
 
 | Budget | Đo được | Kết luận |
 | --- | --- | --- |
 | IPC `frame.annotated` ≤ 1,5 MB/s | **0,058 MB/s** (2,93 → 0,058) | **PASS** — JPEG khung giờ qua MMF `Local\ReTran.Preview.V1`, stdio chỉ còn notify `{seq,w,h}` |
-| Annotate ≤ 10 ms/khung (budget cũ) | **37,6 ms @63 box** | **FAIL (3,8×)** — sàn GDI+ 19–22 ms cố định |
-| Annotate — revision **≤ 40 ms/khung @ ~60 box** (benchmark code thật, Debug; user duyệt in principle 2026-10-21) | 37,6 ms @63 box | **PASS** (revision đã ghi vào AGENTS.md) |
+| Annotate ≤ 10 ms/khung (budget cũ) | **37,6 ms @63 box** | **FAIL (3,8×)** — sàn GDI+ 19–22 ms cố định; DoD plan (≤ 27 ms) cũng **miss** |
+| Annotate — revision **≤ 40 ms/khung @ ~60 box** (benchmark code thật, Debug; user duyệt in principle 2026-10-21) | 37,6 ms @63 box | **PASS** theo revision **đề xuất** — không phải pass theo DoD cũ (≤ 27 ms, miss); revision đã ghi vào AGENTS.md |
 | Core CPU scripted (target plan ≤ 0,55 core) | **0,455–0,46 core** (0,81 → −43 %) | **PASS** |
 | Core RAM khi probe | max **321–330 MB** (546 → −40 %) | **PASS** (thấp hơn baseline rõ rệt) |
-| Tổng CPU < 8 % / RAM < 500 MB | sidecar Paddle **~1,25 core / ~2 GB** | **vẫn FAIL** — nguyên nhân duy nhất còn lại là sidecar (open item 2026-10-19: chờ user quyết ONNX Runtime hay giữ Paddle) |
+| Tổng CPU < 8 % / RAM < 500 MB | sidecar Paddle **~1,25 core / ~2 GB** (app-driven 19/10, không đo lại) | **vẫn FAIL** — nguyên nhân duy nhất còn lại là sidecar (open item 2026-10-19: chờ user quyết ONNX Runtime hay giữ Paddle) |
 | Camera ~10 fps / OCR VRAM < 1 GB | 8,5–9 fps / 362 MB | không đổi (không đo lại round này) |
 
 ### Ghi chú / hạn chế đo
