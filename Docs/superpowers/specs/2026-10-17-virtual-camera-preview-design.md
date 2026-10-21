@@ -102,3 +102,7 @@ App:
 5. Port 17863 không còn listener; `/overlay` biến mất khỏi code và wwwroot.
 6. Overlay local đè game hoạt động không đổi.
 7. Đo performance với game thật, ghi số vào `Docs/performance.md`.
+
+## Revision (2026-10-21)
+
+Plan [2026-10-19-pipeline-perf-fix](../plans/2026-10-19-pipeline-perf-fix.md) đã land và đổi đường truyền khung annotated so với thiết kế trên: JPEG của khung annotated giờ đi qua **shared memory** `Local\ReTran.Preview.V1` (Core ghi / App đọc, seqlock giống camera); notification `frame.annotated` chỉ còn `{seq, w, h}` (w/h là kích thước khung **annotated** ≤1280, không phải khung nguồn như bug cũ). Camera/filter không đổi (`Local\ReTran.Camera.V1` + heartbeat + `ReTran.Camera.dll` vẫn như trên). Số đo trước/sau: `Docs/performance.md` §M5-fix.

@@ -136,7 +136,7 @@ Get-CimInstance Win32_Processor; Get-CimInstance Win32_ComputerSystem; Get-CimIn
 | RAM | 68.475.105.280 bytes (~63,8 GiB) | `Get-CimInstance Win32_ComputerSystem.TotalPhysicalMemory` |
 | GPU | NVIDIA GeForce RTX 5060 Ti — **không dùng trong measurement này** | `Get-CimInstance Win32_VideoController` |
 
-- **Perf gate T2/T3 applied:** pin `PP-OCRv5_mobile_det` + `en_PP-OCRv5_mobile_rec` (bỏ doc-preprocess pipelines), downscale long-side **1280 px** trước detect (Python-side trong `decode_png_b64` — áp cho cả one-shot lẫn loop). Paddle **CPU build** → VRAM 0.
+- **Perf gate T2/T3 applied:** pin `PP-OCRv5_mobile_det` + `en_PP-OCRv5_mobile_rec` (bỏ doc-preprocess pipelines), downscale long-side **1280 px** trước detect (Python-side trong `decode_image_b64` — tên lúc đo là `decode_png_b64`, T4 (2026-10-21) đã đổi để nhận JPEG **hoặc** PNG — áp cho cả one-shot lẫn loop). Paddle **CPU build** → VRAM 0.
 - **Fixture:** `%TEMP%\m3-perf-1080p.png` (1920×1080, Arial 64pt, 2 dòng) + `%TEMP%\m3-perf-640x96.png` (640×96, Arial 48pt) — tạo bằng script PIL đúng brief Step 3.
 - **Nguồn loop đo được:** cửa sổ Notepad (`--hwnd`) chứa text fixture — vì `--monitor 0` fail (xem disclosure ở mục loop).
 
@@ -583,7 +583,7 @@ GATE Task 4 (user, 2026-10-19): PASS cả 4 mục — OBS thấy khung thật + 
 
 ### A/B — chi phí nằm ở đâu (Core scripted `--serve`, cùng nguồn màn hình, không app)
 
-Cơ chế cần biết: annotate loop chạy theo `CoreConfig.CaptureFps` (**10**, đọc lúc Core khởi động); tham số `captureFps` của `core.start` **mới chỉ validate, chưa nối vào capture source** (capture luôn 10 fps — comment trong `ParseStart`). Nên đổi config chỉ đổi nhịp **annotate**.
+Cơ chế cần biết: annotate loop chạy theo `CoreConfig.CaptureFps` (**10**, đọc lúc Core khởi động); tham số `captureFps` của `core.start` **đã được nối vào capture source** (T5, 2026-10-21) — nhịp **annotate** vẫn theo config đọc lúc khởi động. (Lịch sử: lúc đo A/B dưới đây tham số này **mới chỉ validate, chưa nối** — capture luôn 10 fps.)
 
 | Lượt | Cấu hình | box/khung | annotated fps | IPC MB/s | KB/khung | Core CPU avg / max (1 core) | Core RAM avg / max |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -632,12 +632,12 @@ Cả hai đều trỏ về **cùng chỗ sửa** (giảm khối lượng vẽ m�
 ### Ghi chú / hạn chế đo
 
 1. **Thiếu VRAM cho Core/App đo bằng counter `GPU Process Memory`** — Core/App ở 0 (chỉ OBS/sidecar hiện), nên VRAM thật của app (D3D/WebView) có thể cao hơn số 43 MB.
-2. **`captureFps` chưa nối vào capture source** (xem trên) — muốn hạ nhịp capture phải sửa code; A/B chỉ tách được annotate.
+2. **`captureFps` đã được nối vào capture source** (T5, 2026-10-21; lúc đo A/B dưới đây **chưa nối** — xem trên) — nhịp annotate vẫn theo `CoreConfig.CaptureFps` đọc lúc khởi động; A/B dưới đây chỉ tách được annotate.
 3. **Google 429** vẫn là blocker của dòng dịch (như M4): scripted all-miss liên tục fail `translate failed ... HTTP 429`.
 4. **PASS/FAIL ở đây so với budget AGENTS.md §Performance** (< 8 % CPU, < 500 MB RAM, ≤10 ms/khung, ≤1,5 MB/s). Không mục nào PASS ở CPU/RAM/annotate/IPC ⇒ **cần tradeoff được duyệt hoặc fix trước khi coi M5 "ship"** — chi tiết hướng fix ở báo cáo session.
 5. Số đo cũ (M4) **không so chéo tuyệt đối** được: M4 đo CPU `paddlepaddle` (25 s/khung, gần như không đốt Core) còn M5 đo GPU paddle (1,3 s/khung, chu kỳ dày hơn nhiều).
 6. **Nội dung màn hình không được kiểm soát giữa các lượt** (màn hình thật của user: game, cửa sổ chat, OBS preview…). Đây là lý do W đếm box để hiệu chỉnh mô hình; muốn so tuyệt đối phải cố định nội dung màn hình.
-7. **Đường gửi ảnh cho OCR dùng PNG full-res base64** (`BgraPngEncoder.ToPngBase64`, `OcrLoop.cs:206`) — encode PNG 1920×1080 tốn kém hơn JPEG nhiều lần, là ứng viên fix cho phần "capture + chu kỳ OCR ≈ 0,2 core" (chưa đo riêng trong mục này).
+7. **Đường gửi ảnh cho OCR lúc đo dùng PNG full-res base64** (`BgraPngEncoder.ToPngBase64`, `OcrLoop.cs:206`) — encode PNG 1920×1080 tốn kém hơn JPEG nhiều lần. **Đã fix (T4, 2026-10-21): giờ gửi JPEG q85** (`BgraJpegEncoder.ToJpegBase64`), sidecar `decode_image_b64` nhận cả PNG lẫn JPEG.
 
 ### Lệnh reproduce (session-scoped)
 
@@ -646,6 +646,75 @@ Cả hai đều trỏ về **cùng chỗ sửa** (giảm khối lượng vẽ m�
 - `%TEMP%\opencode\screen_activity.ps1` — hash ảnh chụp màn hình 2 s/lần + GPU util của game + CPU máy (đối chứng "màn hình có đổi không").
 - `%TEMP%\opencode\annotate_bench.ps1` — micro-benchmark GDI+ tái lập `FrameAnnotator` (downscale / vẽ N box / JPEG / base64).
 - CSV thô: `%TEMP%\opencode\perf_samples.csv`, `perf_samples2.csv`, `ab_annotate_*.csv`.
+
+> **Ghi chú (2026-10-21):** các script/CSV `%TEMP%\opencode\*` ở danh sách trên **đã bị temp cleanup xoá** — đường dẫn chỉ còn giá trị mô tả phương pháp; derive lại theo mô tả nếu cần. Script đo mới nằm trong SDD workspace + bench project (xem §M5-fix — Lệnh reproduce).
+
+---
+
+## M5-fix — sau tối ưu (2026-10-21)
+
+### Bối cảnh đo
+
+- **Máy:** như §M5 (i5-13400F 10c/16t, RTX 5060 Ti, `paddlepaddle-gpu` cu129). Nền máy vẫn không idle (user app đang chạy) — số CPU ghi theo CPU-seconds per-process như M5.
+- **Điều kiện probe scripted:** annotate 10 fps, cache all-miss, settle 40 s + measure 60 s (**bỏ 15 s đầu**); spawn `ReTran.Core --serve` như lượt W của M5.
+- **Màn hình:** Notepad 260 dòng maximize — **khác** lượt W 19/10 (màn hình game+chat), nên `boxes_avg` thấp hơn (63,1 vs 76,9); so sánh CPU giữa trước/sau cần đọc kèm benchmark theo box bên dưới, không so chéo box tuyệt đối.
+- **Benchmark code thật:** project riêng `annotbench` (Debug, reference `ReTran.Core`, gọi thẳng `FrameAnnotator.Annotate`), frame synthetic 1920×1080, 20 reps.
+- **App-driven chưa đo lại — pending user game session:** số app-driven cũ (Core 1,85 core / 923 MB) ở bảng §M5 chỉ là **mốc trước fix**, chưa có số sau fix để so.
+
+### Trước → sau (scripted)
+
+| Chỉ số | W — trước fix (19/10, màn hình game+chat) | T6c — sau fix (21/10) | T6e — lặp lại |
+| --- | --- | --- | --- |
+| `boxes_avg` (box/khung) | 76,9 | 63,1 | 63 |
+| annotated | 8,78 fps | 391 frame @ 8,77 fps | 391 @ 9,0 fps |
+| Core CPU avg / max (% 1 core) | 80,8 / 102,8 | **46,0 / 57,4** | **45,5 / 64,0** |
+| Core RAM avg / max (MB) | 369 / 546 | **247 / 330** | 251 / 321 |
+| `ann_line_KB_avg` | 337,6 | **0,1** | 0,1 |
+| `rpc_MBps` (stdout) | 2,93 | **0,058** | 0,063 |
+| `ann_w`×`ann_h` | 1920×1080 (bug: báo khung nguồn) | **1280×720** | 1280×720 |
+| preview MMF `Local\ReTran.Preview.V1` | — | seq 1744, 1280×720, **JPEG 154 KB, magic `FF D8` OK** | 157 513 B, magic OK |
+| `translated` / `cache_requests` | — | 171 / 2 | 178 / 2 |
+| sidecar (process/RAM) | 1,25 core / ~2 GB / 362 MB VRAM | 2 process / ~2,0 GB | 2 process / ~1,97 GB |
+
+A/B post-fix (T6c 10 fps vs T6d 2 fps: 46,0 % vs 11,0 %, 8,77 vs 1,72 fps) cho slope ≈ 4,9 điểm/khung ≈ 49 ms/khung — **bị thổi phồng** bởi chênh tần chu kỳ OCR giữa hai lượt (3,9 vs 2,3 chu kỳ/s); số ms/khung chính xác dùng benchmark code thật bên dưới.
+
+### Benchmark code thật (Debug, frame synthetic 1920×1080, 20 reps/N, avg / p50 / min)
+
+| Snapshot | avg | p50 | min | JPEG |
+| --- | --- | --- | --- | --- |
+| `null` (không vẽ box) | 18,98 ms | 16,95 | 14,89 | 263,2 KB |
+| 0 box | 21,96 ms | 21,91 | 17,34 | 263,2 KB |
+| **63 box** | **37,59 ms** | 38,25 | 29,56 | 291,6 KB |
+| 150 box | 48,38 ms | 45,37 | 37,50 | 307,8 KB |
+| 300 box | 86,40 ms | 79,41 | 61,12 | 314,0 KB |
+
+- **Sàn GDI+ đo được ≈ 19–22 ms cố định/khung:** downscale ~9 ms + JPEG ~5 ms + dest/ToArray — không giảm thêm được nếu giữ GDI+ + JPEG 1280-wide.
+- **Reconciliation (trước vs sau):** pre-fix ≈ 37,6 − ~20 ms (vẽ 9 lượt `DrawString` thay vì pill: 33 ms @77 box → 9 ms) − ~6 ms (copy BGRA + JSON/base64/pipe) ≈ **63–68 ms/khung** — khớp baseline đo được 63–69 ms/khung (M5: A/B ~63 ms, suy từ W ~69 ms).
+
+### Đối chiếu budget (scripted; camera/VRAM không đo lại round này)
+
+| Budget | Đo được | Kết luận |
+| --- | --- | --- |
+| IPC `frame.annotated` ≤ 1,5 MB/s | **0,058 MB/s** (2,93 → 0,058) | **PASS** — JPEG khung giờ qua MMF `Local\ReTran.Preview.V1`, stdio chỉ còn notify `{seq,w,h}` |
+| Annotate ≤ 10 ms/khung (budget cũ) | **37,6 ms @63 box** | **FAIL (3,8×)** — sàn GDI+ 19–22 ms cố định |
+| Annotate — revision **≤ 40 ms/khung @ ~60 box** (benchmark code thật, Debug; user duyệt in principle 2026-10-21) | 37,6 ms @63 box | **PASS** (revision đã ghi vào AGENTS.md) |
+| Core CPU scripted (target plan ≤ 0,55 core) | **0,455–0,46 core** (0,81 → −43 %) | **PASS** |
+| Core RAM khi probe | max **321–330 MB** (546 → −40 %) | **PASS** (thấp hơn baseline rõ rệt) |
+| Tổng CPU < 8 % / RAM < 500 MB | sidecar Paddle **~1,25 core / ~2 GB** | **vẫn FAIL** — nguyên nhân duy nhất còn lại là sidecar (open item 2026-10-19: chờ user quyết ONNX Runtime hay giữ Paddle) |
+| Camera ~10 fps / OCR VRAM < 1 GB | 8,5–9 fps / 362 MB | không đổi (không đo lại round này) |
+
+### Ghi chú / hạn chế đo
+
+1. **Gotcha vận hành probe (2026-10-21):** redirect stderr của Core rồi đọc lười (`ReadToEndAsync` trong probe) làm **stall load model Paddle** của sidecar trong môi trường này — sidecar kẹt ~416 MB, **0 chu kỳ OCR trong 120 s**. Probe chạy được **kế thừa** stderr của Core. Harness Core tự viết phải drain stderr bằng reader event-based (`BeginErrorReadLine`) hoặc kế thừa stderr.
+2. **Chênh A/B vs benchmark code thật:** slope A/B post-fix (≈49 ms/khung) bị thổi phồng bởi chênh tần chu kỳ OCR giữa hai lượt (3,9 vs 2,3 chu kỳ/s) — benchmark code thật (37,6 ms @63 box) là số/khung chính thức.
+3. **App-driven chưa đo lại (pending user session):** cần mở App + game + OBS + camera thật ≥ 2 phút × 2 cửa sổ để đo lại sau fix (kỳ vọng Core ≤ 1,2 core theo DoD plan) và nhờ user xác nhận pill trên preview/camera bằng mắt.
+4. **Google 429** vẫn là blocker của nhánh dịch thành công (như M4/M5) — `translated` ở bảng trên là số notification `frame.translated`, không phải bản dịch thành công.
+
+### Lệnh reproduce (M5-fix)
+
+- SDD workspace: `.superpowers/sdd/2026-10-19-pipeline-perf-fix/probe_after.ps1` (đo) + `probe_diag.ps1` (chẩn đoán stall stderr).
+- Benchmark code thật: `C:\Users\trucn\AppData\Local\Temp\opencode\annotbench\` — `dotnet run -c Debug` (reference `ReTran.Core`; nằm trong `%TEMP%` nên có thể bị dọn như các script cũ).
+- Script `%TEMP%\opencode\` cũ của M5 **đã bị dọn 2026-10-21** (xem ghi chú ở mục reproduce của §M5).
 
 ---
 

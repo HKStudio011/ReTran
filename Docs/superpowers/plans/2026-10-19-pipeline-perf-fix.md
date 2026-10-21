@@ -243,11 +243,13 @@
 - Modify: `Docs/superpowers/specs/2026-10-17-virtual-camera-preview-design.md` (ghi revision: preview qua MMF, payload `frame.annotated` mới, link plan này)
 - Modify: plan này (tick + số cuối)
 
-- [ ] **Step 1: Đo app-driven**: mở `ReTran.App` + game + OBS preview + device camera (không stream), sampler `perf_sample2.ps1` ≥ 2 phút × 2 cửa sổ; ghi app/core/sidecar CPU-RAM, camera fps (`Δseq/2`), và kiểm tra preview + camera đúng pill (nhờ user xác nhận hình).
-- [ ] **Step 2: Đo scripted**: probe `T6` cùng tham số W (60 s) để so 1-1 với baseline 0,81 core / 2,93 MB/s.
-- [ ] **Step 3: Ghi `Docs/performance.md`**: bảng trước→sau (annotate ms/khung, Core cpu, IPC stdio, RAM max, camera fps) + kết luận PASS/FAIL mới + đề xuất revision budget (annotate ≤ 25 ms/khung; IPC stdio "≈0 — frame qua MMF"; RAM tổng vẫn chờ quyết định sidecar).
-- [ ] **Step 4: Cập nhật `AGENTS.md`** (nếu user duyệt revision) + revision note trong spec.
-- [ ] **Step 5: Commit** — `docs: record M5 hot-path fixes and revised budgets`
+- [ ] **Step 1: Đo app-driven**: mở `ReTran.App` + game + OBS preview + device camera (không stream), sampler `perf_sample2.ps1` ≥ 2 phút × 2 cửa sổ; ghi app/core/sidecar CPU-RAM, camera fps (`Δseq/2`), và kiểm tra preview + camera đúng pill (nhờ user xác nhận hình). — **chưa đo lại (pending user game session, 2026-10-21)**; số app-driven cũ (Core 1,85 core / RAM 923 MB avg / 1803 max) ở bảng M5 chỉ là **mốc trước fix**.
+- [x] **Step 2: Đo scripted**: probe `T6` cùng tham số W (60 s) để so 1-1 với baseline 0,81 core / 2,93 MB/s. — T6c/T6e (Notepad 260 dòng, settle 40 s + measure 60 s bỏ 15 s đầu): Core **0,455–0,46 core** (baseline 0,81; −43 %), `rpc_MBps` **0,058–0,063** (từ 2,93), `ann_line_KB_avg` **0,1 KB** (từ 337,6), Core RAM max **321–330 MB** (từ 546); A/B post-fix T6c 10 fps (46,0 %, 8,77 fps) vs T6d 2 fps (11,0 %, 1,72 fps).
+- [x] **Step 3: Ghi `Docs/performance.md`**: bảng trước→sau (annotate ms/khung, Core cpu, IPC stdio, RAM max, camera fps) + kết luận PASS/FAIL mới + đề xuất revision budget (annotate ≤ 25 ms/khung; IPC stdio "≈0 — frame qua MMF"; RAM tổng vẫn chờ quyết định sidecar). — §M5-fix (2026-10-21) đã ghi; revision chốt theo benchmark code thật: **annotate ≤ 40 ms/khung @ ~60 box** (37,6 ms @63 box đo được — không đạt 27 ms của DoD vì sàn GDI+ 19–22 ms cố định); IPC/CPU/RAM-Core PASS-or-improved; sidecar ~1,25 core / ~2 GB là blocker của budget tổng.
+- [x] **Step 4: Cập nhật `AGENTS.md`** (nếu user duyệt revision) + revision note trong spec. — user duyệt in principle; đã thêm 2 hàng budget (annotate ≤ 40 ms/khung @ ~60 box; JSON-RPC stdio ≈ 0 cho khung qua MMF, khác ≤ 1,5 MB/s) + note sidecar; spec camera/preview có `## Revision (2026-10-21)` (khung qua `Local\ReTran.Preview.V1`, `frame.annotated` = `{seq,w,h}`).
+- [x] **Step 5: Commit** — `docs: record M5 hot-path fixes and revised budgets`
+
+**Kết quả Task 6 (2026-10-21, docs-only):** scripted — Core 0,455–0,46 core (PASS ≤ 0,55) · IPC 0,058 MB/s (PASS theo budget ≤ 1,5; mốc DoD 0,05 chỉ hụt 0,008) · `ann_line` 0,1 KB (PASS ≤ 0,2) · Core RAM max 321–330 MB (thấp hơn baseline 546). **Annotate 37,6 ms @63 box không đạt 27 ms** (sàn GDI+ ~19–22 ms cố định: downscale ~9 + JPEG ~5 + dest/ToArray) → revision **≤ 40 ms/khung @ ~60 box** (user duyệt in principle, đã ghi AGENTS.md). **Sidecar Paddle ~1,25 core / ~2 GB là blocker duy nhất còn lại của budget tổng** (open item — chờ user quyết ONNX Runtime hay giữ Paddle). App-driven **chưa đo lại — pending user session**.
 
 ---
 

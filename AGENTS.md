@@ -88,7 +88,7 @@ Diff-based: only newly appearing text lines are sent to the translator. Results 
 
 ### Virtual Camera (OBS/Zoom/Discord)
 
-Export the annotated frame through the **"ReTran Camera" virtual camera** instead of the removed HTTP overlay feed: the App renders the annotated frame in Core (JPEG, ≤1280 wide, ≤10 fps), the App decodes it and writes BGRA32 1280×720 into shared memory (`Local\ReTran.Camera.V1`, header + seqlock; heartbeat `Local\ReTran.Camera.Heartbeat` held by the writer only), and the native DirectShow source filter `ReTran.Camera.dll` (C++/MSVC, per-user HKCU registration, YUY2 1280×720@30) serves it to any capture app. Lifecycle: pipeline Stop keeps the last frame (HOLD flag); the App exiting makes the heartbeat vanish → the filter outputs black while the device stays listed. Letterbox (black bars) instead of cropping when the source is not 16:9. The in-app preview pane mirrors the same frame. Keep the frame rate modest (~10 fps); full 60 fps is not a first milestone.
+Export the annotated frame through the **"ReTran Camera" virtual camera** instead of the removed HTTP overlay feed: the App renders the annotated frame in Core (JPEG, ≤1280 wide, ≤10 fps), the App decodes it and writes BGRA32 1280×720 into shared memory (`Local\ReTran.Camera.V1`, header + seqlock; heartbeat `Local\ReTran.Camera.Heartbeat` held by the writer only), and the native DirectShow source filter `ReTran.Camera.dll` (C++/MSVC, per-user HKCU registration, YUY2 1280×720@30) serves it to any capture app. Lifecycle: pipeline Stop keeps the last frame (HOLD flag); the App exiting makes the heartbeat vanish → the filter outputs black while the device stays listed. Letterbox (black bars) instead of cropping when the source is not 16:9. The in-app preview pane mirrors the same frame. Since the 2026-10-21 hot-path fixes, the preview pane reads that frame via shared memory `Local\ReTran.Preview.V1` (Core writes, App reads — same seqlock pattern as the camera), and `captureFps` (config / `core.start`) controls the **capture** rate. Keep the frame rate modest (~10 fps); full 60 fps is not a first milestone.
 
 ## Data & Persistence
 
@@ -107,7 +107,11 @@ The app runs **while the user is gaming and streaming** — every component must
 | Translation                      | diff-based (only new text), cached, fully async — never blocks pipeline |
 | UI/overlay updates               | throttled to 10–15 fps                                                  |
 | Virtual camera output            | ~10 fps frame updates (1280×720 YUY2@30 stream to OBS/Zoom/Discord)      |
+| Đường annotate (GDI+)            | ≤ 40 ms/khung @ ~60 box (benchmark code thật, Debug) và ≤ 0,5 core @10 fps scripted |
+| JSON-RPC stdio                   | khung annotated đi qua shared memory (`Local\ReTran.Preview.V1`) ⇒ stdio ≈ 0 cho khung; mọi JSON-RPC khác ≤ 1,5 MB/s |
 | Total extra footprint            | < 8% CPU, < 500 MB RAM while gaming + streaming                          |
+
+Note (2026-10-21): RAM < 500 MB **chưa đạt** vì sidecar Paddle ~2 GB — open item (chờ quyết định), không phải regression.
 
 Every milestone must measure against this budget with a real game running and record numbers in `Docs/performance.md`. No feature ships if it breaks the budget without an approved tradeoff.
 
