@@ -244,10 +244,6 @@ try {
     $csv = $summary.GetEnumerator() | ForEach-Object { "{0}={1}" -f $_.Key, $_.Value }
     Set-Content -Path $csvPath -Value $csv -Encoding utf8
     Write-Output ("csv: {0}" -f $csvPath)
-    if ($stderrTail) {
-        Write-Output '--- core stderr tail (last 1200 chars) ---'
-        Write-Output $stderrTail.Substring([Math]::Max(0, $stderrTail.Length - 1200))
-    }
 }
 finally {
     if ($cfgExisted) { Set-Content -Path $cfgPath -Value $cfgBackup -Encoding utf8 }

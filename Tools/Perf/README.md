@@ -36,6 +36,15 @@ dotnet run -c Debug --project Tools/Perf/annotbench
   GDI fallback), nền máy không idle — số CPU ghi theo CPU-seconds per-process.
 - `annotbench` đo bằng **Debug build** (khớp binary probe), 20 reps/N, avg/p50/min.
 
+### Lưu ý
+
+- `annotbench/` **không nằm trong `ReTran Project.slnx`** — build/chạy theo nhu cầu (`dotnet run`);
+  có thể hỏng âm thầm nếu chữ ký `FrameAnnotator`/`AnnotSnapshot`/`AnnotatedFrame` đổi mà không ai chạy nó.
+- Probe tạm thời **ghi đè** `%LOCALAPPDATA%\ReTran\core\config.json` bằng `{ "captureFps": N }` rồi khôi
+  phục lại khi kết thúc — **đóng App trước khi probe** (App đang mở sẽ thấy config bị lột còn mỗi captureFps).
+- `data/probe_T6b_*.csv` là **artifact lịch sử** của lần chẩn đoán stall stderr: chứa trường `stderr_log=`
+  / `core_peak_wsMB=0` mà probe hiện tại không còn xuất — không tái tạo được bằng probe đã ship.
+
 ### Gotcha stderr (bắt buộc đọc)
 
 **Đừng redirect stderr của Core rồi đọc lười** (`ReadToEndAsync` trong probe) — trong môi trường này nó
@@ -51,10 +60,16 @@ Harness Core tự viết phải drain stderr event-based (`BeginErrorReadLine`) 
 | `data/probe_T6d_20261021_070828.csv` | Sau fix, annotate 2 fps (A/B slope, cùng nội dung màn hình) | §M5-fix — đoạn A/B post-fix |
 | `data/probe_T6e_20261021_071351.csv` | Lặp lại T6c | §M5-fix — cột "T6e — lặp lại" |
 | `data/probe_T6b_20261021_064442.csv` | Run bị stall (stderr redirect, sidecar 416 MB) | §M5-fix — ghi chú 1 (gotcha stderr) |
-| `data/ab_annotate_T1BASE.csv` | Baseline trước fix (20/10) | Round fix 20–21/10 — mốc trước khi tối ưu |
-| `data/ab_annotate_T2BASE.csv` | A/B task T2 (pool BGRA) — binary **no-pool** đối chứng | Round fix 20–21/10 — parity trong noise |
-| `data/ab_annotate_T2.csv` | A/B task T2 — binary **pool** | Round fix 20–21/10 — parity trong noise |
-| `data/ab_annotate_T3.csv` | Round T3 (JPEG khung qua MMF `Local\ReTran.Preview.V1`) | Round fix 20–21/10 — đường MMF |
+| `data/ab_annotate_T1BASE.csv` | Baseline trước fix (20/10) | Plan Task 2–3 — đối chứng A/B của lượt baseline |
+| `data/ab_annotate_T2BASE.csv` | A/B Task 2 (pool BGRA) — binary **no-pool** đối chứng | Plan Task 2 — parity A/B trong noise |
+| `data/ab_annotate_T2.csv` | A/B Task 2 — binary **pool** | Plan Task 2 — parity A/B trong noise |
+| `data/ab_annotate_T3.csv` | Round Task 3 (JPEG khung qua MMF `Local\ReTran.Preview.V1`) | Plan Task 3 — đường MMF |
 
-CSV mới do probe sinh ra nằm cạnh script (`Tools/Perf/probe_<Label>_<timestamp>.csv`) — nếu muốn giữ làm
-số liệu chính thức, copy vào `data/` và thêm dòng vào bảng trên.
+Bốn CSV `ab_annotate_*` là bằng chứng **Task 2** (pool A/B parity `T2`/`T2BASE`) và **Task 3** (round MMF
+`T3`/`T1BASE`) của plan `Docs/superpowers/plans/2026-10-19-pipeline-perf-fix.md`; kết luận của chúng nằm
+trong plan + task report SDD (`.superpowers/sdd/2026-10-19-pipeline-perf-fix/task-{2,3}-report.md`) —
+**không** nằm trong bảng nào của `Docs/performance.md`.
+
+CSV mới do probe sinh ra nằm cạnh script (`Tools/Perf/probe_<Label>_<timestamp>.csv`) và **đã bị gitignore**
+(rule `Tools/Perf/probe_*.csv` trong `.gitignore` — chỉ dành cho run output); nếu muốn giữ làm số liệu
+chính thức, copy **có chủ đích** vào `data/` và thêm dòng vào bảng trên.
