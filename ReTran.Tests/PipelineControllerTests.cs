@@ -286,17 +286,27 @@ public class PipelineControllerTests : IDisposable
         peer.RaiseNotification("frame.annotated", new JsonObject { ["seq"] = 3, ["w"] = 1280, ["h"] = 720 });
         Assert.Single(camera.Submits);
 
-        // A fresh session restarts the notification seq at 1 (Core semantics); the new start must
-        // reset the stale guard so sessions after the first still publish.
-        // Phiên mới khởi động lại seq thông báo từ 1 (đặc tả Core); lần start mới phải reset guard
-        // để các phiên sau phiên đầu vẫn publish được.
+        // A fresh session restarts the notification seq at 1 (Core semantics) and the wire-seq
+        // guard is reset on start — but the shared-memory seqlock continues across writer
+        // generations, so a STALE old-session notification arriving before the new writer's first
+        // frame must NOT re-publish the old frame: its MMF seq is not above the one already read.
+        // Phiên mới khởi động lại seq thông báo từ 1 (đặc tả Core) và guard seq trên wire được
+        // reset lúc start — nhưng bộ đếm seqlock của vùng nhớ chạy liên tục giữa các thế hệ
+        // writer, nên thông báo CŨ của phiên trước đến trước khung đầu của writer mới không được
+        // publish lại: seq MMF của nó không cao hơn lần đọc đã xử lý.
         await controller.StopAsync(CancellationToken.None);
         await controller.StartAsync(
             new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
             CancellationToken.None);
         peer.RaiseNotification("frame.annotated", new JsonObject { ["seq"] = 1, ["w"] = 1280, ["h"] = 720 });
+        Assert.Single(camera.Submits); // stale old-session frame replay — dropped
 
+        // The new session's fresh frame (new MMF seq from the continuing seqlock) IS published again.
+        // Khung mới của phiên mới (seq MMF mới từ seqlock chạy tiếp) vẫn được publish lại.
+        writer.Write(1280, 720, [2, 2, 2]);
+        peer.RaiseNotification("frame.annotated", new JsonObject { ["seq"] = 2, ["w"] = 1280, ["h"] = 720 });
         Assert.Equal(2, camera.Submits.Count);
+        Assert.Equal([2, 2, 2], Convert.FromBase64String(preview.Latest!.JpegBase64));
     }
 
     [Fact]

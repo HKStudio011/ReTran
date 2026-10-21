@@ -63,7 +63,9 @@ public sealed class PipelineController
 
     private PreviewChannelReader? _previewReader;
     private DateTime _nextPreviewOpenUtc;
-    // Guard chống phát lại: seq thông báo đã xử lý, và seq seqlock của vùng nhớ đã đọc.
+    // Guard chống phát lại: seq thông báo đã xử lý (reset mỗi phiên — Core restart từ 1), và seq
+    // seqlock của vùng nhớ đã đọc (không reset — writer gieo bộ đếm từ vùng nhớ nên seq liên tục
+    // giữa các thế hệ writer).
     private long _lastPreviewSeq;
     private long _lastMmfSeq;
     private bool _handlersWired;
@@ -148,11 +150,14 @@ public sealed class PipelineController
     /// <c>captureFps</c> được bỏ qua để Core dùng mặc định của nó.
     /// </summary>
     /// <remarks>
-    /// Starting a session clears the annotated-frame guards before <c>core.start</c> is sent,
-    /// because Core restarts both its <c>frame.annotated</c> seq and the preview section for every
-    /// session.
-    /// Mỗi lần start phiên sẽ xoá guard của khung ghi chú trước khi gửi <c>core.start</c>, vì Core
-    /// khởi động lại cả seq <c>frame.annotated</c> lẫn vùng preview cho mỗi phiên.
+    /// Starting a session clears the wire-seq guard before <c>core.start</c> is sent, because Core
+    /// restarts its <c>frame.annotated</c> seq at 1 for every session. The shared-memory seqlock
+    /// guard is not reset: the writer seeds its counter from the section, so the MMF seq stays
+    /// continuous across writer generations.
+    /// Mỗi lần start phiên sẽ xoá guard seq trên wire trước khi gửi <c>core.start</c>, vì Core
+    /// khởi động lại seq <c>frame.annotated</c> từ 1 cho mỗi phiên. Guard seqlock của vùng nhớ
+    /// không bị reset: writer gieo bộ đếm từ vùng nhớ nên seq MMF chạy liên tục giữa các thế hệ
+    /// writer.
     /// </remarks>
     /// <param name="source">Capture source for the session. Nguồn capture cho phiên.</param>
     /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
@@ -184,13 +189,16 @@ public sealed class PipelineController
         };
 
         // Cleared before core.start is sent (never after it returns) because Core restarts its
-        // frame.annotated seq at 1 and rewrites the preview section from scratch for every session:
-        // without this, the first frames of the new session would look like replays of the old one.
+        // frame.annotated seq at 1 for every session: without this, the new session's first
+        // notifications would look like replays. The shared-memory seqlock guard is NOT reset —
+        // the writer seeds its counter from the section, so the MMF seq is continuous across
+        // writer generations and an old-session frame stays rejected until a fresh write lands.
         // Xoá trước khi gửi core.start (không phải sau khi nó trả về) vì Core khởi động lại seq
-        // frame.annotated từ 1 và ghi lại vùng preview từ đầu cho mỗi phiên: nếu không, những khung
-        // đầu của phiên mới sẽ bị coi là phát lại của phiên cũ.
+        // frame.annotated từ 1 cho mỗi phiên: nếu không, những thông báo đầu của phiên mới sẽ bị
+        // coi là phát lại. Guard seqlock của vùng nhớ KHÔNG reset — writer gieo bộ đếm từ vùng
+        // nhớ nên seq MMF chạy liên tục giữa các thế hệ writer, khung của phiên cũ vẫn bị loại
+        // cho tới khi có lần ghi mới.
         _lastPreviewSeq = 0;
-        _lastMmfSeq = 0;
 
         await _peer.CallAsync("core.start", @params, ct).ConfigureAwait(false);
         IsRunning = true;
@@ -396,6 +404,12 @@ public sealed class PipelineController
         // seq must not re-publish. Core có thể phát lại thông báo của khung App đã xử lý; seq lặp
         // hoặc cũ hơn không được xuất bản lại.
         if (seq <= _lastPreviewSeq) return;
+
+        // No preview and no camera (test-only setups): skip the shared-memory read and the
+        // encode/submit work entirely — nothing consumes it.
+        // Không có preview lẫn camera (chỉ gặp trong cấu hình test): bỏ hẳn bước đọc shared
+        // memory và phần encode/nạp — không có ai tiêu thụ.
+        if (_preview is null && _camera is null) return;
 
         PreviewChannelReader? reader = EnsurePreviewChannel();
         if (reader is null || !reader.TryRead(out PreviewChannelFrame frame)) return;

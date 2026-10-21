@@ -565,6 +565,20 @@ public class PipelineHostTests
     }
 
     [Fact]
+    public async Task Start_CaptureFps1000_InvalidParams()
+    {
+        await using var host = CreateHost(
+            new FakeSidecarRpc(), RegistryWith(new CountingTranslator()), new JsonRpcServer());
+
+        var parameters = StartParams();
+        parameters["captureFps"] = 1000;
+        var ex = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(parameters, CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InvalidParams, ex.Code);
+        Assert.Contains("captureFps", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Start_FpsMissing_UsesCoreConfigDefault()
     {
         OcrLoopOptions? captured = null;

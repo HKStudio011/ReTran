@@ -49,7 +49,7 @@ public static class Program
         {
             if (p?["image"] is not JsonValue jv || !jv.TryGetValue<string>(out var image) || image.Length == 0)
                 throw new RpcMethodException(RpcErrorCodes.InvalidParams,
-                    "missing or empty 'image' (non-empty base64 PNG string).");
+                    "missing or empty 'image' (non-empty base64 PNG/JPEG string).");
             if (pipeline is null)
                 throw new RpcMethodException(RpcErrorCodes.InternalError,
                     "sidecar not available (python/venv missing or spawn failed).");

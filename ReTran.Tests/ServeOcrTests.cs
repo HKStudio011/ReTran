@@ -51,6 +51,9 @@ public class ServeOcrTests
             """{"jsonrpc":"2.0","id":"1","method":"ocr.spot","params":{}}""",
             new OcrPipeline(new FakeRpc(), new OcrDiff()));
         Assert.Equal(RpcErrorCodes.InvalidParams, resp["error"]!["code"]!.GetValue<int>());
+        // Transport now sends JPEG q85 (sidecar accepts both) — the message must not claim PNG-only.
+        // Transport giờ gửi JPEG q85 (sidecar nhận cả hai) — message không được nói chỉ có PNG.
+        Assert.Contains("PNG/JPEG", resp["error"]!["message"]!.GetValue<string>(), StringComparison.Ordinal);
     }
 
     [Fact]

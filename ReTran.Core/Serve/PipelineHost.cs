@@ -405,15 +405,20 @@ public sealed class PipelineHost : IAsyncDisposable
         }
         // captureFps feeds the capture source via ToOptions (spec §3.1). It changes only the
         // capture cadence: the annotation loop keeps ticking at _annotatorFps, fixed from
-        // CoreConfig.CaptureFps at serve start.
+        // CoreConfig.CaptureFps at serve start. Capped at 1..60 like ocrFps — a deliberate
+        // tightening of §3.1's literal ">= 1" so a hand-crafted core.start cannot drive the
+        // capture loop past the performance budget (the config path is capped indirectly by the
+        // annotatorFps constructor check).
         // captureFps được cấp vào capture source qua ToOptions (spec §3.1). Nó chỉ đổi nhịp
         // capture: vòng ghi chú vẫn tick theo _annotatorFps, cố định từ CoreConfig.CaptureFps
-        // lúc serve start.
+        // lúc serve start. Giới hạn 1..60 giống ocrFps — siết cố ý so với chữ ">= 1" của §3.1
+        // để một core.start tự tay gửi không thể đẩy loop capture vượt ngân sách hiệu năng
+        // (đường config đã bị chặn gián tiếp bởi check 1..60 của annotatorFps).
         int captureFps = config.CaptureFps;
         if (p["captureFps"] is JsonValue captureValue
-            && (!captureValue.TryGetValue<int>(out captureFps) || captureFps < 1))
+            && (!captureValue.TryGetValue<int>(out captureFps) || captureFps is < 1 or > 60))
         {
-            throw new RpcMethodException(RpcErrorCodes.InvalidParams, "'captureFps' must be an integer >= 1.");
+            throw new RpcMethodException(RpcErrorCodes.InvalidParams, "'captureFps' must be an integer 1..60.");
         }
 
         return new StartSpec(useWindow, monitor, hwnd, provider, src, dst, translator, ocrFps, captureFps);
