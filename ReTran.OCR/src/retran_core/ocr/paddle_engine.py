@@ -10,15 +10,22 @@ from .engine import Spot
 
 
 class PaddleOcrEngine:
-    """Text spotting via PaddleOCR; lang passed through to PaddleOCR(lang=...).
+    """Text spotting via PaddleOCR, pinned to a caller-chosen det/rec pair.
 
+    ``det_model``/``rec_model`` are PaddleOCR registry names (the sidecar picks
+    them from the catalog module) and are forwarded verbatim to ``PaddleOCR(...)``.
     The paddleocr import and model load happen inside the first spot() call so
     the sidecar stays stdlib-fast to start and reports a clean -32603 when the
     optional deps are missing.
+
+    Attributes:
+        det_model: PaddleOCR text-detection model registry name.
+        rec_model: PaddleOCR text-recognition model registry name.
     """
 
-    def __init__(self, lang: str = "en") -> None:
-        self.lang = lang
+    def __init__(self, det_model: str, rec_model: str) -> None:
+        self.det_model = det_model
+        self.rec_model = rec_model
         self._ocr: Any = None
 
     def spot(self, image_bgr: npt.NDArray[np.uint8]) -> list[Spot]:
@@ -51,17 +58,15 @@ class PaddleOcrEngine:
             # enable_mkldnn=False: paddlepaddle 3.3.x oneDNN/PIR path crashes on
             # PP-OCRv5 (ConvertPirAttribute2RuntimeAttribute, onednn_instruction.cc;
             # see PaddlePaddle/Paddle#77340). Official workaround: disable oneDNN.
-            # M3 perf gate: lang="en" would resolve PP-OCRv5_server_det plus the
-            # doc-orientation/unwarping/textline pipelines — three extra models and
-            # most of the M2 latency (Docs/performance.md M2 baseline). Game/UI
-            # text does not need the doc preprocessor; pin mobile det instead.
-            # Once det is pinned, paddleocr ignores lang (rec would fall back to
-            # the server model), so pin mobile rec too (spec §4.1).
+            # Both model names come from the caller (catalog pair), so lang is
+            # not passed at all: paddleocr 3.x only warns that lang is ignored
+            # when model names are pinned. Game/UI text does not need the doc
+            # preprocessor; the three disabled pipelines are the M2 latency gate
+            # (Docs/performance.md M2 baseline).
             return PaddleOCR(
-                lang=self.lang,
+                text_detection_model_name=self.det_model,
+                text_recognition_model_name=self.rec_model,
                 enable_mkldnn=False,
-                text_detection_model_name="PP-OCRv5_mobile_det",
-                text_recognition_model_name=f"{self.lang}_PP-OCRv5_mobile_rec",
                 use_doc_orientation_classify=False,
                 use_doc_unwarping=False,
                 use_textline_orientation=False,

@@ -5,15 +5,19 @@ import sys
 
 from . import __version__
 from .jsonrpc import serve
+from .ocr.catalog import recommended
 from .ocr.handlers import make_spot_handler
 from .ocr.paddle_engine import PaddleOcrEngine
 
 
 def _handlers():
+    # Default pair from the catalog ("auto" src, "vi" dst — dst never changes
+    # the pair). The engine stays lazy: models load on the first spot call.
+    det, rec = recommended("auto", "vi")
     return {
         "sidecar.ping": lambda p: "pong",
         "sidecar.version": lambda p: __version__,
-        "ocr.spot": make_spot_handler(PaddleOcrEngine(lang="en")),
+        "ocr.spot": make_spot_handler(PaddleOcrEngine(det, rec)),
     }
 
 

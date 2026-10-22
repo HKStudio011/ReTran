@@ -32,7 +32,10 @@ def test_paddle_spot_finds_hello():
     from retran_core.ocr.image import decode_image_b64
     from retran_core.ocr.paddle_engine import PaddleOcrEngine
 
-    engine = PaddleOcrEngine(lang="en")
+    engine = PaddleOcrEngine(
+        det_model="PP-OCRv5_mobile_det",
+        rec_model="en_PP-OCRv5_mobile_rec",
+    )
     spots = engine.spot(decode_image_b64(_text_png_b64()))
     assert len(spots) > 0
     joined = " ".join(s.text.upper() for s in spots)

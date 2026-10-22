@@ -6,6 +6,7 @@ import types
 
 import numpy as np
 
+from retran_core.ocr.catalog import recommended
 from retran_core.ocr.paddle_engine import PaddleOcrEngine
 
 
@@ -27,23 +28,39 @@ class RecordingPaddleOCR:
         ]
 
 
-def test_engine_uses_mobile_det_and_disables_doc_pipelines(monkeypatch):
+def test_spot_uses_pinned_models(monkeypatch):
+    """The det/rec pair given to the constructor must reach PaddleOCR verbatim."""
     fake = types.ModuleType("paddleocr")
     fake.PaddleOCR = RecordingPaddleOCR
     monkeypatch.setitem(sys.modules, "paddleocr", fake)
 
-    engine = PaddleOcrEngine(lang="en")
+    # A non-default catalog pair (ko -> legacy korean rec), so a hardcoded
+    # default inside the engine would fail this test instead of passing it.
+    det, rec = recommended("ko", "vi")
+    engine = PaddleOcrEngine(det, rec)
+    engine.spot(np.zeros((40, 80, 3), dtype=np.uint8))
+
+    kwargs = RecordingPaddleOCR.last_kwargs
+    assert kwargs["text_detection_model_name"] == det
+    assert kwargs["text_recognition_model_name"] == rec
+    # lang-based naming is gone for good: paddleocr 3.x only warns that lang
+    # is ignored when model names are pinned, so do not pass it at all.
+    assert "lang" not in kwargs
+
+
+def test_engine_disables_doc_pipelines_and_mkldnn(monkeypatch):
+    fake = types.ModuleType("paddleocr")
+    fake.PaddleOCR = RecordingPaddleOCR
+    monkeypatch.setitem(sys.modules, "paddleocr", fake)
+
+    engine = PaddleOcrEngine(det_model="PP-OCRv6_small_det", rec_model="PP-OCRv6_small_rec")
     spots = engine.spot(np.zeros((40, 80, 3), dtype=np.uint8))
 
     kwargs = RecordingPaddleOCR.last_kwargs
-    assert kwargs["lang"] == "en"
     assert kwargs["enable_mkldnn"] is False
-    assert kwargs["text_detection_model_name"] == "PP-OCRv5_mobile_det"
     assert kwargs["use_doc_orientation_classify"] is False
     assert kwargs["use_doc_unwarping"] is False
     assert kwargs["use_textline_orientation"] is False
-    # rec pinned to mobile: paddle ignores lang once det is pinned (spec §4.1):
-    assert kwargs["text_recognition_model_name"] == "en_PP-OCRv5_mobile_rec"
     # parse path still works with the fake predict payload:
     assert [s.text for s in spots] == ["HI"]
     assert spots[0].box == [[10.0, 10.0], [60.0, 10.0], [60.0, 30.0], [10.0, 30.0]]
