@@ -1,24 +1,62 @@
 """Entry point: `python -m retran_core serve` runs the JSON-RPC server on stdio."""
 from __future__ import annotations
 
+import os
 import sys
 
 from . import __version__
 from .jsonrpc import serve
 from .ocr.catalog import recommended
 from .ocr.handlers import make_spot_handler
+from .ocr.models import (
+    ModelManager,
+    make_model_handlers,
+    migrate_from_paddlex,
+    model_cache_dir,
+)
 from .ocr.paddle_engine import PaddleOcrEngine
 
 
 def _handlers():
-    # Default pair from the catalog ("auto" src, "vi" dst — dst never changes
-    # the pair). The engine stays lazy: models load on the first spot call.
+    # One engine instance shared by ocr.spot and the model handlers, so
+    # ocr.models.set switches the engine the next spot call will use. The
+    # engine stays lazy: models load on the first spot call.
     det, rec = recommended("auto", "vi")
-    return {
+    engine = PaddleOcrEngine(det, rec)
+    manager = ModelManager(model_cache_dir(), engine=engine)
+    handlers = {
         "sidecar.ping": lambda p: "pong",
         "sidecar.version": lambda p: __version__,
-        "ocr.spot": make_spot_handler(PaddleOcrEngine(det, rec)),
+        "ocr.spot": make_spot_handler(engine),
     }
+    handlers.update(make_model_handlers(manager))
+    return handlers
+
+
+def _prepare_model_cache() -> None:
+    """Sync the cache env and run the one-shot `~/.paddlex` migration.
+
+    Best-effort: a migration failure is logged and never kills the sidecar
+    (the affected models simply stay "not installed" and can be downloaded
+    again).
+    """
+    cache_dir = model_cache_dir()
+    # paddlex reads PADDLE_PDX_CACHE_HOME at import time (paddlex/cache.py),
+    # so pin it before any lazy paddlex/paddleocr import: the manager and
+    # paddlex must agree on the directory also when spawned standalone (the
+    # C# core sets the same env when it spawns the sidecar).
+    os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(cache_dir))
+    try:
+        migrated = migrate_from_paddlex(cache_dir)
+    except Exception as exc:  # noqa: BLE001 - migration must never be fatal
+        print(f"model migration failed: {exc}", file=sys.stderr, flush=True)
+        return
+    if migrated:
+        print(
+            f"migrated model(s) from ~/.paddlex: {', '.join(migrated)}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def main(argv=None) -> int:
@@ -32,6 +70,7 @@ def main(argv=None) -> int:
     """
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] == "serve":
+        _prepare_model_cache()
         serve(_handlers())
         return 0
     print(f"usage: python -m retran_core serve", file=sys.stderr)

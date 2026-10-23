@@ -12,21 +12,48 @@ from .engine import Spot
 class PaddleOcrEngine:
     """Text spotting via PaddleOCR, pinned to a caller-chosen det/rec pair.
 
-    ``det_model``/``rec_model`` are PaddleOCR registry names (the sidecar picks
-    them from the catalog module) and are forwarded verbatim to ``PaddleOCR(...)``.
-    The paddleocr import and model load happen inside the first spot() call so
-    the sidecar stays stdlib-fast to start and reports a clean -32603 when the
-    optional deps are missing.
+    ``det_model``/``rec_model`` are read-only properties exposing PaddleOCR
+    registry names (the sidecar picks them from the catalog module) that are
+    forwarded verbatim to ``PaddleOCR(...)``. Pair switches must go through
+    :meth:`set_models` so the cached predictor resets together with the
+    names — writing the attributes directly would leave the old predictor
+    serving the old models. The paddleocr import and model load happen inside
+    the first spot() call so the sidecar stays stdlib-fast to start and
+    reports a clean -32603 when the optional deps are missing.
 
     Attributes:
-        det_model: PaddleOCR text-detection model registry name.
-        rec_model: PaddleOCR text-recognition model registry name.
+        det_model: PaddleOCR text-detection model registry name (read-only).
+        rec_model: PaddleOCR text-recognition model registry name (read-only).
     """
 
     def __init__(self, det_model: str, rec_model: str) -> None:
-        self.det_model = det_model
-        self.rec_model = rec_model
+        self._det_model = det_model
+        self._rec_model = rec_model
         self._ocr: Any = None
+
+    @property
+    def det_model(self) -> str:
+        """Text-detection model registry name passed to the next predictor."""
+        return self._det_model
+
+    @property
+    def rec_model(self) -> str:
+        """Text-recognition model registry name passed to the next predictor."""
+        return self._rec_model
+
+    def set_models(self, det_model: str, rec_model: str) -> None:
+        """Switch the det/rec pair; the predictor reloads lazily.
+
+        Stores the new pair and resets the cached predictor (``_ocr = None``)
+        so the next :meth:`spot` call rebuilds PaddleOCR with the new names.
+
+        Args:
+            det_model: New text-detection model registry name.
+            rec_model: New text-recognition model registry name.
+        """
+        self._det_model = det_model
+        self._rec_model = rec_model
+        self._ocr = None
 
     def spot(self, image_bgr: npt.NDArray[np.uint8]) -> list[Spot]:
         """Detect + recognize text in one BGR image.
