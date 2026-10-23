@@ -82,18 +82,18 @@ class PaddleOcrEngine:
         except ImportError as exc:
             raise RuntimeError(f"paddleocr not installed: {exc}") from exc
         try:
-            # enable_mkldnn=False: paddlepaddle 3.3.x oneDNN/PIR path crashes on
-            # PP-OCRv5 (ConvertPirAttribute2RuntimeAttribute, onednn_instruction.cc;
-            # see PaddlePaddle/Paddle#77340). Official workaround: disable oneDNN.
-            # Both model names come from the caller (catalog pair), so lang is
-            # not passed at all: paddleocr 3.x only warns that lang is ignored
-            # when model names are pinned. Game/UI text does not need the doc
-            # preprocessor; the three disabled pipelines are the M2 latency gate
+            # The paddlepaddle 3.3.x oneDNN/PIR crash (PaddlePaddle/Paddle#77340)
+            # is gone on the paddleocr 3.7 / paddlepaddle 3.4 stack, so the
+            # engine no longer passes enable_mkldnn=False; paddleocr's own
+            # default (enabled) applies. Both model names come from the
+            # caller (catalog pair), so lang is not passed at all: paddleocr
+            # 3.x only warns that lang is ignored when model names are
+            # pinned. Game/UI text does not need the doc preprocessor; the
+            # three disabled pipelines are the M2 latency gate
             # (Docs/performance.md M2 baseline).
             return PaddleOCR(
                 text_detection_model_name=self.det_model,
                 text_recognition_model_name=self.rec_model,
-                enable_mkldnn=False,
                 use_doc_orientation_classify=False,
                 use_doc_unwarping=False,
                 use_textline_orientation=False,

@@ -62,7 +62,11 @@ def test_spec_lookup():
 
 
 def test_v6_unified_covers_50_languages_tiny_49_without_japanese():
-    """Upstream: v6 small/medium cover zh/TC/en/ja + 46 Latin (50); tiny drops Japanese (49)."""
+    """Upstream: v6 small/medium cover zh/TC/en/ja + 46 Latin (50); tiny drops Japanese (49).
+
+    The Latin split is verified against paddleocr 3.7.0's routing table
+    (`_PPOCRV6_LANGS`): Latin (la) is covered, Pali (pi) is not.
+    """
     for name in ("PP-OCRv6_small_det", "PP-OCRv6_small_rec", "PP-OCRv6_medium_det", "PP-OCRv6_medium_rec"):
         assert len(spec(name).langs) == 50, name
     for name in ("PP-OCRv6_tiny_det", "PP-OCRv6_tiny_rec"):
@@ -70,8 +74,10 @@ def test_v6_unified_covers_50_languages_tiny_49_without_japanese():
         assert len(langs) == 49, name
         assert "ja" not in langs
     langs = spec("PP-OCRv6_small_rec").langs
-    for code in ("zh", "zh-hant", "en", "ja", "fr", "de", "es"):  # ReTran app codes covered by v6
+    for code in ("zh", "zh-hant", "en", "ja", "fr", "de", "es", "la"):  # ReTran app codes covered by v6
         assert code in langs
+    # Pali is the one Latin-script language paddleocr 3.7 routes AWAY from v6.
+    assert "pi" not in langs
     # Languages v6 does NOT cover must never appear (they route to v5 fallbacks):
     for code in ("ko", "ru", "ar", "th", "ta", "te", "hi", "el"):
         assert code not in langs

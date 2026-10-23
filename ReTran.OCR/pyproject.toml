@@ -4,9 +4,11 @@ version = "0.1.0"
 description = ""
 requires-python = ">=3.13"
 dependencies = [
-    "numpy>=2.5.3",
-    "paddleocr>=3.4.1",
-    "paddlepaddle-gpu==3.3.1",
+    # numpy<2.4: forced by paddlex>=3.7.0 (required by paddleocr>=3.7.0);
+    # newer numpy would make the PP-OCRv6 stack unresolvable.
+    "numpy>=1.24,<2.4",
+    "paddleocr>=3.7.0",
+    "paddlepaddle-gpu==3.4.0",
     "nvidia-cudnn-cu12==9.9.0.52",
     "pillow>=12.3.0",
 ]

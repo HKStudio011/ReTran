@@ -48,7 +48,7 @@ def test_spot_uses_pinned_models(monkeypatch):
     assert "lang" not in kwargs
 
 
-def test_engine_disables_doc_pipelines_and_mkldnn(monkeypatch):
+def test_engine_disables_doc_pipelines_and_leaves_mkldnn_alone(monkeypatch):
     fake = types.ModuleType("paddleocr")
     fake.PaddleOCR = RecordingPaddleOCR
     monkeypatch.setitem(sys.modules, "paddleocr", fake)
@@ -57,7 +57,10 @@ def test_engine_disables_doc_pipelines_and_mkldnn(monkeypatch):
     spots = engine.spot(np.zeros((40, 80, 3), dtype=np.uint8))
 
     kwargs = RecordingPaddleOCR.last_kwargs
-    assert kwargs["enable_mkldnn"] is False
+    # The paddleocr 3.7 / paddlepaddle 3.4 stack runs without the oneDNN
+    # workaround (PaddlePaddle/Paddle#77340), so the engine no longer
+    # disables mkldnn; paddleocr's own default (enabled) applies.
+    assert "enable_mkldnn" not in kwargs
     assert kwargs["use_doc_orientation_classify"] is False
     assert kwargs["use_doc_unwarping"] is False
     assert kwargs["use_textline_orientation"] is False

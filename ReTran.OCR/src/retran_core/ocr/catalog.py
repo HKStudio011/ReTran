@@ -1,11 +1,15 @@
 """Static OCR model catalog: PP-OCRv6 tiers plus v5/v3 per-language rec fallbacks.
 
 Pure data module — no downloads, no paddle import. Language metadata and sizes
-come from the upstream docs (checked 2026-10-23):
+come from upstream, verified against the installed stack on 2026-10-23
+(paddleocr 3.7.0, paddlex 3.7.2):
 
-- PP-OCRv6 intro: the unified small/medium models cover 50 languages
+- PP-OCRv6: the unified small/medium models cover 50 languages
   (Simplified Chinese, Traditional Chinese, English, Japanese + 46
-  Latin-script); tiny covers 49 (no Japanese).
+  Latin-script); tiny covers 49 (no Japanese). The exact Latin set
+  follows paddleocr 3.7.0's own routing table (`_PPOCRV6_LANGS` in
+  paddleocr/_pipelines/ocr.py: ch/chinese_cht/en/japan plus
+  `LATIN_LANGS` minus `pi`): Latin (la) is covered, Pali (pi) is not.
 - PP-OCRv5 multilingual "Models and Their Supported Languages" table:
   the exact language sets and published storage sizes of the v5/v3
   per-language rec models.
@@ -18,12 +22,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Latin-script languages the v6 unified models cover. This is the
-# latin_PP-OCRv5 documented set minus liturgical Latin, i.e. 46 languages.
+# Latin-script languages the v6 unified models cover: the latin_PP-OCRv5
+# documented set minus Pali — paddleocr 3.7.0's v6 routing excludes exactly
+# `pi` (`_PPOCRV6_LANGS`, paddleocr/_pipelines/ocr.py). 46 languages.
 _LATIN_LANGS: tuple[str, ...] = (
     "af", "az", "bs", "ca", "cs", "cy", "da", "de", "es", "et", "eu", "fi", "fr", "ga",
-    "gl", "hr", "hu", "id", "is", "it", "ku", "lb", "lt", "lv", "mi", "ms", "mt", "nl",
-    "no", "oc", "pi", "pl", "pt", "qu", "rm", "ro", "rs_latin", "sk", "sl", "sq", "sv",
+    "gl", "hr", "hu", "id", "is", "it", "ku", "la", "lb", "lt", "lv", "mi", "ms", "mt",
+    "nl", "no", "oc", "pl", "pt", "qu", "rm", "ro", "rs_latin", "sk", "sl", "sq", "sv",
     "sw", "tl", "tr", "uz", "vi",
 )
 

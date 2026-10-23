@@ -87,10 +87,6 @@ def _paddlex_downloader(name: str) -> Path:
             model unknown to the hosters). The caller keeps the
             ``.partial`` marker so the model does not count as installed.
     """
-    # Skip paddlex's import-time hoster connectivity checks (up to four HEAD
-    # requests with 1 s timeouts): downloads already fall back between
-    # hosters on failure, so the checks only add startup latency and noise.
-    os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
     from paddlex.inference.utils.official_models import official_models
 
     return Path(official_models[name])

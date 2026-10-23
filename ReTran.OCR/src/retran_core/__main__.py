@@ -34,11 +34,13 @@ def _handlers():
 
 
 def _prepare_model_cache() -> None:
-    """Sync the cache env and run the one-shot `~/.paddlex` migration.
+    """Sync the paddlex env vars and run the one-shot `~/.paddlex` migration.
 
-    Best-effort: a migration failure is logged and never kills the sidecar
-    (the affected models simply stay "not installed" and can be downloaded
-    again).
+    Both ``PADDLE_PDX_CACHE_HOME`` and ``PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK``
+    are read by paddlex at import time, so they must be pinned here — before
+    any lazy paddlex/paddleocr import later in the process. Best-effort: a
+    migration failure is logged and never kills the sidecar (the affected
+    models simply stay "not installed" and can be downloaded again).
     """
     cache_dir = model_cache_dir()
     # paddlex reads PADDLE_PDX_CACHE_HOME at import time (paddlex/cache.py),
@@ -46,6 +48,13 @@ def _prepare_model_cache() -> None:
     # paddlex must agree on the directory also when spawned standalone (the
     # C# core sets the same env when it spawns the sidecar).
     os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(cache_dir))
+    # Skip paddlex's import-time hoster connectivity checks (up to four HEAD
+    # requests with 1 s timeouts): downloads already fall back between
+    # hosters on failure, so the checks only add startup latency and noise.
+    # Also read at paddlex import time, so it must run before any lazy
+    # paddlex/paddleocr import. setdefault keeps Core's explicit value
+    # authoritative when it spawns the sidecar.
+    os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
     try:
         migrated = migrate_from_paddlex(cache_dir)
     except Exception as exc:  # noqa: BLE001 - migration must never be fatal

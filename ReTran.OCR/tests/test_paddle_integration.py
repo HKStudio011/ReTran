@@ -17,8 +17,9 @@ pytestmark = pytest.mark.skipif(
 def _text_png_b64() -> str:
     """Render 'HELLO RETRAN' on white and return base64 PNG.
 
-    Font size 40: PP-OCRv5 det misses the ~11px PIL default bitmap font
-    (0 boxes on a verified run); size 40 is detected reliably.
+    Font size 40: the PP-OCRv5 det missed the ~11px PIL default bitmap
+    font (0 boxes on a verified run); size 40 stays reliably detected by
+    the PP-OCRv6 tiny det.
     """
     img = Image.new("RGB", (640, 96), "white")
     d = ImageDraw.Draw(img)
@@ -33,8 +34,8 @@ def test_paddle_spot_finds_hello():
     from retran_core.ocr.paddle_engine import PaddleOcrEngine
 
     engine = PaddleOcrEngine(
-        det_model="PP-OCRv5_mobile_det",
-        rec_model="en_PP-OCRv5_mobile_rec",
+        det_model="PP-OCRv6_tiny_det",
+        rec_model="PP-OCRv6_tiny_rec",
     )
     spots = engine.spot(decode_image_b64(_text_png_b64()))
     assert len(spots) > 0
