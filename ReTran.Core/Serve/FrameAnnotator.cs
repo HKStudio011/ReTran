@@ -9,13 +9,13 @@ using Frame = ReTran.Core.Capture.Frame;
 
 /// <summary>
 /// GDI+ implementation of <see cref="IFrameAnnotator"/>: downscales (max 1280 wide, never
-/// upscale) by wrapping the captured BGRA buffer in place (pinned, no pixel copy), draws green
-/// boxes with a dark pill behind each label (one DrawString per box — user-approved style),
-/// encodes JPEG quality 70.
+/// upscale) by wrapping the captured BGRA buffer in place (pinned, no pixel copy), draws teal
+/// corner ticks around each source box plus a dark pill holding the translated text (font size
+/// scales with the box height and the user font multiplier), encodes JPEG quality 70.
 /// Bản hiện GDI+ của <see cref="IFrameAnnotator"/>: thu nhỏ (tối đa 1280 rộng, không phóng to)
-/// bằng cách quấn buffer BGRA đã chụp tại chỗ (pin trong chỗ, không sao chép pixel), vẽ box
-/// xanh với nền pill tối sau mỗi nhan đề (một lượt DrawString mỗi box — style đã duyệt), mã
-/// hoá JPEG quality 70.
+/// bằng cách quấn buffer BGRA đã chụp tại chỗ (pin trong chỗ, không sao chép pixel), vẽ tick
+/// teal 4 góc quanh mỗi box gốc kèm nền pill tối chứa bản dịch (cỡ chữ scale theo chiều cao
+/// box và hệ số cỡ chữ người dùng), mã hoá JPEG quality 70.
 /// </summary>
 /// <remarks>
 /// Stateless and thread-safe — one instance may serve many sessions. Không trạng thái, an toàn
@@ -29,12 +29,6 @@ public sealed class FrameAnnotator : IFrameAnnotator
     /// <summary>JPEG quality (spec: 70). Chất lượng JPEG (spec: 70).</summary>
     private const long JpegQuality = 70;
 
-    /// <summary>Box outline color #22C55E. Màu viền box #22C55E.</summary>
-    private static readonly Color BoxColor = Color.FromArgb(255, 34, 197, 94);
-
-    /// <summary>Pill fill #B4000000 — dark translucent (user-approved 2026-10-19). Màu nền pill #B4000000 — đen mờ (user duyệt 2026-10-19).</summary>
-    private static readonly Color PillColor = Color.FromArgb(180, 0, 0, 0);
-
     /// <inheritdoc/>
     /// <remarks>
     /// The caller keeps frame ownership and must not dispose it (mutate <c>Pixels</c>) before
@@ -44,7 +38,7 @@ public sealed class FrameAnnotator : IFrameAnnotator
     /// hàm trả về: Bitmap nguồn đọc mảng pin trực tiếp cho tới khi ảnh thu nhỏ và JPEG hoàn
     /// tất. Byte của <paramref name="frame"/> không bao giờ bị sao chép.
     /// </remarks>
-    public AnnotatedFrame Annotate(Frame frame, AnnotSnapshot? snapshot)
+    public AnnotatedFrame Annotate(Frame frame, AnnotSnapshot? snapshot, double fontScale = 1.0)
     {
         ArgumentNullException.ThrowIfNull(frame);
 
@@ -68,7 +62,7 @@ public sealed class FrameAnnotator : IFrameAnnotator
                 g.DrawImage(source, 0, 0, outW, outH);
                 g.CompositingMode = CompositingMode.SourceOver;
                 if (snapshot is not null)
-                    DrawBoxes(g, snapshot, scale, outW, outH);
+                    DrawBoxes(g, snapshot, scale, outW, outH, fontScale);
             }
 
             using var stream = new MemoryStream();
@@ -82,19 +76,26 @@ public sealed class FrameAnnotator : IFrameAnnotator
     }
 
     /// <summary>
-    /// Draws every box (2 px green outline) with its translated/original text on a dark pill
-    /// below the box: one MeasureString + FillRectangle + DrawString (replaces the two-pass
-    /// outline drawing). Vẽ mọi box (viền xanh 2 px) kèm text dịch/nguyên bản trên nền pill
-    /// tối dưới box: một lượt MeasureString + FillRectangle + DrawString (thay thế vẽ viền
-    /// chữ hai lượt).
+    /// Draws every box: teal corner ticks on the source box, then a dark rounded pill inside
+    /// the box holding the translation (up to two wrapped lines, font size derived from the box
+    /// height and shrunk until it fits). Vẽ mọi box: tick teal 4 góc trên box gốc, rồi pill bo
+    /// góc tối bên trong box chứa bản dịch (tối đa hai dòng wrap, cỡ chữ suy ra từ chiều cao
+    /// box và thu nhỏ dần đến khi vừa).
     /// </summary>
-    private static void DrawBoxes(Graphics g, AnnotSnapshot snapshot, float scale, int outW, int outH)
+    private static void DrawBoxes(Graphics g, AnnotSnapshot snapshot, float scale, int outW,
+        int outH, double fontScale)
     {
-        using var pen = new Pen(BoxColor, 2f);
-        float fontSize = Math.Max(12f, 0.02f * outW); // at least 12 px, ~2% of width. tối thiểu 12 px, ~2% chiều rộng
-        using var font = new Font("Segoe UI", fontSize, FontStyle.Regular, GraphicsUnit.Pixel);
-        using var textBrush = new SolidBrush(Color.White);
-        using var pillBrush = new SolidBrush(PillColor);
+        float ui = BoxAnnotationStyle.DecorationScale(outW);
+        using var tickPen = new Pen(BoxAnnotationStyle.TickColor, MathF.Max(1f, 1.6f * ui))
+        {
+            StartCap = LineCap.Square,
+            EndCap = LineCap.Square,
+        };
+        using var pillBrush = new SolidBrush(BoxAnnotationStyle.PillFill);
+        using var pillPen = new Pen(BoxAnnotationStyle.PillBorder, MathF.Max(1f, ui));
+        using var textBrush = new SolidBrush(BoxAnnotationStyle.TextColor);
+        using var format = BoxAnnotationStyle.CreateTextFormat();
+        using var pillPath = new GraphicsPath();
 
         foreach (AnnotBox box in snapshot.Boxes)
         {
@@ -102,22 +103,42 @@ public sealed class FrameAnnotator : IFrameAnnotator
             float y = (float)(box.Y * snapshot.FrameHeight) * scale;
             float w = (float)(box.W * snapshot.FrameWidth) * scale;
             float h = (float)(box.H * snapshot.FrameHeight) * scale;
-            g.DrawRectangle(pen, x, y, w, h);
+            if (w < 1f || h < 1f) continue;
+
+            BoxAnnotationStyle.DrawTicks(g, tickPen, new RectangleF(x, y, w, h), MathF.Max(3f, 7f * ui));
 
             string label = string.IsNullOrEmpty(box.Translated) ? box.Text : box.Translated;
-            if (string.IsNullOrEmpty(label)) continue;
-            float lx = Math.Clamp(x, 0f, Math.Max(0f, outW - 1));
-            float ly = Math.Clamp(y + h + 2f, 0f, Math.Max(0f, outH - fontSize - 2f));
+            if (string.IsNullOrWhiteSpace(label)) continue;
 
-            // Pill sized to the measured text (+4×2 px padding), clamped into the canvas.
-            // Pill cỡ theo text đã đo (+4×2 px đệm), kẹp vào trong canvas.
-            SizeF size = g.MeasureString(label, font);
-            float pillX = Math.Clamp(lx - 2f, 0f, outW);
-            float pillY = Math.Clamp(ly - 1f, 0f, outH);
-            float pillW = Math.Min(size.Width + 4f, outW - pillX);
-            float pillH = Math.Min(size.Height + 2f, outH - pillY);
-            g.FillRectangle(pillBrush, pillX, pillY, pillW, pillH);
-            g.DrawString(label, font, textBrush, lx, ly);
+            RectangleF inner = BoxAnnotationStyle.InnerRect(new RectangleF(x, y, w, h));
+            float innerW = inner.Width, innerH = inner.Height;
+            if (innerW < 2f || innerH < 2f) continue;
+
+            BoxAnnotationStyle.TextFit fit = BoxAnnotationStyle.Fit(
+                g, label, innerW, innerH, h, fontScale, format, maxLines: 2);
+            SizeF block = fit.Block;
+            if (!fit.Fits)
+            {
+                label = BoxAnnotationStyle.TruncateToFit(g, label, fit.Size, innerW, innerH, format, maxLines: 2);
+                block = BoxAnnotationStyle.MeasureBlock(g, label, fit.Size, innerW, format);
+            }
+
+            float padX = BoxAnnotationStyle.PadX(fit.Size);
+            float padY = BoxAnnotationStyle.PadY(fit.Size);
+            float pillW = innerW;
+            float pillH = MathF.Max(innerH, block.Height + 2f * padY); // tiny-box fallback may overflow
+            float pillX = Math.Clamp(inner.X, 0f, MathF.Max(0f, outW - pillW));
+            float pillY = Math.Clamp(inner.Y, 0f, MathF.Max(0f, outH - pillH));
+
+            BoxAnnotationStyle.BuildRoundedRect(
+                pillPath, new RectangleF(pillX, pillY, pillW, pillH), 3f * ui);
+            g.FillPath(pillBrush, pillPath);
+            g.DrawPath(pillPen, pillPath);
+            g.DrawString(label, BoxAnnotationStyle.GetFont(fit.Size), textBrush,
+                new RectangleF(pillX + padX, pillY + padY,
+                    MathF.Max(1f, pillW - 2f * padX + 1f),
+                    MathF.Max(1f, pillH - 2f * padY + 1f)),
+                format);
         }
     }
 

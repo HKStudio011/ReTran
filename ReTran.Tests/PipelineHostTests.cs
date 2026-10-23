@@ -22,10 +22,36 @@ public class PipelineHostTests
         public JsonNode? NextResult { get; set; }
         public Exception? Throw { get; set; }
 
+        /// <summary>
+        /// Per-method result overrides, consulted before <see cref="NextResult"/>; lets one fake
+        /// answer <c>ocr.models.list</c> with a catalog while spots return a spot result.
+        /// Kết quả ghi đè theo method, tra trước <see cref="NextResult"/>; cho phép một fake
+        /// trả <c>ocr.models.list</c> bằng catalog trong khi spot trả kết quả spot.
+        /// </summary>
+        public Dictionary<string, JsonNode?> ResultsByMethod { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Per-method exceptions thrown after the call is recorded; lets a test fail only
+        /// <c>ocr.spot</c> (the warmup) without breaking the rest.
+        /// Ngoại lệ theo method, ném sau khi call đã được ghi; cho test hỏng riêng
+        /// <c>ocr.spot</c> (warmup) mà không ảnh hưởng phần còn lại.
+        /// </summary>
+        public Dictionary<string, Exception> ThrowByMethod { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Every call in arrival order (method + params), written from the loop, the warmup and
+        /// the test thread, read while they run.
+        /// Mọi lời gọi theo thứ tự đến (method + params), ghi từ loop, warmup và luồng
+        /// test, đọc trong khi chúng chạy.
+        /// </summary>
+        public ConcurrentQueue<(string Method, JsonNode? Params)> Calls { get; } = new();
+
         public Task<JsonNode?> CallAsync(string method, JsonNode? @params, CancellationToken ct)
         {
+            Calls.Enqueue((method, @params));
+            if (ThrowByMethod.TryGetValue(method, out Exception? perMethod)) throw perMethod;
             if (Throw is not null) throw Throw;
-            return Task.FromResult(NextResult);
+            return Task.FromResult(ResultsByMethod.TryGetValue(method, out JsonNode? result) ? result : NextResult);
         }
     }
 
@@ -54,8 +80,14 @@ public class PipelineHostTests
         public int Width { get; set; } = 2;
         public int Height { get; set; } = 2;
 
-        public AnnotatedFrame Annotate(Frame frame, AnnotSnapshot? snapshot) =>
-            new(Result, Width, Height);
+        /// <summary>Last font multiplier the annotation loop passed; NaN until the first call. Hệ số cỡ chữ cuối vòng ghi chú truyền; NaN trước lần gọi đầu.</summary>
+        public double LastFontScale { get; private set; } = double.NaN;
+
+        public AnnotatedFrame Annotate(Frame frame, AnnotSnapshot? snapshot, double fontScale = 1.0)
+        {
+            LastFontScale = fontScale;
+            return new(Result, Width, Height);
+        }
     }
 
     /// <summary>
@@ -140,7 +172,8 @@ public class PipelineHostTests
         string? hwnd = null,
         string provider = "google",
         string src = "auto",
-        string dst = "vi")
+        string dst = "vi",
+        double fontScale = 1.0)
     {
         var source = new JsonObject { ["kind"] = kind };
         if (hwnd is not null) source["hwnd"] = hwnd;
@@ -151,6 +184,7 @@ public class PipelineHostTests
             ["translate"] = new JsonObject { ["provider"] = provider, ["src"] = src, ["dst"] = dst },
             ["ocrFps"] = 10,
             ["captureFps"] = 10,
+            ["fontScale"] = fontScale,
         };
     }
 
@@ -181,6 +215,28 @@ public class PipelineHostTests
             });
         }
         return new JsonObject { ["spots"] = spots, ["elapsed_ms"] = 5 };
+    }
+
+    /// <summary>
+    /// Builds an <c>ocr.models.list</c> reply with one catalog entry per model (only the
+    /// <c>name</c>/<c>installed</c> fields the core's installed check reads).
+    /// Dựng phản hồi <c>ocr.models.list</c> với một mục catalog mỗi model (chỉ các field
+    /// <c>name</c>/<c>installed</c> mà bước kiểm tra installed của core đọc).
+    /// </summary>
+    private static JsonObject CatalogResult(params (string Name, bool Installed)[] models)
+    {
+        var catalog = new JsonArray();
+        foreach ((string name, bool installed) in models)
+        {
+            catalog.Add(new JsonObject
+            {
+                ["name"] = name,
+                ["kind"] = name.StartsWith("det", StringComparison.Ordinal) ? "det" : "rec",
+                ["installed"] = installed,
+                ["inUse"] = false,
+            });
+        }
+        return new JsonObject { ["catalog"] = catalog };
     }
 
     /// <summary>
@@ -579,6 +635,78 @@ public class PipelineHostTests
     }
 
     [Fact]
+    public async Task Start_FontScaleZero_InvalidParams()
+    {
+        await using var host = CreateHost(
+            new FakeSidecarRpc(), RegistryWith(new CountingTranslator()), new JsonRpcServer());
+
+        var parameters = StartParams();
+        parameters["fontScale"] = 0;
+        var ex = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(parameters, CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InvalidParams, ex.Code);
+        Assert.Contains("fontScale", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Start_PassesFontScaleToAnnotator()
+    {
+        await using var peer = new Peer();
+        var annotator = new FakeAnnotator();
+        await using var host = CreateHost(
+            new FakeSidecarRpc { NextResult = SpotResult() },
+            RegistryWith(new CountingTranslator()), peer.Server,
+            annotator: annotator, previewMapName: UniquePreviewMapName("fontscale-start"));
+
+        await host.StartAsync(StartParams(fontScale: 1.25), CancellationToken.None);
+
+        await WaitUntilAsync(() => Math.Abs(annotator.LastFontScale - 1.25) < 1e-9,
+            "annotator font scale 1.25");
+    }
+
+    [Fact]
+    public async Task SetFontScale_AppliesToRunningSession()
+    {
+        await using var peer = new Peer();
+        var sources = new List<FakeCaptureSource>();
+        var annotator = new FakeAnnotator();
+        await using var host = CreateHost(
+            new FakeSidecarRpc { NextResult = SpotResult() },
+            RegistryWith(new CountingTranslator()), peer.Server, sources,
+            annotator: annotator, previewMapName: UniquePreviewMapName("fontscale-live"));
+
+        await host.StartAsync(StartParams(), CancellationToken.None);
+        await WaitUntilAsync(() => Math.Abs(annotator.LastFontScale - 1.0) < 1e-9,
+            "annotator initial font scale");
+
+        JsonNode? echoed = await host.SetFontScaleAsync(
+            new JsonObject { ["fontScale"] = 0.85 }, CancellationToken.None);
+        Assert.Equal(0.85, echoed!["fontScale"]!.GetValue<double>(), 3);
+
+        // Keep frames flowing so the annotation loop ticks with the new value.
+        // Giữ frame chảy để vòng ghi chú tick với giá trị mới.
+        for (int i = 0; i < 40 && Math.Abs(annotator.LastFontScale - 0.85) > 1e-9; i++)
+        {
+            sources[^1].Raise(TinyFrame());
+            await Task.Delay(50);
+        }
+
+        Assert.Equal(0.85, annotator.LastFontScale, 3);
+    }
+
+    [Fact]
+    public async Task SetFontScale_RejectsOutOfRange()
+    {
+        await using var host = CreateHost(
+            new FakeSidecarRpc(), RegistryWith(new CountingTranslator()), new JsonRpcServer());
+
+        var ex = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.SetFontScaleAsync(new JsonObject { ["fontScale"] = 4.5 }, CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InvalidParams, ex.Code);
+        Assert.Contains("fontScale", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Start_FpsMissing_UsesCoreConfigDefault()
     {
         OcrLoopOptions? captured = null;
@@ -604,5 +732,189 @@ public class PipelineHostTests
         Assert.Equal(CoreConfig.LoadFrom(CoreConfig.DefaultPath).OcrFps, captured!.Fps);
         Assert.True(captured.Fps >= 1);
         Assert.Equal(CoreConfig.LoadFrom(CoreConfig.DefaultPath).CaptureFps, captured!.CaptureFps);
+    }
+
+    //
+    // core.start ocr:{det,rec} — installed check + pair switch before any loop work.
+    // core.start ocr:{det,rec} — kiểm tra installed + chuyển cặp trước khi loop chạy.
+    //
+
+    [Fact]
+    public async Task Start_WithOcrPair_ListsThenSetsPairBeforeLoopWork()
+    {
+        await using var peer = new Peer();
+        var sources = new List<FakeCaptureSource>();
+        var rpc = new FakeSidecarRpc { NextResult = SpotResult("HELLO") };
+        rpc.ResultsByMethod["ocr.models.list"] = CatalogResult(("detA", true), ("recA", true));
+        await using var host = CreateHost(rpc, RegistryWith(new CountingTranslator()), peer.Server, sources);
+
+        var parameters = StartParams();
+        parameters["ocr"] = new JsonObject { ["det"] = "detA", ["rec"] = "recA" };
+        JsonNode? started = await host.StartAsync(parameters, CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+
+        // The queued frame is consumed by the loop's first-frame wait; a fresh frame
+        // makes the loop do its first real work (an ocr.spot of its own).
+        // Frame xếp hàng bị bước chờ frame đầu tiêu thụ; một frame mới khiến loop
+        // làm việc thật đầu tiên (một ocr.spot của chính nó).
+        await Task.Delay(400, TestContext.Current.CancellationToken);
+        sources[^1].Raise(TinyFrame());
+
+        // Wait until some ocr.spot happened (loop work or warmup — both come after the pair RPC).
+        // Chờ tới khi có ocr.spot (loop hoặc warmup — cả hai đều sau RPC cặp model).
+        await WaitUntilAsync(() => rpc.Calls.Any(c => c.Method == "ocr.spot"), "first ocr.spot");
+
+        string[] methods = [.. rpc.Calls.Select(c => c.Method)];
+        int listIx = Array.IndexOf(methods, "ocr.models.list");
+        int setIx = Array.IndexOf(methods, "ocr.models.set");
+        int spotIx = Array.IndexOf(methods, "ocr.spot");
+        Assert.True(listIx >= 0, "ocr.models.list was not called");
+        Assert.True(setIx >= 0, "ocr.models.set was not called");
+        Assert.True(listIx < setIx, $"ocr.models.list must precede ocr.models.set (got {listIx} vs {setIx})");
+        Assert.True(setIx < spotIx, $"ocr.models.set must precede the first ocr.spot (got {setIx} vs {spotIx})");
+        Assert.Equal(1, methods.Count(m => m == "ocr.models.list"));
+        Assert.Equal(1, methods.Count(m => m == "ocr.models.set"));
+
+        // The pair switch must carry exactly the requested names.
+        // Lời chuyển cặp phải mang đúng hai tên được yêu cầu.
+        JsonNode? setParams = rpc.Calls.Single(c => c.Method == "ocr.models.set").Params;
+        Assert.Equal("detA", setParams!["det"]!.GetValue<string>());
+        Assert.Equal("recA", setParams!["rec"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Start_WithOcrPairNotInstalled_ThrowsOcrModelMissing()
+    {
+        var sources = new List<FakeCaptureSource>();
+        var rpc = new FakeSidecarRpc { NextResult = SpotResult() };
+        rpc.ResultsByMethod["ocr.models.list"] = CatalogResult(("detA", true), ("recB", false));
+        await using var host = CreateHost(rpc, RegistryWith(new CountingTranslator()), new JsonRpcServer(), sources);
+
+        var parameters = StartParams();
+        parameters["ocr"] = new JsonObject { ["det"] = "detA", ["rec"] = "recB" };
+        var ex = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(parameters, CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InternalError, ex.Code);
+        Assert.Contains("ocr-model-missing: detA/recB", ex.Message, StringComparison.Ordinal);
+
+        // Failed before any side effect: no pair switch, no warmup spot, and the session
+        // slot stays free — a start without ocr still works.
+        // Thất bại trước mọi side effect: không chuyển cặp, không warmup spot, slot phiên
+        // vẫn tự do — start không có ocr vẫn chạy được.
+        Assert.DoesNotContain(rpc.Calls, c => c.Method == "ocr.models.set");
+        Assert.DoesNotContain(rpc.Calls, c => c.Method == "ocr.spot");
+        JsonNode? restarted = await host.StartAsync(StartParams(), CancellationToken.None);
+        Assert.True(restarted!["running"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task Start_WithoutOcr_MakesNoModelCalls()
+    {
+        var sources = new List<FakeCaptureSource>();
+        var rpc = new FakeSidecarRpc { NextResult = SpotResult() };
+        await using var host = CreateHost(rpc, RegistryWith(new CountingTranslator()), new JsonRpcServer(), sources);
+
+        JsonNode? started = await host.StartAsync(StartParams(), CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+
+        // Backward compatible: the sidecar keeps its default pair — the host must not
+        // even ask. Wait for real loop work (a fresh frame -> one ocr.spot) before
+        // concluding, so the assertion sees a running pipeline.
+        // Tương thích ngược: sidecar giữ cặp mặc định — host không hỏi gì cả. Chờ việc
+        // thật của loop (frame mới -> một ocr.spot) rồi mới kết luận, để assert thấy
+        // pipeline đang chạy.
+        await Task.Delay(400, TestContext.Current.CancellationToken);
+        sources[^1].Raise(TinyFrame());
+        await WaitUntilAsync(() => rpc.Calls.Any(c => c.Method == "ocr.spot"), "first ocr.spot");
+        Assert.DoesNotContain(rpc.Calls, c => c.Method.StartsWith("ocr.models.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Start_MalformedOcr_InvalidParams()
+    {
+        await using var host = CreateHost(
+            new FakeSidecarRpc(), RegistryWith(new CountingTranslator()), new JsonRpcServer());
+
+        var notAnObject = StartParams();
+        notAnObject["ocr"] = "detA";
+        var ex1 = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(notAnObject, CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InvalidParams, ex1.Code);
+        Assert.Contains("ocr", ex1.Message, StringComparison.Ordinal);
+
+        var emptyDet = StartParams();
+        emptyDet["ocr"] = new JsonObject { ["det"] = "", ["rec"] = "recA" };
+        var ex2 = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(emptyDet, CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InvalidParams, ex2.Code);
+
+        var missingRec = StartParams();
+        missingRec["ocr"] = new JsonObject { ["det"] = "detA" };
+        var ex3 = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(missingRec, CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InvalidParams, ex3.Code);
+    }
+
+    [Fact]
+    public async Task Start_NoSidecar_WithOcrPair_InternalError()
+    {
+        await using var host = CreateHost(rpc: null, RegistryWith(new CountingTranslator()), new JsonRpcServer());
+
+        var parameters = StartParams();
+        parameters["ocr"] = new JsonObject { ["det"] = "detA", ["rec"] = "recA" };
+        var ex = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(parameters, CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InternalError, ex.Code);
+        Assert.Contains("sidecar", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    //
+    // Warmup — one fire-and-forget tiny spot after core.start; never blocks, never crashes.
+    // Warmup — một spot nhỏ fire-and-forget sau core.start; không chặn, không crash.
+    //
+
+    [Fact]
+    public async Task Start_FiresOneWarmupSpotAfterStart()
+    {
+        var rpc = new FakeSidecarRpc { NextResult = SpotResult() };
+        // A source that never raises a frame: the loop waits for its first frame, so any
+        // ocr.spot recorded here can only be the warmup.
+        // Source không bao giờ phát frame: loop chờ frame đầu, nên ocr.spot ghi được
+        // ở đây chỉ có thể là warmup.
+        await using var host = CreateHost(
+            rpc, RegistryWith(new CountingTranslator()), new JsonRpcServer(),
+            sourceFactory: _ => new FakeCaptureSource());
+
+        JsonNode? started = await host.StartAsync(StartParams(), CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+
+        await WaitUntilAsync(() => rpc.Calls.Any(c => c.Method == "ocr.spot"), "warmup ocr.spot");
+
+        (string _, JsonNode? spotParams) = Assert.Single(rpc.Calls.Where(c => c.Method == "ocr.spot").ToArray());
+        string? image = spotParams?["image"] is JsonValue v && v.TryGetValue<string>(out string? b64) ? b64 : null;
+        Assert.False(string.IsNullOrEmpty(image), "warmup ocr.spot must carry a non-empty base64 image");
+    }
+
+    [Fact]
+    public async Task Start_WarmupFailure_LoggedAndNonFatal()
+    {
+        var stderr = new StringWriter();
+        var rpc = new FakeSidecarRpc();
+        rpc.ThrowByMethod["ocr.spot"] = new InvalidOperationException("boom");
+        await using var host = CreateHost(
+            rpc, RegistryWith(new CountingTranslator()), new JsonRpcServer(), stderr: stderr,
+            sourceFactory: _ => new FakeCaptureSource());
+
+        JsonNode? started = await host.StartAsync(StartParams(), CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+
+        // The failure is logged in the host's warning style and swallows cleanly.
+        // Lỗi được ghi theo style cảnh báo của host và được nuốt sạch.
+        await WaitUntilAsync(() => stderr.ToString().Contains("sidecar warmup failed"),
+            "warmup failure warning");
+        Assert.Contains("boom", stderr.ToString(), StringComparison.Ordinal);
+
+        JsonNode? stopped = await host.StopAsync(null, CancellationToken.None);
+        Assert.False(stopped!["running"]!.GetValue<bool>());
     }
 }

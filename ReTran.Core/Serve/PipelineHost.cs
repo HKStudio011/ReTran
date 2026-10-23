@@ -45,6 +45,14 @@ public sealed class PipelineHost : IAsyncDisposable
     private readonly int _annotatorFps;
 
     /// <summary>
+    /// User font multiplier applied by the annotator (1.0 default); updated live by
+    /// <see cref="SetFontScaleAsync"/> and read once per annotation tick.
+    /// Hệ số cỡ chữ người dùng mà annotator áp dụng (mặc định 1.0); cập nhật trực tiếp bởi
+    /// <see cref="SetFontScaleAsync"/> và đọc mỗi tick ghi chú.
+    /// </summary>
+    private double _annotationFontScale = 1.0;
+
+    /// <summary>
     /// Shared-memory name of the preview channel; <see langword="null"/> means
     /// <see cref="PreviewProtocol.MapName"/>. Tên shared memory của channel preview;
     /// <see langword="null"/> nghĩa là <see cref="PreviewProtocol.MapName"/>.
@@ -106,36 +114,74 @@ public sealed class PipelineHost : IAsyncDisposable
     }
 
     /// <summary>
-    /// Starts one pipeline session (<c>core.start</c>): validates params, opens the capture source,
-    /// and launches the loop in the background. Khởi động một phiên pipeline (<c>core.start</c>):
-    /// kiểm tra tham số, mở capture source, rồi chạy loop ở chế độ nền.
+    /// Starts one pipeline session (<c>core.start</c>): validates params, verifies and
+    /// switches the OCR model pair when <c>ocr:{det,rec}</c> is given, opens the capture
+    /// source, launches the loop in the background, then fires one fire-and-forget
+    /// warmup spot.
+    /// Khởi động một phiên pipeline (<c>core.start</c>): kiểm tra tham số, xác minh và
+    /// chuyển cặp model OCR khi có <c>ocr:{det,rec}</c>, mở capture source, chạy loop ở
+    /// chế độ nền, rồi bắn một lượt warmup spot kiểu fire-and-forget.
     /// </summary>
     /// <param name="@params">
     /// <c>{source:{kind:"screen",monitor}|"window",hwnd}, translate:{provider,src,dst},
-    /// ocrFps?, captureFps?}</c> — missing fps values fall back to <see cref="CoreConfig"/> defaults.
-    /// Tham số theo hợp đồng spec §3.1 — fps thiếu thì lấy default từ <see cref="CoreConfig"/>.
+    /// ocr?:{det,rec}, ocrFps?, captureFps?, fontScale?}</c> — missing fps values fall
+    /// back to <see cref="CoreConfig"/> defaults; a missing <c>ocr</c> keeps the sidecar's
+    /// current pair (no <c>ocr.models.*</c> call).
+    /// Tham số theo hợp đồng spec §3.1 — fps thiếu thì lấy default từ
+    /// <see cref="CoreConfig"/>; thiếu <c>ocr</c> thì giữ cặp model hiện tại của sidecar
+    /// (không gọi <c>ocr.models.*</c>).
     /// </param>
     /// <param name="ct">Caller token; the session runs on its own token. Token của caller; phiên chạy bằng token riêng.</param>
     /// <returns><c>{"running": true}</c>. Kết quả <c>{"running": true}</c>.</returns>
     /// <exception cref="RpcMethodException">
     /// -32602 on malformed params or unknown provider; -32600 when a session is already running;
-    /// -32603 when the sidecar is unavailable or the capture source cannot be opened.
+    /// -32603 when the sidecar is unavailable, the capture source cannot be opened, or a
+    /// requested OCR model is not installed (<c>ocr-model-missing</c>).
     /// -32602 khi tham số sai hoặc provider lạ; -32600 khi phiên đang chạy;
-    /// -32603 khi sidecar không sẵn sàng hoặc không mở được capture source.
+    /// -32603 khi sidecar không sẵn sàng, không mở được capture source, hoặc model OCR
+    /// yêu cầu chưa được cài (<c>ocr-model-missing</c>).
     /// </exception>
-    public Task<JsonNode?> StartAsync(JsonNode? @params, CancellationToken ct)
+    public async Task<JsonNode?> StartAsync(JsonNode? @params, CancellationToken ct)
     {
         StartSpec spec = ParseStart(@params);
+
+        // Cheap state gates first, in the same order as before (-32600 running, then
+        // -32603 sidecar); the lock is then dropped because the ocr.models.* calls below
+        // await sidecar I/O that must never hold the session lock.
+        // Hai cửa trạng thái rẻ chạy trước, giữ đúng thứ tự cũ (-32600 đang chạy, rồi
+        // -32603 sidecar); sau đó nhả lock vì các lời gọi ocr.models.* bên dưới phải
+        // await I/O sidecar, không được giữ lock phiên.
         lock (_sync)
         {
             if (_session is not null)
                 throw new RpcMethodException(RpcErrorCodes.InvalidRequest,
                     "pipeline already running (core.stop first).");
+        }
 
-            ISidecarRpc? rpc = _rpc;
-            if (rpc is null)
-                throw new RpcMethodException(RpcErrorCodes.InternalError,
-                    "sidecar not available (python/venv missing or spawn failed).");
+        ISidecarRpc rpc = _rpc
+            ?? throw new RpcMethodException(RpcErrorCodes.InternalError,
+                "sidecar not available (python/venv missing or spawn failed).");
+
+        // core.start ocr:{det,rec}: verify both models against the sidecar catalog and
+        // switch the pair BEFORE any loop (or warmup) can touch the engine — the sidecar's
+        // ocr.models.set deliberately skips the installed check.
+        // core.start ocr:{det,rec}: kiểm tra cả hai model với catalog sidecar và chuyển
+        // cặp TRƯỚC khi bất kỳ loop (hoặc warmup) nào chạm engine — ocr.models.set của
+        // sidecar cố ý bỏ qua bước kiểm tra installed.
+        if (spec.DetModel is string det && spec.RecModel is string rec)
+            await EnsureOcrPairInstalledAsync(rpc, det, rec, ct);
+
+        lock (_sync)
+        {
+            // Re-check: another core.start could have claimed the slot while the pair
+            // RPC was in flight (the serve loop serializes requests; this guards direct
+            // callers).
+            // Kiểm tra lại: một core.start khác có thể đã chiếm slot khi RPC cặp model
+            // đang bay (vòng serve tuần tự hoá request; phần này giữ cho caller trực
+            // tiếp như test).
+            if (_session is not null)
+                throw new RpcMethodException(RpcErrorCodes.InvalidRequest,
+                    "pipeline already running (core.stop first).");
 
             ICaptureSource source;
             try
@@ -159,6 +205,10 @@ public sealed class PipelineHost : IAsyncDisposable
 
             var session = new Session(source, snapshot, trackAnnotatedFrames: _annotator is not null);
             _session = session;
+            // Applied before either loop starts so the first annotated frame already uses the
+            // App's font setting. Áp trước khi cả hai loop chạy để khung ghi chú đầu tiên đã
+            // dùng đúng cỡ chữ của App.
+            Volatile.Write(ref _annotationFontScale, spec.FontScale);
 
             // Subscribe the annotation handler BEFORE the OcrLoop starts (Task.Run below) so it
             // always runs first on FrameArrived and copies the frame into a pooled buffer before
@@ -202,7 +252,15 @@ public sealed class PipelineHost : IAsyncDisposable
 
             session.Loop = Task.Run(() => RunSessionAsync(session, spec.ToOptions(), pipeline, sink));
         }
-        return Task.FromResult<JsonNode?>(new JsonObject { ["running"] = true });
+
+        // Fire-and-forget warmup AFTER the loops start (and after ocr.models.set when a
+        // pair was provided): the first real frame then pays only inference time, not the
+        // one-time model load. Never blocks core.start, never crashes the process.
+        // Warmup fire-and-forget SAU khi các loop chạy (và sau ocr.models.set khi có
+        // cặp model): khung thật đầu tiên khi đó chỉ trả thời gian suy luận, không phải
+        // lần nạp model. Không bao giờ chặn core.start, không làm crash tiến trình.
+        WarmUpSidecar(rpc);
+        return new JsonObject { ["running"] = true };
     }
 
     /// <summary>
@@ -289,6 +347,108 @@ public sealed class PipelineHost : IAsyncDisposable
             }
         }
         return new JsonObject { ["running"] = false };
+    }
+
+    /// <summary>
+    /// Updates the user font multiplier used for annotated frames (<c>core.set_font_scale</c>).
+    /// It applies to the running session immediately (read on the next annotation tick) and to
+    /// later sessions started without an explicit <c>fontScale</c>.
+    /// Cập nhật hệ số cỡ chữ dùng cho khung ghi chú (<c>core.set_font_scale</c>). Áp dụng ngay
+    /// cho phiên đang chạy (đọc ở tick ghi chú kế tiếp) và cho các phiên sau khởi động mà không
+    /// truyền <c>fontScale</c> tường minh.
+    /// </summary>
+    /// <param name="params">Object <c>{"fontScale": number}</c> in (0, 4]. Object <c>{"fontScale": number}</c> trong (0, 4].</param>
+    /// <param name="ct">Unused — the update is synchronous. Không dùng — cập nhật đồng bộ.</param>
+    /// <returns><c>{"fontScale": number}</c> echoing the accepted value. Giá trị đã nhận, phản hồi lại.</returns>
+    /// <exception cref="RpcMethodException">Thrown with -32602 when the params are invalid. Ném -32602 khi tham số sai.</exception>
+    public Task<JsonNode?> SetFontScaleAsync(JsonNode? @params, CancellationToken ct)
+    {
+        if (@params is not JsonObject p
+            || p["fontScale"] is not JsonValue value
+            || !value.TryGetValue<double>(out double fontScale)
+            || !double.IsFinite(fontScale)
+            || fontScale is <= 0 or > 4)
+        {
+            throw new RpcMethodException(RpcErrorCodes.InvalidParams,
+                "'fontScale' must be a number in (0, 4].");
+        }
+
+        Volatile.Write(ref _annotationFontScale, fontScale);
+        return Task.FromResult<JsonNode?>(new JsonObject { ["fontScale"] = fontScale });
+    }
+
+    /// <summary>
+    /// Proxies <c>ocr.models.list</c> to the sidecar: the model catalog with per-model
+    /// <c>installed</c>/<c>inUse</c> flags plus the active det/rec pair. The sidecar ignores
+    /// the params; they are forwarded verbatim anyway.
+    /// Proxy <c>ocr.models.list</c> sang sidecar: catalog model kèm cờ
+    /// <c>installed</c>/<c>inUse</c> từng mục cùng cặp det/rec đang hoạt động. Sidecar
+    /// không dùng params; chúng vẫn được chuyển tiếp nguyên văn.
+    /// </summary>
+    /// <param name="params">Ignored by the sidecar; forwarded verbatim. Sidecar không dùng; chuyển tiếp nguyên văn.</param>
+    /// <param name="ct">Token for the sidecar call. Token cho lời gọi sidecar.</param>
+    /// <returns>The sidecar's <c>{catalog, active}</c> reply, unchanged. Phản hồi <c>{catalog, active}</c> của sidecar, nguyên trạng.</returns>
+    /// <exception cref="RpcMethodException">-32603 when the sidecar is unavailable. -32603 khi sidecar không sẵn sàng.</exception>
+    public Task<JsonNode?> ListOcrModelsAsync(JsonNode? @params, CancellationToken ct) =>
+        ForwardToSidecarAsync("ocr.models.list", @params, ct);
+
+    /// <summary>
+    /// Proxies <c>ocr.models.download {name}</c> to the sidecar: starts a background
+    /// download of one catalog model (never blocks <c>ocr.spot</c>).
+    /// Proxy <c>ocr.models.download {name}</c> sang sidecar: bắt đầu tải nền một model
+    /// trong catalog (không bao giờ chặn <c>ocr.spot</c>).
+    /// </summary>
+    /// <param name="params">Object <c>{name}</c> with the catalog model name; validated by the sidecar. Object <c>{name}</c> chứa tên model trong catalog; sidecar kiểm tra.</param>
+    /// <param name="ct">Token for the sidecar call. Token cho lời gọi sidecar.</param>
+    /// <returns>The sidecar's reply, unchanged. Phản hồi của sidecar, nguyên trạng.</returns>
+    /// <exception cref="RpcMethodException">-32603 when the sidecar is unavailable. -32603 khi sidecar không sẵn sàng.</exception>
+    public Task<JsonNode?> DownloadOcrModelAsync(JsonNode? @params, CancellationToken ct) =>
+        ForwardToSidecarAsync("ocr.models.download", @params, ct);
+
+    /// <summary>
+    /// Proxies <c>ocr.models.delete {name}</c> to the sidecar: removes one model's files
+    /// from the cache (refused while the model is in use or downloading).
+    /// Proxy <c>ocr.models.delete {name}</c> sang sidecar: xoá file của một model khỏi
+    /// cache (từ chối khi model đang dùng hoặc đang tải).
+    /// </summary>
+    /// <param name="params">Object <c>{name}</c> with the catalog model name; validated by the sidecar. Object <c>{name}</c> chứa tên model trong catalog; sidecar kiểm tra.</param>
+    /// <param name="ct">Token for the sidecar call. Token cho lời gọi sidecar.</param>
+    /// <returns>The sidecar's reply, unchanged. Phản hồi của sidecar, nguyên trạng.</returns>
+    /// <exception cref="RpcMethodException">-32603 when the sidecar is unavailable. -32603 khi sidecar không sẵn sàng.</exception>
+    public Task<JsonNode?> DeleteOcrModelAsync(JsonNode? @params, CancellationToken ct) =>
+        ForwardToSidecarAsync("ocr.models.delete", @params, ct);
+
+    /// <summary>
+    /// Proxies <c>ocr.models.set {det, rec}</c> to the sidecar: switches the active det/rec
+    /// pair — the engine rebuilds lazily on the next <c>ocr.spot</c>. The sidecar does not
+    /// check <c>installed</c> here; <see cref="StartAsync"/> performs that explicit check
+    /// for <c>core.start</c>.
+    /// Proxy <c>ocr.models.set {det, rec}</c> sang sidecar: chuyển cặp det/rec đang hoạt
+    /// động — engine dựng lại lười ở lần <c>ocr.spot</c> kế tiếp. Sidecar không kiểm tra
+    /// <c>installed</c> ở đây; <see cref="StartAsync"/> là nơi làm bước kiểm tra tường minh
+    /// đó cho <c>core.start</c>.
+    /// </summary>
+    /// <param name="params">Object <c>{det, rec}</c> with the catalog names; validated by the sidecar. Object <c>{det, rec}</c> chứa hai tên trong catalog; sidecar kiểm tra.</param>
+    /// <param name="ct">Token for the sidecar call. Token cho lời gọi sidecar.</param>
+    /// <returns>The sidecar's reply, unchanged. Phản hồi của sidecar, nguyên trạng.</returns>
+    /// <exception cref="RpcMethodException">-32603 when the sidecar is unavailable. -32603 khi sidecar không sẵn sàng.</exception>
+    public Task<JsonNode?> SetOcrModelPairAsync(JsonNode? @params, CancellationToken ct) =>
+        ForwardToSidecarAsync("ocr.models.set", @params, ct);
+
+    /// <summary>
+    /// Shared body of the <c>ocr.models.*</c> proxies: forwards the method and params
+    /// verbatim to the sidecar, or throws -32603 when it never spawned.
+    /// Thân chung của các proxy <c>ocr.models.*</c>: chuyển tiếp method và params nguyên
+    /// văn sang sidecar, hoặc ném -32603 khi sidecar không khởi tạo được.
+    /// </summary>
+    /// <exception cref="RpcMethodException">-32603 when <see cref="_rpc"/> is null. -32603 khi <see cref="_rpc"/> là null.</exception>
+    private Task<JsonNode?> ForwardToSidecarAsync(string method, JsonNode? @params, CancellationToken ct)
+    {
+        ISidecarRpc? rpc = _rpc;
+        if (rpc is null)
+            throw new RpcMethodException(RpcErrorCodes.InternalError,
+                "sidecar not available (python/venv missing or spawn failed).");
+        return rpc.CallAsync(method, @params, ct);
     }
 
     /// <summary>
@@ -421,7 +581,139 @@ public sealed class PipelineHost : IAsyncDisposable
             throw new RpcMethodException(RpcErrorCodes.InvalidParams, "'captureFps' must be an integer 1..60.");
         }
 
-        return new StartSpec(useWindow, monitor, hwnd, provider, src, dst, translator, ocrFps, captureFps);
+        // User font multiplier for annotated frames (preview + virtual camera). The App
+        // persists 0.85/1.0/1.25; (0, 4] guards against degenerate values.
+        // Hệ số cỡ chữ cho khung ghi chú (preview + camera ảo). App lưu 0.85/1.0/1.25;
+        // khoảng (0, 4] chặn giá trị vô lý.
+        double fontScale = 1.0;
+        if (p["fontScale"] is JsonValue fontValue
+            && (!fontValue.TryGetValue<double>(out fontScale)
+                || !double.IsFinite(fontScale)
+                || fontScale is <= 0 or > 4))
+        {
+            throw new RpcMethodException(RpcErrorCodes.InvalidParams,
+                "'fontScale' must be a number in (0, 4].");
+        }
+
+        // Optional OCR model pair (ocr: {det, rec}). Absent -> the sidecar keeps its
+        // current pair and core.start makes no ocr.models.* call; present -> both names
+        // must be non-empty strings (-32602 here), and StartAsync verifies them against
+        // the sidecar catalog before starting any loop.
+        // Cặp model OCR tùy chọn (ocr: {det, rec}). Thiếu -> sidecar giữ cặp hiện tại và
+        // core.start không gọi ocr.models.*; có -> hai tên phải là chuỗi khác rỗng
+        // (-32602 ở đây), và StartAsync kiểm tra với catalog sidecar trước khi chạy loop.
+        string? detModel = null;
+        string? recModel = null;
+        if (p.TryGetPropertyValue("ocr", out JsonNode? ocrNode))
+        {
+            if (ocrNode is not JsonObject ocr)
+                throw new RpcMethodException(RpcErrorCodes.InvalidParams,
+                    "'ocr' must be an object ({det, rec}).");
+            detModel = RequiredString(ocr, "ocr", "det");
+            recModel = RequiredString(ocr, "ocr", "rec");
+        }
+
+        return new StartSpec(useWindow, monitor, hwnd, provider, src, dst, translator, ocrFps,
+            captureFps, fontScale, detModel, recModel);
+    }
+
+    /// <summary>
+    /// Verifies the requested det/rec pair against the sidecar catalog
+    /// (<c>ocr.models.list</c>) and switches the sidecar to it (<c>ocr.models.set</c>)
+    /// only when both models are installed — the explicit installed check the sidecar's
+    /// own <c>ocr.models.set</c> deliberately skips.
+    /// Kiểm tra cặp det/rec yêu cầu với catalog sidecar (<c>ocr.models.list</c>) và
+    /// chuyển sidecar sang cặp đó (<c>ocr.models.set</c>) chỉ khi cả hai model đã cài —
+    /// bước kiểm tra installed tường minh mà <c>ocr.models.set</c> của sidecar cố ý bỏ qua.
+    /// </summary>
+    /// <param name="rpc">Sidecar peer. Peer sidecar.</param>
+    /// <param name="det">Requested det model name. Tên model det được yêu cầu.</param>
+    /// <param name="rec">Requested rec model name. Tên model rec được yêu cầu.</param>
+    /// <param name="ct">Caller token, honored on both sidecar calls. Token của caller, được tôn trọng trên cả hai lời gọi sidecar.</param>
+    /// <exception cref="RpcMethodException">
+    /// -32603 (<c>ocr-model-missing: {det}/{rec}</c>) when either name is absent from the
+    /// catalog or reported as not installed — thrown before any loop starts.
+    /// -32603 (<c>ocr-model-missing: {det}/{rec}</c>) khi một tên không có trong catalog
+    /// hoặc được báo là chưa cài — ném trước khi loop nào chạy.
+    /// </exception>
+    private static async Task EnsureOcrPairInstalledAsync(
+        ISidecarRpc rpc, string det, string rec, CancellationToken ct)
+    {
+        JsonNode? listed = await rpc.CallAsync("ocr.models.list", null, ct);
+        JsonNode? catalog = listed?["catalog"];
+        if (!IsModelInstalledInCatalog(catalog, det) || !IsModelInstalledInCatalog(catalog, rec))
+            throw new RpcMethodException(RpcErrorCodes.InternalError, $"ocr-model-missing: {det}/{rec}");
+        await rpc.CallAsync("ocr.models.set", new JsonObject { ["det"] = det, ["rec"] = rec }, ct);
+    }
+
+    /// <summary>
+    /// Tells whether <paramref name="name"/> appears in the <c>ocr.models.list</c> catalog
+    /// with <c>installed: true</c>. A missing entry counts as not installed.
+    /// Cho biết <paramref name="name"/> có xuất hiện trong catalog của
+    /// <c>ocr.models.list</c> với <c>installed: true</c> hay không. Thiếu mục được tính
+    /// là chưa cài.
+    /// </summary>
+    /// <param name="catalog">The <c>catalog</c> array of the list reply (null-safe). Mảng <c>catalog</c> trong phản hồi list (an toàn với null).</param>
+    /// <param name="name">Catalog model name to look up. Tên model trong catalog cần tra.</param>
+    /// <returns>True when the model is listed and installed. True khi model có trong danh sách và đã cài.</returns>
+    private static bool IsModelInstalledInCatalog(JsonNode? catalog, string name)
+    {
+        if (catalog is not JsonArray entries) return false;
+        foreach (JsonNode? entry in entries)
+        {
+            if (entry is not JsonObject model) continue;
+            if (model["name"] is not JsonValue nameValue
+                || !nameValue.TryGetValue<string>(out string? entryName)
+                || entryName != name) continue;
+            return model["installed"] is JsonValue installed
+                && installed.TryGetValue<bool>(out bool value) && value;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Tiny 32x8 white PNG (base64) used to warm the sidecar after <c>core.start</c>: the
+    /// first real <c>ocr.spot</c> then pays only inference time, not the one-time paddle
+    /// import + model load (~30s on cold start).
+    /// PNG trắng 32x8 nhỏ (base64) dùng làm nóng sidecar sau <c>core.start</c>: khung
+    /// <c>ocr.spot</c> thật đầu tiên khi đó chỉ tốn thời gian suy luận, không phải trả lần
+    /// nạp paddle import + model (~30s khi lạnh).
+    /// </summary>
+    private const string WarmupImageBase64 =
+        "iVBORw0KGgoAAAANSUhEUgAAACAAAAAICAYAAACYhf2vAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAAYSURBVDhPY/g/wIABXYDeYNQBow4YdQAAbID8LhqQghcAAAAASUVORK5CYII=";
+
+    /// <summary>
+    /// Fires one background <c>ocr.spot</c> with a tiny PNG right after the loops start
+    /// (and after <c>ocr.models.set</c>, when a pair was provided) so the model load
+    /// happens before the user's first frame. Fire-and-forget: never blocks
+    /// <c>core.start</c>, and any failure is logged and swallowed — the first real
+    /// request still works, it just takes longer.
+    /// Gửi nền một <c>ocr.spot</c> với ảnh PNG nhỏ ngay sau khi các loop chạy (và sau
+    /// <c>ocr.models.set</c>, khi có cặp model) để việc nạp model diễn ra trước khung
+    /// đầu tiên của người dùng. Fire-and-forget: không bao giờ chặn <c>core.start</c>;
+    /// mọi lỗi đều được ghi lại và nuốt — yêu cầu thật đầu tiên vẫn chạy được, chỉ là
+    /// chậm hơn.
+    /// </summary>
+    /// <param name="rpc">Sidecar peer. Peer sidecar.</param>
+    private void WarmUpSidecar(ISidecarRpc rpc) => _ = Task.Run(() => WarmUpSidecarAsync(rpc));
+
+    /// <summary>
+    /// Warmup body: one tiny spot with a generous timeout (the first call also carries
+    /// the one-time model load); failures land in the warnings sink.
+    /// Thân warmup: một spot nhỏ với timeout rộng (lời gọi đầu còn gánh lần nạp model);
+    /// lỗi rơi vào nơi ghi cảnh báo.
+    /// </summary>
+    private async Task WarmUpSidecarAsync(ISidecarRpc rpc)
+    {
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+            await rpc.CallAsync("ocr.spot", new JsonObject { ["image"] = WarmupImageBase64 }, cts.Token);
+        }
+        catch (Exception ex)
+        {
+            _stderr.WriteLine($"warn: sidecar warmup failed: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -485,7 +777,8 @@ public sealed class PipelineHost : IAsyncDisposable
                 if (!session.AnnotBuffer.TryTakeLatest(out Frame? frame) || frame is null) continue;
                 try
                 {
-                    AnnotatedFrame annotated = annotator.Annotate(frame, session.Snapshot.TryGet());
+                    AnnotatedFrame annotated = annotator.Annotate(
+                        frame, session.Snapshot.TryGet(), Volatile.Read(ref _annotationFontScale));
                     if (!TryPublishPreview(session, annotated)) continue;
                     await _server.NotifyAsync("frame.annotated", new JsonObject
                     {
@@ -684,7 +977,10 @@ public sealed class PipelineHost : IAsyncDisposable
         string Dst,
         ITranslator Translator,
         int OcrFps,
-        int CaptureFps)
+        int CaptureFps,
+        double FontScale,
+        string? DetModel,
+        string? RecModel)
     {
         /// <summary>
         /// Builds the loop options; <see cref="StartSpec.CaptureFps"/> only cadences the capture

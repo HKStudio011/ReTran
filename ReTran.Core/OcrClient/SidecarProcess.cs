@@ -38,6 +38,16 @@ public sealed class SidecarProcess : IAsyncDisposable, ISidecarRpc
         };
         // Skip PaddleX's model-host connectivity check (adds ~4s to first model load offline).
         psi.EnvironmentVariables["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True";
+        // Pin the model cache next to the app data so core and sidecar agree on one
+        // directory (paddlex reads PADDLE_PDX_CACHE_HOME at import time). When
+        // LOCALAPPDATA is unset the variable is left alone: the sidecar falls back to the
+        // same path by itself.
+        // Ghim cache model cạnh dữ liệu app để core và sidecar thống nhất một thư mục
+        // (paddlex đọc PADDLE_PDX_CACHE_HOME lúc import). Khi LOCALAPPDATA chưa đặt thì
+        // bỏ qua biến này: sidecar tự fallback về đúng path đó.
+        string? localAppData = Environment.GetEnvironmentVariable("LOCALAPPDATA");
+        if (!string.IsNullOrEmpty(localAppData))
+            psi.EnvironmentVariables["PADDLE_PDX_CACHE_HOME"] = Path.Combine(localAppData, "ReTran", "models");
         psi.ArgumentList.Add("-m");
         psi.ArgumentList.Add("retran_core");
         psi.ArgumentList.Add("serve");

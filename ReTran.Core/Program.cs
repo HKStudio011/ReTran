@@ -57,39 +57,6 @@ public static class Program
         });
     }
 
-    /// <summary>
-    /// Tiny 32x8 white PNG (base64) used to warm the sidecar: the first real ocr.spot then pays
-    /// only inference time, not the one-time paddle import + model load (~30s on cold start).
-    /// PNG trắng 32x8 nhỏ (base64) dùng để làm nóng sidecar: khung ocr.spot thật đầu tiên chỉ còn
-    /// tốn thời gian suy luận, không phải trả lần nạp paddle import + model (~30s khi lạnh).
-    /// </summary>
-    private const string WarmupImageBase64 =
-        "iVBORw0KGgoAAAANSUhEUgAAACAAAAAICAYAAACYhf2vAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAAYSURBVDhPY/g/wIABXYDeYNQBow4YdQAAbID8LhqQghcAAAAASUVORK5CYII=";
-
-    /// <summary>
-    /// Fires one background ocr.spot against a dummy image right after the sidecar starts so the
-    /// model load happens before the user's first frame. Best effort: any failure is swallowed —
-    /// the first real request still works, it just takes longer.
-    /// Gửi nền một ocr.spot với ảnh dummy ngay sau khi sidecar khởi động để việc nạp model diễn ra
-    /// trước khung đầu tiên của người dùng. Best effort: mọi lỗi đều bị nuốt — yêu cầu thật đầu
-    /// tiên vẫn chạy được, chỉ là chậm hơn.
-    /// </summary>
-    private static void WarmUpSidecar(ISidecarRpc rpc)
-    {
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
-                await rpc.CallAsync("ocr.spot", new JsonObject { ["image"] = WarmupImageBase64 }, cts.Token);
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"sidecar warmup failed: {ex.Message}");
-            }
-        });
-    }
-
     /// <summary>Runs the long-running JSON-RPC peer on stdio (spawns the OCR sidecar when possible).</summary>
     private static async Task<int> RunServeAsync()
     {
@@ -108,7 +75,12 @@ public static class Program
                 catch (Exception ex) { Console.Error.WriteLine($"sidecar spawn failed: {ex.Message}"); }
             }
         }
-        if (rpc is not null) WarmUpSidecar(rpc);
+        // No eager warmup here: warming with a dummy spot before any pair is chosen would
+        // make the engine auto-download models (spec C10). PipelineHost.StartAsync fires
+        // the warmup after a successful core.start (and its ocr.models.set) instead.
+        // Không warmup sớm ở đây: warm bằng spot dummy trước khi chọn cặp sẽ khiến engine
+        // tự tải model (spec C10). PipelineHost.StartAsync bắn warmup sau một core.start
+        // thành công (và sau ocr.models.set của nó).
         RegisterOcrMethod(server, rpc is null ? null : new OcrPipeline(rpc, new OcrDiff()));
 
         var registry = new TranslatorRegistry();
@@ -119,6 +91,15 @@ public static class Program
         server.Register("core.start", p => host.StartAsync(p, CancellationToken.None));
         server.Register("core.stop", p => host.StopAsync(p, CancellationToken.None));
         server.Register("core.list_sources", _ => host.ListSourcesAsync(CancellationToken.None));
+        server.Register("core.set_font_scale", p => host.SetFontScaleAsync(p, CancellationToken.None));
+        // ocr.models.* proxies: the App talks model management to the sidecar through the
+        // core, keeping a single JSON-RPC channel.
+        // Proxy ocr.models.*: App nói chuyện quản lý model với sidecar qua core, giữ
+        // đúng một kênh JSON-RPC.
+        server.Register("ocr.models.list", p => host.ListOcrModelsAsync(p, CancellationToken.None));
+        server.Register("ocr.models.download", p => host.DownloadOcrModelAsync(p, CancellationToken.None));
+        server.Register("ocr.models.delete", p => host.DeleteOcrModelAsync(p, CancellationToken.None));
+        server.Register("ocr.models.set", p => host.SetOcrModelPairAsync(p, CancellationToken.None));
 
         var transport = new LineJsonRpcTransport(
             new StreamReader(Console.OpenStandardInput()),
