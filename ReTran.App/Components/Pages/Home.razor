@@ -1,274 +1,407 @@
 ﻿@page "/"
+@using System.Globalization
 @using ReTran_App.Core
 @using ReTran_App.Services
 @using ReTran_App.Services.Camera
-@inject ReTran_App.Core.PreviewState Preview
-@inject ReTran_App.Services.JsInteropService Js
-@inject ReTran_App.Services.I18nService L
-@inject ReTran_App.Services.AppSettingsService Settings
-@inject ReTran_App.Core.PipelineController Pipeline
+@inject PreviewState Preview
+@inject OverlayState Overlay
+@inject JsInteropService Js
+@inject I18nService L
+@inject AppSettingsService SettingsStore
+@inject PipelineController Pipeline
 @inject ReTran_App.Services.OverlayWindow.OverlayWindowService OverlaySvc
-@inject IJSRuntime JS
+@inject ToastService Toast
 @implements IDisposable
 
 <PageTitle>@(L["page.control.title"])</PageTitle>
 
-<div class="flex items-center justify-between mb-6">
-    <h1 class="text-2xl font-bold text-surface m-0">@(L["home.title"])</h1>
-</div>
+<div class="@(_pipelineState == "running" ? "is-live" : "")">
+    <div class="rt-stage">
+        <section class="rt-main">
+            @if (_showOcrNotice)
+            {
+                @* First-run: chưa có model OCR nào cài — dẫn tới mục Model OCR trong Cài đặt. *@
+                <div class="rt-alert" role="alert" style="align-items: center; margin-bottom: 12px;">
+                    <span style="flex: 1;"><b>@(L["deck.ocr.firstRun.title"])</b> — @(L["deck.ocr.firstRun.body"])</span>
+                    <button type="button" class="rt-btn rt-mini" @onclick="DismissOcrNotice">@(L["deck.ocr.firstRun.later"])</button>
+                </div>
+            }
+            <div class="rt-monitor">
+                <div class="rt-monitor-bar">
+                    <span class="rt-plate"><b>@(L["home.preview.title"])</b></span>
+                    <span class="rt-sep"></span>
+                    <span class="rt-mono">@FrameSizeText</span>
+                    <span class="rt-mono">@FpsText</span>
+                    <span class="rt-mono">@BoxText</span>
+                    <span class="rt-dir rt-mono">@DirectionText</span>
+                </div>
 
-<div class="space-y-4">
-    <div class="relative w-full aspect-video rounded-lg overflow-hidden border border-surface/20 bg-[#0f172a]" title="@(L["home.preview.title"])">
-        @if (_previewSrc is not null)
-        {
-            <img src="@_previewSrc" alt="@(L["home.preview.title"])" class="w-full h-full object-contain" />
-        }
-        else
-        {
-            <span class="absolute inset-0 flex items-center justify-center text-sm text-secondary opacity-60">@(L["home.preview.idle"])</span>
-        }
-        <span class="absolute top-2 left-2 px-2 py-0.5 rounded text-xs font-semibold text-black @PreviewBadgeClass">@PreviewBadgeText</span>
+                <div class="rt-frame @(_pipelineState == "running" ? "is-live" : "")">
+                    @if (_previewSrc is not null)
+                    {
+                        <img class="rt-frame-img" src="@_previewSrc" alt="@(L["home.preview.title"])" />
+                    }
+                    else
+                    {
+                        <div class="rt-idle">
+                            <div class="rt-slate">
+                                <span class="rt-glyph" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24"><path d="M3 7h4l2-3h6l2 3h4v12H3z"/><path d="M8 13a4 4 0 1 0 8 0 4 4 0 1 0-8 0"/></svg>
+                                </span>
+                                <p class="rt-slate-title">@(L["home.preview.idle"])</p>
+                                <p class="rt-slate-hint">@(L.Fmt("deck.preview.idleHint", SourceDisplay))</p>
+                                <button type="button" class="rt-btn rt-slate-start" disabled="@_busy" @onclick="TogglePipelineAsync">
+                                    <span class="rt-ico-play"></span>
+                                    <span>@(L["deck.preview.startCta"])</span>
+                                </button>
+                                <p class="rt-kbd-hint rt-mono">@(L["deck.preview.idleMeta"])</p>
+                            </div>
+                        </div>
+                    }
+
+                    <span class="rt-corner rt-c1"></span>
+                    <span class="rt-corner rt-c2"></span>
+                    <span class="rt-corner rt-c3"></span>
+                    <span class="rt-corner rt-c4"></span>
+                    <span class="rt-scan"></span>
+                </div>
+            </div>
+
+            <div class="rt-transport">
+                <div class="rt-field">
+                    <span class="rt-lbl">@(L["deck.source.label"])</span>
+                    <div class="rt-field-row">
+                        <div class="rt-seg" role="group" aria-label="@(L["deck.source.label"])">
+                            <button type="button" aria-pressed="@Pressed(_sourceKind == "screen")" @onclick='() => SetSourceKind("screen")'>@(L["deck.source.screen"])</button>
+                            <button type="button" aria-pressed="@Pressed(_sourceKind == "window")" @onclick='() => SetSourceKind("window")'>@(L["deck.source.window"])</button>
+                        </div>
+
+                        @if (_sourceKind == "screen")
+                        {
+                            <div class="rt-select rt-source-select">
+                                <select @bind="_monitorId" aria-label="@(L["deck.source.pick"])">
+                                    @if (_monitors.Count == 0)
+                                    {
+                                        <option value="">…</option>
+                                    }
+                                    else
+                                    {
+                                        @foreach (MonitorInfo m in _monitors)
+                                        {
+                                            <option value="@m.Id">@(L.Fmt("home.opt.monitorFormat", m.Id))</option>
+                                        }
+                                    }
+                                </select>
+                                <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="rt-select rt-source-select">
+                                <select @bind="_windowHwnd" aria-label="@(L["deck.source.pick"])">
+                                    <option value="">@(L["home.opt.pickWindow"])</option>
+                                    @foreach (WindowInfo w in _windows)
+                                    {
+                                        <option value="@w.Hwnd">@(L.Fmt("home.opt.windowFormat", w.Title, w.Process))</option>
+                                    }
+                                </select>
+                                <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+                            </div>
+                        }
+
+                        <button type="button" class="rt-icon-btn" title="@(L["deck.source.refresh"])" aria-label="@(L["deck.source.refresh"])" @onclick="RefreshSourcesAsync">
+                            <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="rt-field">
+                    <span class="rt-lbl">@(L["home.label.quickDst"])</span>
+                    <div class="rt-select rt-dst-select">
+                        <select @bind="_quickDst" @bind:after="SaveQuickDst" aria-label="@(L["home.label.quickDst"])">
+                            @foreach (string lang in _dstOptions)
+                            {
+                                <option value="@lang">@(I18nStrings.LanguageName(lang))</option>
+                            }
+                        </select>
+                        <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+                    </div>
+                </div>
+
+                <div class="rt-action">
+                    <button type="button" class="rt-btn rt-btn-run @(IsRunning ? "" : "rt-btn-primary")" disabled="@_busy" @onclick="TogglePipelineAsync">
+                        @if (IsRunning)
+                        {
+                            <span class="rt-ico-stop"></span><span>@(L["home.btn.stop"])</span>
+                        }
+                        else
+                        {
+                            <span class="rt-ico-play"></span><span>@(L["home.btn.start"])</span>
+                        }
+                    </button>
+                    <span class="rt-hint">@RunHint</span>
+                </div>
+            </div>
+
+            @if (_pipelineError is not null)
+            {
+                <p class="rt-alert" role="alert">@_pipelineError</p>
+            }
+        </section>
+
+        <aside class="rt-rail">
+            <div class="rt-rail-panel">
+                <div class="rt-rail-head">
+                    <h2>@(L["deck.chain.title"])</h2>
+                    <span class="rt-sub rt-mono">@(L["deck.ocr.engine"]) · @ProviderShort</span>
+                </div>
+
+                <ol class="rt-chain">
+                    <li class="rt-step">
+                        <span class="rt-idx">01</span>
+                        <div class="rt-step-body">
+                            <div class="rt-step-row"><span class="rt-name">@(L["deck.chain.capture"])</span><span class="rt-step-lamp"></span></div>
+                            <div class="rt-read">
+                                <span>@SourceDisplay</span><span class="rt-dot">·</span><span>@FpsText</span>
+                                <span class="rt-dot">·</span><span>@(_sourceKind == "window" ? L["deck.capture.printwindow"] : L["deck.capture.dxgi"])</span>
+                            </div>
+                        </div>
+                    </li>
+                    <li class="rt-step">
+                        <span class="rt-idx">02</span>
+                        <div class="rt-step-body">
+                            <div class="rt-step-row"><span class="rt-name">@(L["deck.chain.ocr"])</span><span class="rt-step-lamp"></span></div>
+                            <div class="rt-read">
+                                <span>@(L["deck.ocr.engine"])</span><span class="rt-dot">·</span><span>@BoxText</span>
+                            </div>
+                        </div>
+                    </li>
+                    <li class="rt-step">
+                        <span class="rt-idx">03</span>
+                        <div class="rt-step-body">
+                            <div class="rt-step-row"><span class="rt-name">@(L["deck.chain.translate"])</span><span class="rt-step-lamp"></span></div>
+                            <div class="rt-read">
+                                <span>@ProviderShort</span><span class="rt-dot">·</span><span>@DirectionText</span>
+                                <span class="rt-dot">·</span><span>@LinesText</span>
+                            </div>
+                        </div>
+                    </li>
+                    <li class="rt-step">
+                        <span class="rt-idx">04</span>
+                        <div class="rt-step-body">
+                            <div class="rt-step-row"><span class="rt-name">@(L["deck.chain.camera"])</span><span class="rt-step-lamp"></span></div>
+                            <div class="rt-read">
+                                <span>@CameraRegistrar.DeviceName</span><span class="rt-dot">·</span><span>@FpsText</span>
+                                <span class="rt-dot">·</span><span>@(L["deck.camera.format"])</span>
+                            </div>
+                        </div>
+                    </li>
+                </ol>
+
+                <section class="rt-rail-sec">
+                    <div class="rt-sec-head">
+                        <h3>@(L["deck.overlay.title"])</h3>
+                        <button type="button" class="rt-switch" role="switch"
+                                aria-checked="@Pressed(_overlayOn)" aria-label="@(L["deck.overlay.toggleAria"])"
+                                disabled="@(!IsRunning)" @onclick="ToggleOverlay">
+                            <span class="rt-knob"></span>
+                        </button>
+                    </div>
+                    <p class="rt-sec-sub">@(L["deck.overlay.sub"])</p>
+
+                    <div class="rt-field">
+                        <span class="rt-lbl">@(L["deck.overlay.mode"])</span>
+                        <div class="rt-select">
+                            <select @bind="_overlayMode" @bind:after="ApplyOverlayMode" aria-label="@(L["deck.overlay.mode"])">
+                                <option value="subtitle">@(L["overlay.mode.subtitle"])</option>
+                                <option value="panel">@(L["overlay.mode.panel"])</option>
+                            </select>
+                            <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+                        </div>
+                    </div>
+
+                    @if (_overlayMode == "panel")
+                    {
+                        <div class="rt-field">
+                            <span class="rt-lbl">@(L["overlay.corner.label"])</span>
+                            <div class="rt-select">
+                                <select @bind="_overlayCorner" @bind:after="ApplyOverlayCorner" aria-label="@(L["overlay.corner.label"])">
+                                    <option value="tl">@(L["overlay.corner.tl"])</option>
+                                    <option value="tr">@(L["overlay.corner.tr"])</option>
+                                    <option value="bl">@(L["overlay.corner.bl"])</option>
+                                    <option value="br">@(L["overlay.corner.br"])</option>
+                                </select>
+                                <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+                            </div>
+                        </div>
+                    }
+
+                    <div class="rt-field">
+                        <span class="rt-lbl">@(L["deck.overlay.font"])</span>
+                        <div class="rt-seg" role="group" aria-label="@(L["deck.overlay.font"])">
+                            <button type="button" aria-pressed="@Pressed(_overlayFontScale == 0.85)" @onclick='() => SetOverlayFont(0.85)'>@(L["overlay.font.small"])</button>
+                            <button type="button" aria-pressed="@Pressed(_overlayFontScale == 1.0)" @onclick='() => SetOverlayFont(1.0)'>@(L["overlay.font.medium"])</button>
+                            <button type="button" aria-pressed="@Pressed(_overlayFontScale == 1.25)" @onclick='() => SetOverlayFont(1.25)'>@(L["overlay.font.large"])</button>
+                        </div>
+                    </div>
+
+                    <p class="rt-note">@(L["overlay.note.fullscreen"])</p>
+                </section>
+
+                <section class="rt-rail-sec">
+                    <div class="rt-sec-head"><h3>@(L["deck.chain.camera"])</h3></div>
+                    <div class="rt-device">
+                        <span class="rt-mono">@CameraRegistrar.DeviceName</span>
+                        <button type="button" class="rt-copy" @onclick="CopyCameraAsync">@(L["deck.camera.copy"])</button>
+                    </div>
+                    <p class="rt-note">@(L["home.camera.note"])</p>
+                    <p class="rt-note">@(L["deck.camera.hold"])</p>
+                </section>
+            </div>
+        </aside>
     </div>
-
-    <Card Title="@(L["home.card.pipeline"])">
-        <div class="flex items-center gap-3 flex-wrap">
-            <span class="px-2 py-1 rounded border text-sm font-medium @(BadgeClass)">@BadgeSymbol @BadgeText</span>
-        </div>
-
-        <label class="flex flex-col gap-1.5 text-sm text-surface">
-            @(L["home.label.screen"])
-            <select @bind="_monitorId" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
-                @if (_monitors.Count == 0)
-                {
-                    <option value="">…</option>
-                }
-                else
-                {
-                @foreach (MonitorInfo m in _monitors)
-                {
-                    <option value="@m.Id">@(L.Fmt("home.opt.monitorFormat", m.Id))</option>
-                }
-                }
-            </select>
-        </label>
-
-        <label class="flex flex-col gap-1.5 text-sm text-surface">
-            @(L["home.label.window"])
-            <select @bind="_windowHwnd" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
-                <option value="">@(L["home.opt.pickWindow"])</option>
-                @foreach (WindowInfo w in _windows)
-                {
-                    <option value="@w.Hwnd">@(L.Fmt("home.opt.windowFormat", w.Title, w.Process))</option>
-                }
-            </select>
-        </label>
-
-        <div class="flex gap-2 flex-wrap">
-            <button class="btn btn-outline-secondary" @onclick="RefreshSources">@(L["home.btn.refreshSources"])</button>
-            <button class="btn btn-primary" @onclick="StartPipelineAsync">@(L["home.btn.start"])</button>
-            <button class="btn btn-outline-secondary" @onclick="StopPipelineAsync">@(L["home.btn.stop"])</button>
-        </div>
-
-        @if (_pipelineError is not null)
-        {
-            <p class="text-sm text-danger">@_pipelineError</p>
-        }
-
-        <p class="text-sm text-secondary">@(L["home.note.capture"])</p>
-    </Card>
-
-    <Card Title="@(L["overlay.title"])">
-        <div class="flex items-center gap-2">
-            <input id="overlay-toggle" type="checkbox" class="w-4 h-4" @bind="_overlayOn" @bind:after="ToggleOverlay" disabled="@(Pipeline.ActiveSource is null)" />
-            <label for="overlay-toggle" class="text-sm text-surface">@(L["overlay.toggle"])</label>
-        </div>
-
-        <label class="flex flex-col gap-1.5 text-sm text-surface">
-            @(L["overlay.mode.label"])
-            <select @bind="_overlayMode" @bind:after="ApplyOverlayMode" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
-                <option value="subtitle">@(L["overlay.mode.subtitle"])</option>
-                <option value="panel">@(L["overlay.mode.panel"])</option>
-            </select>
-        </label>
-
-        @if (_overlayMode == "panel")
-        {
-            <label class="flex flex-col gap-1.5 text-sm text-surface">
-                @(L["overlay.corner.label"])
-                <select @bind="_overlayCorner" @bind:after="ApplyOverlayCorner" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
-                    <option value="tl">@(L["overlay.corner.tl"])</option>
-                    <option value="tr">@(L["overlay.corner.tr"])</option>
-                    <option value="bl">@(L["overlay.corner.bl"])</option>
-                    <option value="br">@(L["overlay.corner.br"])</option>
-                </select>
-            </label>
-        }
-
-        <div class="flex gap-2 flex-wrap items-center">
-            <span class="text-sm text-surface">@(L["overlay.font.label"])</span>
-            <button class="@(FontBtnClass(0.85))" @onclick='() => SetOverlayFont(0.85)'>@(L["overlay.font.small"])</button>
-            <button class="@(FontBtnClass(1.0))" @onclick='() => SetOverlayFont(1.0)'>@(L["overlay.font.medium"])</button>
-            <button class="@(FontBtnClass(1.25))" @onclick='() => SetOverlayFont(1.25)'>@(L["overlay.font.large"])</button>
-        </div>
-
-        <p class="text-sm text-secondary">@(L["overlay.note.fullscreen"])</p>
-    </Card>
-
-    <Card Title="@(L["home.card.camera"])">
-        <p class="text-sm text-surface m-0">@(L.Fmt("home.camera.device", CameraRegistrar.DeviceName))</p>
-        <p class="text-sm text-secondary m-0">@(L["home.camera.note"])</p>
-    </Card>
-
-    <Card Title="@(L["home.card.translation"])">
-        <label class="flex flex-col gap-1.5 text-sm text-surface">
-            @(L["home.label.quickDst"])
-            <select @bind="_quickDst" @bind:after="SaveQuickDst" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
-                @foreach (string lang in _dstOptions)
-                {
-                    <option value="@lang">@(I18nStrings.LanguageName(lang))</option>
-                }
-            </select>
-        </label>
-        <p class="text-sm text-secondary">@(L["settings.note.srcNextStart"])</p>
-    </Card>
-
-    <Card Title="@(L["home.card.theme"])">
-        <div class="flex gap-2 flex-wrap">
-            <button class="btn btn-outline-secondary" @onclick='() => SetThemeAsync("light")'>@(L["home.btn.theme.light"])</button>
-            <button class="btn btn-outline-secondary" @onclick='() => SetThemeAsync("dark")'>@(L["home.btn.theme.dark"])</button>
-            <button class="btn btn-outline-secondary" @onclick='() => SetThemeAsync("system")'>@(L["home.btn.theme.system"])</button>
-        </div>
-        <div class="flex gap-2 flex-wrap items-center">
-            <span class="text-sm text-surface">@(L["home.lang.label"])</span>
-            <button class="@(LangBtnClass("vi"))" @onclick='() => SetLangAsync("vi")'>VI</button>
-            <button class="@(LangBtnClass("en"))" @onclick='() => SetLangAsync("en")'>EN</button>
-        </div>
-        <div class="flex gap-2 flex-wrap">
-            <button class="btn btn-outline-secondary" @onclick='() => SetColorAsync("default")' title="@(L["home.swatch.default"])"><span class="inline-block w-4 h-4 rounded-full border border-current bg-[var(--primary)]"></span> @(L["home.swatch.default"])</button>
-            <button class="btn btn-outline-secondary" data-color="emerald" @onclick='() => SetColorAsync("emerald")' title="Emerald"><span class="inline-block w-4 h-4 rounded-full border border-current bg-[var(--primary)]"></span> Emerald</button>
-            <button class="btn btn-outline-secondary" data-color="violet" @onclick='() => SetColorAsync("violet")' title="Violet"><span class="inline-block w-4 h-4 rounded-full border border-current bg-[var(--primary)]"></span> Violet</button>
-            <button class="btn btn-outline-secondary" data-color="sunset" @onclick='() => SetColorAsync("sunset")' title="Sunset"><span class="inline-block w-4 h-4 rounded-full border border-current bg-[var(--primary)]"></span> Sunset</button>
-        </div>
-        @if (ThemeStatusText.Length > 0)
-        {
-            <span class="text-sm text-secondary">@ThemeStatusText</span>
-        }
-    </Card>
 </div>
 
 @code {
     private static readonly string[] DefaultDstOptions = ["vi", "en", "ja", "ko", "zh", "ru", "fr", "de", "es"];
+    private static readonly CultureInfo ViCulture = CultureInfo.GetCultureInfo("vi");
+    private static readonly CultureInfo EnCulture = CultureInfo.GetCultureInfo("en");
 
     private IReadOnlyList<MonitorInfo> _monitors = Array.Empty<MonitorInfo>();
     private IReadOnlyList<WindowInfo> _windows = Array.Empty<WindowInfo>();
+    private string _sourceKind = "screen";      // "screen" | "window"
     private string _monitorId = "0";
     private string _windowHwnd = string.Empty;
     private string _quickDst = "vi";
     private string[] _dstOptions = DefaultDstOptions;
-    private string _pipelineState = "stopped"; // "stopped" | "running" | "coreError"
-    private string? _coreReason;
+    private string _provider = "google";
+    private string _pipelineState = "stopped";  // "stopped" | "running" | "coreError"
     private string? _pipelineError;
-    private string? _themeStateKind; // "theme" | "themeFail" | "color" | "colorFail"
-    private string? _themeStateValue;
+    private bool _showOcrNotice;                // first-run: chưa có model OCR nào cài
     private bool _overlayOn;
-    private string _overlayMode = "subtitle";    // "subtitle" | "panel"
-    private string _overlayCorner = "bl";        // "tl" | "tr" | "bl" | "br"
+    private string _overlayMode = "subtitle";   // "subtitle" | "panel"
+    private string _overlayCorner = "bl";       // "tl" | "tr" | "bl" | "br"
     private double _overlayFontScale = 1.0;
+    private bool _busy;
+
     private string? _previewSrc;
     private long _lastPreviewRender;
+    private int _frameW;
+    private int _frameH;
+    private double _fps;
+    private int _fpsFrames;
+    private long _fpsWindowStart;
+    private Timer? _fpsTimer;
+    private int _boxCount;
+    private int _translatedCount;
 
-    /// Preview refresh cap: ≥100 ms/lần (~10 fps) — data-URL nặng trong WebView không được rẽ nhánh mỗi frame.
+    /// <summary>Preview refresh cap: ≥100 ms/lần (~10 fps) — data-URL nặng trong WebView không được vẽ mỗi frame. / Preview refresh cap: ≥100 ms per frame (~10 fps).</summary>
     private const long PreviewMinIntervalMs = 100;
 
-    // Badge preview: pipeline running -> xanh, còn lại -> vàng.
-    private string PreviewBadgeText => _pipelineState == "running"
-        ? L["home.preview.running"]
-        : L["home.preview.stopped"];
+    private bool IsRunning => _pipelineState == "running";
 
-    private string PreviewBadgeClass => _pipelineState == "running"
-        ? "bg-[#22c55e]"
-        : "bg-[#eab308]";
-
-    private string BadgeSymbol => _pipelineState == "running" ? "●" : "■";
-
-    // Trạng thái tính từ _pipelineState + L → tự đổi ngôn ngữ khi L.Changed.
-    private string BadgeText => _pipelineState switch
+    private string SourceDisplay
     {
-        "running" => L["home.status.running"],
-        "coreError" => L.Fmt("home.status.coreError", _coreReason ?? string.Empty),
-        _ => L["home.status.stopped"],
+        get
+        {
+            if (_sourceKind == "window")
+            {
+                WindowInfo? match = _windows.FirstOrDefault(w => string.Equals(w.Hwnd, _windowHwnd, StringComparison.OrdinalIgnoreCase));
+                return match is null || match.Title.Length == 0 ? L["home.opt.pickWindow"] : match.Title;
+            }
+            int index = int.TryParse(_monitorId, out int parsed) ? parsed : 0;
+            return L.Fmt("deck.source.monitor", index);
+        }
+    }
+
+    private string FrameSizeText => _frameW > 0 && _frameH > 0 ? $"{_frameW}×{_frameH}" : "—";
+    private string FpsText => IsRunning && _fps > 0.05 ? L.Fmt("deck.unit.fps", Num(_fps, 1)) : "—";
+    private string BoxText => IsRunning ? L.Fmt("deck.unit.boxes", _boxCount) : "—";
+    private string LinesText => IsRunning ? L.Fmt("deck.unit.lines", _translatedCount) : "—";
+    private string DirectionText => L.Fmt("deck.chain.direction", Tag(_settingsSrc), Tag(_quickDst));
+    private string RunHint => IsRunning
+        ? L.Fmt("deck.run.hint.live", SourceDisplay)
+        : L["deck.run.hint.idle"];
+
+    private string ProviderShort => _provider switch
+    {
+        "google" => "Google",
+        "llm" => "LLM",
+        _ => _provider,
     };
 
-    private string BadgeClass => _pipelineState switch
-    {
-        "running" => "text-primary",
-        "coreError" => "text-danger",
-        _ => "text-secondary",
-    };
+    private string _settingsSrc = "auto";
 
-    // Trạng thái tính từ state + L → tự đổi ngôn ngữ khi L.Changed.
-    private string ThemeStatusText => _themeStateKind switch
-    {
-        "theme" => L.Fmt("home.status.theme", _themeStateValue ?? string.Empty),
-        "themeFail" => L["home.status.themeFailed"],
-        "color" => L.Fmt("home.status.color", _themeStateValue ?? string.Empty),
-        "colorFail" => L["home.status.colorFailed"],
-        _ => string.Empty,
-    };
+    private string Num(double value, int digits) =>
+        value.ToString("0." + new string('0', digits), L.Lang == "vi" ? ViCulture : EnCulture);
 
-    private string LangBtnClass(string lang) =>
-        L.Lang == lang ? "btn btn-primary" : "btn btn-outline-secondary";
+    private static string Pressed(bool value) => value ? "true" : "false";
+
+    private static string Tag(string code) => code.Trim().ToUpperInvariant() switch
+    {
+        "AUTO" => "AUTO",
+        "VI" => "VI",
+        "EN" => "EN",
+        "JA" => "JA",
+        "KO" => "KO",
+        "ZH" => "ZH",
+        "RU" => "RU",
+        "FR" => "FR",
+        "DE" => "DE",
+        "ES" => "ES",
+        _ => code.Trim().ToUpperInvariant(),
+    };
 
     protected override void OnInitialized()
     {
-        L.Changed += OnLangChanged;
+        L.Changed += OnStateChanged;
         Pipeline.PipelineStateChanged += OnPipelineStateChanged;
         Preview.Changed += OnPreviewChanged;
+        Overlay.Changed += OnOverlayChanged;
+        SettingsStore.Changed += OnSettingsChanged;
+
         PreviewFrame? initial = Preview.Latest; // quay lại trang vẫn thấy khung cuối
         _previewSrc = initial is null ? null : PreviewDataUrl(initial);
+        if (initial is not null)
+        {
+            _frameW = initial.W;
+            _frameH = initial.H;
+        }
+
         // Quay lại trang này (Home → Settings → Home) phải lấy state thật, không hardcode "stopped".
         _pipelineState = Pipeline.IsRunning ? "running" : "stopped";
-        AppSettings current = Settings.Load();
-        _quickDst = current.Dst;
-        // File ghi tay có thể chứa dst ngoài danh sách — thêm vào để select không bị trống.
-        if (Array.IndexOf(_dstOptions, _quickDst) < 0) _dstOptions = [_quickDst, .. _dstOptions];
-        _overlayOn = OverlaySvc.IsEnabled; // service là nguồn sự thật (persisted flag chỉ để restore ở nơi khác)
-        _overlayMode = current.OverlayMode;
-        _overlayCorner = current.OverlayCorner;
-        _overlayFontScale = current.OverlayFontScale;
+        ApplySettings(SettingsStore.Load());
+        _overlayOn = OverlaySvc.IsEnabled; // service là nguồn sự thật
         _ = LoadSourcesAsync();
+        _ = CheckOcrModelsAsync(); // first-run: báo khi chưa có model OCR nào được cài
+
+        _fpsWindowStart = Environment.TickCount64;
+        _fpsTimer = new Timer(_ => TickFps(), null, 1000, 1000);
         base.OnInitialized();
     }
 
-    protected override void OnAfterRender(bool firstRender)
+    private void ApplySettings(AppSettings current)
     {
-        // Nothing else initializes the JS bridge (verified: no other caller of
-        // Initialize/NotifyWebViewReady), so the control page does it on first
-        // render — otherwise copyText would silently no-op.
-        if (firstRender)
-        {
-            Js.Initialize(JS);
-            Js.NotifyWebViewReady();
-            _ = InitLangFromStorageAsync();
-        }
+        _quickDst = current.Dst;
+        _settingsSrc = current.Src;
+        _provider = current.Provider;
+        // File ghi tay có thể chứa dst ngoài danh sách — thêm vào để select không bị trống.
+        if (Array.IndexOf(_dstOptions, _quickDst) < 0) _dstOptions = [_quickDst, .. DefaultDstOptions];
+        _overlayMode = current.OverlayMode;
+        _overlayCorner = current.OverlayCorner;
+        _overlayFontScale = current.OverlayFontScale;
     }
 
-    private async Task InitLangFromStorageAsync()
+    // Settings drawer lưu file trên cùng UI thread — Home đọc lại để nhãn provider/ngôn ngữ không cũ.
+    private void OnSettingsChanged() => _ = InvokeAsync(async () =>
     {
-        try
-        {
-            var stored = await Js.GetLangAsync();
-            if (stored is "vi" or "en" && stored != L.Lang)
-            {
-                L.Set(stored);
-            }
-        }
-        catch (Exception)
-        {
-            // JS/storage unavailable → keep the OS-culture default.
-            // Không đọc được JS/storage → giữ mặc định theo culture OS.
-        }
-    }
+        ApplySettings(SettingsStore.Load());
+        // Notice first-run đang mở → kiểm tra lại: tải model + Lưu model (ghi settings) sẽ tắt nó.
+        if (_showOcrNotice) await CheckOcrModelsAsync();
+        StateHasChanged();
+    });
+
+    private void OnStateChanged() => _ = InvokeAsync(StateHasChanged);
 
     // Nạp danh sách màn hình/cửa sổ từ Core; lỗi → giữ placeholder, không crash UI.
     private async Task LoadSourcesAsync()
@@ -279,6 +412,16 @@
                 await Pipeline.ListSourcesAsync(CancellationToken.None);
             _monitors = monitors;
             _windows = windows;
+
+            // Giữ lựa chọn cũ nếu còn tồn tại; nếu không chọn phần tử đầu tiên.
+            if (_monitors.Count > 0 && !_monitors.Any(m => m.Id.ToString() == _monitorId))
+            {
+                _monitorId = _monitors[0].Id.ToString(CultureInfo.InvariantCulture);
+            }
+            if (_windows.Count > 0 && !_windows.Any(w => string.Equals(w.Hwnd, _windowHwnd, StringComparison.OrdinalIgnoreCase)))
+            {
+                _windowHwnd = _windows[0].Hwnd;
+            }
             await InvokeAsync(StateHasChanged);
         }
         catch (Exception)
@@ -287,42 +430,103 @@
         }
     }
 
-    private void RefreshSources() => _ = LoadSourcesAsync();
+    private async Task RefreshSourcesAsync()
+    {
+        await LoadSourcesAsync();
+        Toast.Show(L["deck.source.refreshed"]);
+    }
 
-    private SourceSelection BuildSelection() => !string.IsNullOrEmpty(_windowHwnd)
+    // First-run check: catalog không có model nào installed → hiện notice dẫn tới Cài đặt.
+    private async Task CheckOcrModelsAsync()
+    {
+        try
+        {
+            IReadOnlyList<OcrModelInfo> models = await Pipeline.ListOcrModelsAsync(CancellationToken.None);
+            _showOcrNotice = !models.Any(m => m.Installed);
+        }
+        catch (Exception)
+        {
+            // Core chưa sẵn sàng — giữ nguyên trạng thái hiện tại, lần check sau sẽ quyết.
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private void DismissOcrNotice() => _showOcrNotice = false;
+
+    private void SetSourceKind(string kind)
+    {
+        _sourceKind = kind;
+        if (kind == "window" && string.IsNullOrEmpty(_windowHwnd) && _windows.Count > 0)
+        {
+            _windowHwnd = _windows[0].Hwnd;
+        }
+        StateHasChanged();
+    }
+
+    private SourceSelection BuildSelection() => _sourceKind == "window"
         ? new SourceSelection(UseWindow: true, Monitor: 0, HwndHex: _windowHwnd)
         : new SourceSelection(
             UseWindow: false,
             Monitor: int.TryParse(_monitorId, out int monitor) ? monitor : 0,
             HwndHex: null);
 
+    private async Task TogglePipelineAsync()
+    {
+        if (_busy) return;
+        if (IsRunning) await StopPipelineAsync();
+        else await StartPipelineAsync();
+    }
+
     private async Task StartPipelineAsync()
     {
+        if (_sourceKind == "window" && string.IsNullOrEmpty(_windowHwnd))
+        {
+            _pipelineError = L["deck.error.pickWindow"];
+            return;
+        }
+
+        _busy = true;
         _pipelineError = null;
         try
         {
             await Pipeline.StartAsync(BuildSelection(), CancellationToken.None);
             _pipelineState = "running";
-            _coreReason = null;
+            _boxCount = 0;
+            _translatedCount = 0;
+            Interlocked.Exchange(ref _fpsFrames, 0);
+            _fpsWindowStart = Environment.TickCount64;
         }
         catch (Exception ex)
         {
-            _pipelineError = L.Fmt("home.status.startFailed", ex.Message);
+            // Cặp model OCR chưa tải — bật notice first-run dẫn tới mục Model OCR trong Cài đặt.
+            if (PipelineController.IsOcrModelMissing(ex)) _showOcrNotice = true;
+            _pipelineError = L.Fmt("deck.error.start", ex.Message);
+        }
+        finally
+        {
+            _busy = false;
+            StateHasChanged();
         }
     }
 
     private async Task StopPipelineAsync()
     {
+        _busy = true;
         _pipelineError = null;
         try
         {
             await Pipeline.StopAsync(CancellationToken.None);
             _pipelineState = "stopped";
-            _coreReason = null;
+            _fps = 0;
         }
         catch (Exception ex) // core chưa start → ICorePeer.CallAsync ném InvalidOperationException
         {
-            _pipelineError = L.Fmt("home.status.stopFailed", ex.Message);
+            _pipelineError = L.Fmt("deck.error.stop", ex.Message);
+        }
+        finally
+        {
+            _busy = false;
+            StateHasChanged();
         }
     }
 
@@ -332,29 +536,58 @@
         {
             if (reason == PipelineController.CoreExitedReason)
             {
-                // Core chết → badge dừng, lỗi hiện dưới nút (tận dụng "Lỗi core: {0}").
                 _pipelineState = "stopped";
                 _pipelineError = L.Fmt("home.status.coreError", reason);
             }
             else
             {
                 _pipelineState = running ? "running" : reason is null ? "stopped" : "coreError";
-                _coreReason = reason;
+                if (!running && reason is not null)
+                {
+                    _pipelineError = L.Fmt("home.status.coreError", reason);
+                }
             }
+            if (!running) _fps = 0;
             StateHasChanged();
         });
 
-    // frame.annotated đến từ read-loop thread của peer; throttle ≥100 ms trên renderer rồi mới
-    // gán data-URL — WebView chỉ cần ~10 fps, giữ nguyên khung cuối khi pipeline dừng.
-    private void OnPreviewChanged(PreviewFrame frame) =>
-        _ = InvokeAsync(() =>
-        {
-            long now = Environment.TickCount64;
-            if (now - _lastPreviewRender < PreviewMinIntervalMs) return;
-            _lastPreviewRender = now;
-            _previewSrc = PreviewDataUrl(frame);
-            StateHasChanged();
-        });
+    // frame.annotated đến từ read-loop thread của peer; đếm fps trước, throttle preview ≥100 ms.
+    private void OnPreviewChanged(PreviewFrame frame) => _ = InvokeAsync(() =>
+    {
+        Interlocked.Increment(ref _fpsFrames);
+        _frameW = frame.W;
+        _frameH = frame.H;
+
+        long now = Environment.TickCount64;
+        if (now - _lastPreviewRender < PreviewMinIntervalMs) return;
+        _lastPreviewRender = now;
+        _previewSrc = PreviewDataUrl(frame);
+        StateHasChanged();
+    });
+
+    // frame.translated ~3 fps — đủ rẻ để đọc box/dòng dịch cho rail.
+    private void OnOverlayChanged() => _ = InvokeAsync(() =>
+    {
+        OverlayFrame? frame = Overlay.Latest;
+        _boxCount = frame?.Boxes.Count ?? 0;
+        _translatedCount = frame?.Boxes.Count(b => !string.IsNullOrWhiteSpace(b.Translated)) ?? 0;
+        StateHasChanged();
+    });
+
+    // Timer 1 s: fps = số frame nhận được trong cửa sổ vừa qua; dừng pipeline thì về 0.
+    private void TickFps()
+    {
+        long now = Environment.TickCount64;
+        int frames = Interlocked.Exchange(ref _fpsFrames, 0);
+        double elapsed = Math.Max(0.001, (now - _fpsWindowStart) / 1000.0);
+        _fpsWindowStart = now;
+        double fps = frames / elapsed;
+
+        bool running = IsRunning;
+        bool changed = Math.Abs(fps - _fps) >= 0.05 || (running && fps == 0 && _fps > 0);
+        _fps = fps;
+        if (running && changed) _ = InvokeAsync(StateHasChanged);
+    }
 
     private static string PreviewDataUrl(PreviewFrame frame) =>
         $"data:image/jpeg;base64,{frame.JpegBase64}";
@@ -364,7 +597,7 @@
     {
         try
         {
-            Settings.Save(Settings.Load() with { Dst = _quickDst });
+            SettingsStore.Save(SettingsStore.Load() with { Dst = _quickDst });
         }
         catch (Exception)
         {
@@ -373,71 +606,54 @@
     }
 
     // Service tự persist OverlayOnGame; UI chỉ mirror IsEnabled.
-    private void ToggleOverlay() => OverlaySvc.SetEnabled(_overlayOn);
+    private void ToggleOverlay()
+    {
+        _overlayOn = !_overlayOn;
+        OverlaySvc.SetEnabled(_overlayOn);
+    }
 
     private void ApplyOverlayMode() => OverlaySvc.ApplyOptions(mode: _overlayMode);
 
     private void ApplyOverlayCorner() => OverlaySvc.ApplyOptions(corner: _overlayCorner);
 
-    private void SetOverlayFont(double scale)
+    private async Task SetOverlayFont(double scale)
     {
         _overlayFontScale = scale;
         OverlaySvc.ApplyOptions(fontScale: scale);
-    }
-
-    private string FontBtnClass(double scale) =>
-        _overlayFontScale == scale ? "btn btn-primary" : "btn btn-outline-secondary";
-
-    private void OnLangChanged() => _ = InvokeAsync(StateHasChanged);
-
-    private async Task SetLangAsync(string lang)
-    {
-        if (lang == L.Lang) return;
-        L.Set(lang); // UI đổi ngay qua event Changed
         try
         {
-            await Js.SetLangAsync(lang); // persist best-effort
+            // Core renders the preview/camera frame; tell it the new size right away.
+            // Core vẽ khung preview/camera; báo cỡ mới ngay để không phải chờ phiên sau.
+            await Pipeline.SetAnnotationFontScaleAsync(scale, CancellationToken.None);
         }
         catch (Exception)
         {
-            // Lưu thất bại không ảnh hưởng ngôn ngữ đã áp trong RAM.
+            // Core cũ/không sẵn sàng không được phá UI; overlay vẫn đổi cỡ chữ.
+            // An old/unavailable Core must not break the UI; the overlay still resizes.
+        }
+    }
+
+    private async Task CopyCameraAsync()
+    {
+        try
+        {
+            await Js.CopyTextAsync(CameraRegistrar.DeviceName);
+            Toast.Show(L["deck.camera.copied"]);
+        }
+        catch (Exception)
+        {
+            // Clipboard bị chặn không được phá UI.
         }
     }
 
     public void Dispose()
     {
-        L.Changed -= OnLangChanged;
+        L.Changed -= OnStateChanged;
         Pipeline.PipelineStateChanged -= OnPipelineStateChanged;
         Preview.Changed -= OnPreviewChanged;
-    }
-
-    private async Task SetThemeAsync(string theme)
-    {
-        try
-        {
-            await Js.SetThemeAsync(theme);
-            _themeStateKind = "theme";
-            _themeStateValue = theme;
-        }
-        catch (Exception)
-        {
-            _themeStateKind = "themeFail";
-            _themeStateValue = null;
-        }
-    }
-
-    private async Task SetColorAsync(string colorId)
-    {
-        try
-        {
-            await Js.SetColorAsync(colorId);
-            _themeStateKind = "color";
-            _themeStateValue = colorId;
-        }
-        catch (Exception)
-        {
-            _themeStateKind = "colorFail";
-            _themeStateValue = null;
-        }
+        Overlay.Changed -= OnOverlayChanged;
+        SettingsStore.Changed -= OnSettingsChanged;
+        _fpsTimer?.Dispose();
+        _fpsTimer = null;
     }
 }

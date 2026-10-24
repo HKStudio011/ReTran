@@ -4,9 +4,11 @@ namespace ReTran_App.Services;
 
 /// <summary>
 /// Translation settings persisted in <c>settings.json</c>: provider, language pair and an
-/// optional API key for providers that need one, plus game-overlay display options.
+/// optional API key for providers that need one, plus game-overlay display options and the
+/// OCR model pair requested on start.
 /// Cài đặt dịch thuật lưu trong <c>settings.json</c>: nhà cung cấp, cặp ngôn ngữ và API key tùy
-/// chọn cho các nhà cung cấp cần key, kèm tùy chọn hiển thị overlay trên game.
+/// chọn cho các nhà cung cấp cần key, kèm tùy chọn hiển thị overlay trên game và cặp model OCR
+/// yêu cầu khi start.
 /// </summary>
 /// <param name="Provider">Provider name, e.g. <c>google</c>. Tên nhà cung cấp, ví dụ <c>google</c>.</param>
 /// <param name="Src">Source language code, or <c>auto</c>. Mã ngôn ngữ nguồn, hoặc <c>auto</c>.</param>
@@ -16,12 +18,16 @@ namespace ReTran_App.Services;
 /// <param name="OverlayMode">Overlay display mode: <c>"subtitle"</c> (over original text) or <c>"panel"</c> (corner list). Chế độ hiển thị overlay: <c>"subtitle"</c> hoặc <c>"panel"</c>.</param>
 /// <param name="OverlayCorner">Panel corner when mode is <c>"panel"</c>: <c>"tl"</c>, <c>"tr"</c>, <c>"bl"</c> or <c>"br"</c>. Góc bảng khi chế độ <c>"panel"</c>: <c>"tl"</c>, <c>"tr"</c>, <c>"bl"</c> hoặc <c>"br"</c>.</param>
 /// <param name="OverlayFontScale">Font size multiplier for overlay text (0.85, 1.0 or 1.25). Hệ số cỡ chữ overlay (0.85, 1.0 hoặc 1.25).</param>
+/// <param name="OcrDet">OCR detection model name sent to Core on <c>core.start</c>. Tên model det OCR gửi cho Core khi <c>core.start</c>.</param>
+/// <param name="OcrRec">OCR recognition model name sent to Core on <c>core.start</c>. Tên model rec OCR gửi cho Core khi <c>core.start</c>.</param>
 public sealed record AppSettings(
     string Provider, string Src, string Dst, string? ApiKey,
     bool OverlayOnGame = false,
     string OverlayMode = "subtitle",
     string OverlayCorner = "bl",
-    double OverlayFontScale = 1.0)
+    double OverlayFontScale = 1.0,
+    string OcrDet = "PP-OCRv6_small_det",
+    string OcrRec = "PP-OCRv6_small_rec")
 {
     /// <summary>
     /// Factory default: Google Translate, auto source, Vietnamese target, no API key.
@@ -49,6 +55,14 @@ public sealed class AppSettingsService(string? path = null)
     };
 
     private readonly string _path = path ?? DefaultPath;
+
+    /// <summary>
+    /// Raised after a successful <see cref="Save"/> so open screens can refresh their copy of the
+    /// settings (language pair, provider, overlay options).
+    /// Được phát sau khi <see cref="Save"/> thành công để các màn hình đang mở đọc lại cài đặt
+    /// (cặp ngôn ngữ, provider, tùy chọn overlay).
+    /// </summary>
+    public event Action? Changed;
 
     /// <summary>
     /// Default settings file (%LOCALAPPDATA%\ReTran\settings.json).
@@ -102,5 +116,6 @@ public sealed class AppSettingsService(string? path = null)
         string tmp = _path + ".tmp";
         File.WriteAllText(tmp, JsonSerializer.Serialize(s, SerializerOptions));
         File.Move(tmp, _path, overwrite: true);
+        Changed?.Invoke();
     }
 }

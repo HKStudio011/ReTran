@@ -31,6 +31,8 @@ public class AppSettingsServiceTests : IDisposable
         Assert.Equal("auto", settings.Src);
         Assert.Equal("vi", settings.Dst);
         Assert.Null(settings.ApiKey);
+        Assert.Equal("PP-OCRv6_small_det", settings.OcrDet);
+        Assert.Equal("PP-OCRv6_small_rec", settings.OcrRec);
     }
 
     [Fact]
@@ -62,6 +64,22 @@ public class AppSettingsServiceTests : IDisposable
         Assert.Equal("subtitle", settings.OverlayMode);
         Assert.Equal("bl", settings.OverlayCorner);
         Assert.Equal(1.0, settings.OverlayFontScale);
+        // File cũ không có cặp model OCR → nhận cặp mặc định small.
+        Assert.Equal("PP-OCRv6_small_det", settings.OcrDet);
+        Assert.Equal("PP-OCRv6_small_rec", settings.OcrRec);
+    }
+
+    [Fact]
+    public void SaveThenLoad_Roundtrips_WithOcrPair()
+    {
+        var service = new AppSettingsService(_path);
+        var saved = new AppSettings("google", "auto", "vi", null,
+            OcrDet: "PP-OCRv6_tiny_det", OcrRec: "PP-OCRv6_tiny_rec");
+
+        service.Save(saved);
+
+        Assert.True(File.Exists(_path));
+        Assert.Equal(saved, service.Load());
     }
 
     [Fact]

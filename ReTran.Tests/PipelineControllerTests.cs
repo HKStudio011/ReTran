@@ -88,8 +88,32 @@ public class PipelineControllerTests : IDisposable
         Assert.Equal("auto", translate["src"]!.GetValue<string>());
         Assert.Equal("vi", translate["dst"]!.GetValue<string>());
 
+        // Cặp model OCR mặc định (small) luôn đi kèm core.start.
+        JsonObject ocr = call.Params!["ocr"]!.AsObject();
+        Assert.Equal("PP-OCRv6_small_det", ocr["det"]!.GetValue<string>());
+        Assert.Equal("PP-OCRv6_small_rec", ocr["rec"]!.GetValue<string>());
+
         Assert.Null(call.Params["ocrFps"]);
         Assert.Null(call.Params["captureFps"]);
+    }
+
+    [Fact]
+    public async Task Start_SendsConfiguredOcrPair_FromSettings()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        new AppSettingsService(_settingsPath).Save(new AppSettings("google", "auto", "vi", null,
+            OcrDet: "PP-OCRv6_tiny_det", OcrRec: "PP-OCRv6_tiny_rec"));
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+
+        (string Method, JsonNode? Params) call = Assert.Single(peer.Calls);
+        Assert.Equal("core.start", call.Method);
+        JsonObject ocr = call.Params!["ocr"]!.AsObject();
+        Assert.Equal("PP-OCRv6_tiny_det", ocr["det"]!.GetValue<string>());
+        Assert.Equal("PP-OCRv6_tiny_rec", ocr["rec"]!.GetValue<string>());
     }
 
     [Fact]
@@ -524,6 +548,99 @@ public class PipelineControllerTests : IDisposable
     }
 
     [Fact]
+    public void IsOcrModelMissing_MatchesOnlyTheOcrMissingRpcError()
+    {
+        // Lỗi -32603 "ocr-model-missing: <det>/<rec>" từ core.start → nhận diện được.
+        Assert.True(PipelineController.IsOcrModelMissing(
+            new RpcException(-32603, "ocr-model-missing: PP-OCRv6_small_det/PP-OCRv6_small_rec")));
+        // Lỗi RPC khác và exception ngoài RpcException đều không khớp.
+        Assert.False(PipelineController.IsOcrModelMissing(
+            new RpcException(-32602, "unknown model: nope")));
+        Assert.False(PipelineController.IsOcrModelMissing(
+            new InvalidOperationException("ocr-model-missing: a/b")));
+        Assert.False(PipelineController.IsOcrModelMissing(null));
+    }
+
+    [Fact]
+    public async Task ListOcrModels_MapsCatalogEntries_FromWireShape()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        peer.Reply = method => method == "ocr.models.list"
+            ? new JsonObject
+            {
+                ["catalog"] = new JsonArray(
+                    new JsonObject
+                    {
+                        ["name"] = "PP-OCRv6_small_det", ["kind"] = "det",
+                        ["langs"] = new JsonArray("en", "ja", "vi"),
+                        ["sizeMb"] = 9.6, ["installed"] = true, ["inUse"] = true,
+                    },
+                    new JsonObject
+                    {
+                        ["name"] = "korean_PP-OCRv5_mobile_rec", ["kind"] = "rec",
+                        ["langs"] = new JsonArray("ko", "en"),
+                        ["sizeMb"] = 14.0, ["installed"] = false, ["inUse"] = false,
+                    }),
+                ["active"] = new JsonObject { ["det"] = "PP-OCRv6_small_det", ["rec"] = "PP-OCRv6_small_rec" },
+            }
+            : null;
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        IReadOnlyList<OcrModelInfo> models = await controller.ListOcrModelsAsync(CancellationToken.None);
+
+        (string Method, JsonNode? Params) call = Assert.Single(peer.Calls);
+        Assert.Equal("ocr.models.list", call.Method);
+        Assert.Null(call.Params);
+
+        Assert.Equal(2, models.Count);
+        OcrModelInfo det = models[0];
+        Assert.Equal("PP-OCRv6_small_det", det.Name);
+        Assert.Equal("det", det.Kind);
+        Assert.Equal(["en", "ja", "vi"], det.Langs);
+        Assert.Equal(9.6, det.SizeMb);
+        Assert.True(det.Installed);
+        Assert.True(det.InUse);
+        OcrModelInfo rec = models[1];
+        Assert.Equal("korean_PP-OCRv5_mobile_rec", rec.Name);
+        Assert.Equal("rec", rec.Kind);
+        Assert.Equal(["ko", "en"], rec.Langs);
+        Assert.Equal(14.0, rec.SizeMb);
+        Assert.False(rec.Installed);
+        Assert.False(rec.InUse);
+    }
+
+    [Fact]
+    public async Task ListOcrModels_EmptyOrMalformedReply_YieldsEmptyList()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        IReadOnlyList<OcrModelInfo> models = await controller.ListOcrModelsAsync(CancellationToken.None);
+
+        Assert.Empty(models); // FakeCorePeer mặc định trả {"running": false} — không có catalog.
+    }
+
+    [Fact]
+    public async Task OcrModelActions_SendExpectedWireParams()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        await controller.DownloadOcrModelAsync("PP-OCRv6_tiny_rec", CancellationToken.None);
+        await controller.DeleteOcrModelAsync("PP-OCRv6_tiny_rec", CancellationToken.None);
+        await controller.SetOcrModelPairAsync("PP-OCRv6_tiny_det", "PP-OCRv6_tiny_rec", CancellationToken.None);
+
+        Assert.Equal(3, peer.Calls.Count);
+        Assert.Equal("ocr.models.download", peer.Calls[0].Method);
+        Assert.Equal("PP-OCRv6_tiny_rec", peer.Calls[0].Params!["name"]!.GetValue<string>());
+        Assert.Equal("ocr.models.delete", peer.Calls[1].Method);
+        Assert.Equal("PP-OCRv6_tiny_rec", peer.Calls[1].Params!["name"]!.GetValue<string>());
+        Assert.Equal("ocr.models.set", peer.Calls[2].Method);
+        Assert.Equal("PP-OCRv6_tiny_det", peer.Calls[2].Params!["det"]!.GetValue<string>());
+        Assert.Equal("PP-OCRv6_tiny_rec", peer.Calls[2].Params!["rec"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task Stop_ClearsActiveSource()
     {
         var peer = new FakeCorePeer { IsStarted = true };
@@ -567,6 +684,9 @@ public class PipelineControllerTests : IDisposable
         public List<(string Method, JsonNode? Params)> Calls { get; } = new();
         public Func<string, JsonNode?, Task<JsonNode?>>? RequestHandler { get; private set; }
 
+        /// <summary>Optional per-method canned reply; null (or a null return) falls back to the default shape. Phản hồi dựng sẵn theo method; null trả về mặc định.</summary>
+        public Func<string, JsonNode?>? Reply { get; set; }
+
         public event Action<string, JsonNode?>? NotificationReceived;
         public event Action<Exception>? HandlerError;
         public event Action<int>? Exited;
@@ -582,9 +702,10 @@ public class PipelineControllerTests : IDisposable
         public Task<JsonNode?> CallAsync(string method, JsonNode? @params, CancellationToken ct)
         {
             Calls.Add((method, @params));
-            JsonNode? result = method == "core.start"
-                ? new JsonObject { ["running"] = true }
-                : new JsonObject { ["running"] = false };
+            JsonNode? result = (Reply?.Invoke(method))
+                ?? (method == "core.start"
+                    ? new JsonObject { ["running"] = true }
+                    : new JsonObject { ["running"] = false });
             return Task.FromResult<JsonNode?>(result);
         }
 

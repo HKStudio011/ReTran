@@ -32,6 +32,21 @@ public sealed record MonitorInfo(int Id, string Name);
 public sealed record WindowInfo(string Hwnd, string Title, string Process);
 
 /// <summary>
+/// One OCR model from the sidecar catalog (<c>ocr.models.list</c>): its name, slot, language
+/// coverage, download size and current state.
+/// Một model OCR trong catalog sidecar (<c>ocr.models.list</c>): tên, vị trí det/rec, phạm vi
+/// ngôn ngữ, dung lượng tải và trạng thái hiện tại.
+/// </summary>
+/// <param name="Name">Catalog model name, e.g. <c>PP-OCRv6_small_det</c>. Tên model trong catalog, ví dụ <c>PP-OCRv6_small_det</c>.</param>
+/// <param name="Kind">Model slot: <c>"det"</c> or <c>"rec"</c>. Vị trí model: <c>"det"</c> hoặc <c>"rec"</c>.</param>
+/// <param name="Langs">Language codes the model covers (display hint). Các mã ngôn ngữ model hỗ trợ (gợi ý hiển thị).</param>
+/// <param name="SizeMb">Published model size in megabytes. Dung lượng model công bố (MB).</param>
+/// <param name="Installed">Whether the model files are present in the cache. File model có sẵn trong cache hay không.</param>
+/// <param name="InUse">Whether the model is part of the sidecar's active pair. Model có nằm trong cặp đang dùng của sidecar hay không.</param>
+public sealed record OcrModelInfo(
+    string Name, string Kind, IReadOnlyList<string> Langs, double SizeMb, bool Installed, bool InUse);
+
+/// <summary>
 /// App-side orchestrator over <see cref="ICorePeer"/>: starts/stops the Core pipeline
 /// (<c>core.start</c>/<c>core.stop</c>/<c>core.list_sources</c>), answers Core's cache
 /// requests from the SQLite translation cache, and turns Core notifications into
@@ -128,6 +143,16 @@ public sealed class PipelineController
     public event Action<bool, string?>? PipelineStateChanged;
 
     /// <summary>
+    /// Raised whenever <see cref="IsRunning"/> or <see cref="ActiveSource"/> changes, including a
+    /// user-initiated start/stop (which does not raise <see cref="PipelineStateChanged"/>) and an
+    /// unexpected pipeline stop. UI shells subscribe here to keep status badges in sync.
+    /// Được phát mỗi khi <see cref="IsRunning"/> hoặc <see cref="ActiveSource"/> thay đổi, kể cả
+    /// start/stop do người dùng bấm (không phát <see cref="PipelineStateChanged"/>) và khi pipeline
+    /// dừng đột xuất. Vỏ UI đăng ký event này để giữ badge trạng thái đồng bộ.
+    /// </summary>
+    public event Action? StateChanged;
+
+    /// <summary>
     /// Whether the pipeline was last known to be running. Read by a page on its first render so
     /// navigating back to the control page shows the real badge instead of a stale "stopped".
     /// Pipeline có đang chạy theo lần biết cuối hay không. Trang đọc ở render đầu để quay lại trang
@@ -144,10 +169,15 @@ public sealed class PipelineController
     /// <summary>
     /// Ensures the core is running, wires the Core→App handlers once, then sends
     /// <c>core.start</c> built from the persisted settings (via <see cref="AppSettingsService.Load"/>)
-    /// and the given source. <c>ocrFps</c>/<c>captureFps</c> are omitted so Core applies its defaults.
+    /// and the given source. <c>ocrFps</c>/<c>captureFps</c> are omitted so Core applies its defaults;
+    /// <c>fontScale</c> carries the overlay font setting so the preview starts at the right size;
+    /// <c>ocr</c> carries the configured det/rec pair, which Core verifies against the sidecar
+    /// catalog before any loop starts.
     /// Đảm bảo core đang chạy, gắn handler Core→App một lần, rồi gửi <c>core.start</c> dựng từ
     /// cài đặt đã lưu (qua <see cref="AppSettingsService.Load"/>) và nguồn đã cho. <c>ocrFps</c>/
-    /// <c>captureFps</c> được bỏ qua để Core dùng mặc định của nó.
+    /// <c>captureFps</c> được bỏ qua để Core dùng mặc định của nó; <c>fontScale</c> mang cỡ chữ
+    /// overlay để preview bắt đầu đúng cỡ ngay từ đầu; <c>ocr</c> mang cặp det/rec đã cấu hình,
+    /// Core kiểm tra với catalog sidecar trước khi loop nào chạy.
     /// </summary>
     /// <remarks>
     /// Starting a session clears the wire-seq guard before <c>core.start</c> is sent, because Core
@@ -164,9 +194,12 @@ public sealed class PipelineController
     /// <returns>A task that completes once Core acknowledges the start. Task hoàn tất khi Core xác nhận start.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="source"/> is null. Ném khi <paramref name="source"/> là null.</exception>
     /// <exception cref="RpcException">
-    /// Propagated unchanged from Core for invalid params, unknown provider or a session already
-    /// running, so the UI can show the exact error. Được đẩy ra nguyên vẹn từ Core khi tham số
-    /// sai, provider lạ hoặc phiên đang chạy, để UI hiển thị lỗi chính xác.
+    /// Propagated unchanged from Core for invalid params, unknown provider, a session already
+    /// running, or a requested OCR model that is not installed (<c>ocr-model-missing</c> — see
+    /// <see cref="IsOcrModelMissing"/>), so the UI can show the exact error.
+    /// Được đẩy ra nguyên vẹn từ Core khi tham số sai, provider lạ, phiên đang chạy, hoặc model
+    /// OCR yêu cầu chưa được cài (<c>ocr-model-missing</c> — xem <see cref="IsOcrModelMissing"/>),
+    /// để UI hiển thị lỗi chính xác.
     /// </exception>
     public async Task StartAsync(SourceSelection source, CancellationToken ct)
     {
@@ -186,6 +219,12 @@ public sealed class PipelineController
                 ["src"] = settings.Src,
                 ["dst"] = settings.Dst,
             },
+            ["ocr"] = new JsonObject
+            {
+                ["det"] = settings.OcrDet,
+                ["rec"] = settings.OcrRec,
+            },
+            ["fontScale"] = settings.OverlayFontScale,
         };
 
         // Cleared before core.start is sent (never after it returns) because Core restarts its
@@ -203,6 +242,7 @@ public sealed class PipelineController
         await _peer.CallAsync("core.start", @params, ct).ConfigureAwait(false);
         IsRunning = true;
         ActiveSource = source;
+        StateChanged?.Invoke();
     }
 
     /// <summary>
@@ -221,6 +261,26 @@ public sealed class PipelineController
         IsRunning = false;
         ActiveSource = null;
         _camera?.Hold();
+        StateChanged?.Invoke();
+    }
+
+    /// <summary>
+    /// Sends <c>core.set_font_scale</c> so the preview/camera annotation uses the new size
+    /// immediately, without restarting the session. The setting is also persisted by the overlay
+    /// service and sent again in the next <c>core.start</c>.
+    /// Gửi <c>core.set_font_scale</c> để phần ghi chú preview/camera dùng cỡ mới ngay, không cần
+    /// khởi động lại phiên. Cài đặt cũng được overlay service lưu lại và gửi kèm <c>core.start</c>
+    /// lần sau.
+    /// </summary>
+    /// <param name="fontScale">Font multiplier in (0, 4]. Hệ số cỡ chữ trong (0, 4].</param>
+    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <returns>A task that completes once Core accepts the value. Task hoàn tất khi Core nhận giá trị.</returns>
+    /// <exception cref="RpcException">Propagated from Core when the value is rejected. Đẩy ra từ Core khi giá trị bị từ chối.</exception>
+    public async Task SetAnnotationFontScaleAsync(double fontScale, CancellationToken ct)
+    {
+        await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
+        await _peer.CallAsync("core.set_font_scale",
+            new JsonObject { ["fontScale"] = fontScale }, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -272,6 +332,128 @@ public sealed class PipelineController
         return (monitors, windows);
     }
 
+    /// <summary>
+    /// Tells whether an exception thrown by <see cref="StartAsync"/> is Core's
+    /// <c>ocr-model-missing</c> rejection — the requested det/rec pair is not installed. The UI
+    /// uses this to guide the user to the settings sheet's OCR section instead of showing a raw
+    /// error.
+    /// Cho biết exception do <see cref="StartAsync"/> ném có phải lỗi <c>ocr-model-missing</c>
+    /// của Core — cặp det/rec yêu cầu chưa được cài — hay không. UI dùng nó để dẫn người dùng
+    /// tới mục OCR trong bảng cài đặt thay vì hiện lỗi thô.
+    /// </summary>
+    /// <param name="ex">The caught exception, or <see langword="null"/>. Exception vừa bắt, hoặc <see langword="null"/>.</param>
+    /// <returns>True when Core rejected the start because the model pair is missing. True khi Core từ chối start vì thiếu cặp model.</returns>
+    public static bool IsOcrModelMissing(Exception? ex) =>
+        ex is RpcException && ex.Message.Contains("ocr-model-missing", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Ensures the core process is running, then asks the sidecar (via Core's
+    /// <c>ocr.models.list</c> proxy) for the model catalog with per-model installed/in-use
+    /// flags. The active pair is the two entries with <see cref="OcrModelInfo.InUse"/> set.
+    /// Đảm bảo tiến trình core đang chạy, rồi hỏi sidecar (qua proxy <c>ocr.models.list</c>
+    /// của Core) lấy catalog model kèm cờ installed/in-use. Cặp đang dùng là hai mục có
+    /// <see cref="OcrModelInfo.InUse"/> bật.
+    /// </summary>
+    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <returns>The catalog entries in sidecar order. Các mục catalog theo thứ tự sidecar.</returns>
+    public async Task<IReadOnlyList<OcrModelInfo>> ListOcrModelsAsync(CancellationToken ct)
+    {
+        await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
+        EnsureHandlersWired();
+
+        JsonNode? result = await _peer.CallAsync("ocr.models.list", null, ct).ConfigureAwait(false);
+        var models = new List<OcrModelInfo>();
+        if (result?["catalog"] is JsonArray catalog)
+        {
+            foreach (JsonNode? node in catalog)
+            {
+                if (node is not JsonObject model) continue;
+                var langs = new List<string>();
+                if (model["langs"] is JsonArray langArray)
+                {
+                    foreach (JsonNode? lang in langArray)
+                    {
+                        if (lang is JsonValue langValue
+                            && langValue.GetValueKind() == JsonValueKind.String)
+                        {
+                            langs.Add(langValue.GetValue<string>());
+                        }
+                    }
+                }
+                models.Add(new OcrModelInfo(
+                    ReadString(model, "name"),
+                    ReadString(model, "kind"),
+                    langs,
+                    ReadDouble(model, "sizeMb"),
+                    ReadBool(model, "installed"),
+                    ReadBool(model, "inUse")));
+            }
+        }
+        return models;
+    }
+
+    /// <summary>
+    /// Starts downloading one model on the sidecar via <c>ocr.models.download</c>. The call
+    /// returns as soon as the download is accepted — it continues on a background thread, so
+    /// <see cref="ListOcrModelsAsync"/> keeps reporting the model as not installed until it
+    /// finishes.
+    /// Bắt đầu tải một model trên sidecar qua <c>ocr.models.download</c>. Lời gọi trả về ngay
+    /// khi được chấp nhận — việc tải chạy nền, nên <see cref="ListOcrModelsAsync"/> vẫn báo
+    /// model chưa cài cho tới khi tải xong.
+    /// </summary>
+    /// <param name="name">Catalog model name. Tên model trong catalog.</param>
+    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <returns>A task that completes once the sidecar accepts the download. Task hoàn tất khi sidecar chấp nhận tải.</returns>
+    /// <exception cref="RpcException">Propagated from Core when the model is unknown. Đẩy ra từ Core khi model không có trong catalog.</exception>
+    public async Task DownloadOcrModelAsync(string name, CancellationToken ct)
+    {
+        await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
+        EnsureHandlersWired();
+        await _peer.CallAsync("ocr.models.download",
+            new JsonObject { ["name"] = name }, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Deletes one model's files from the cache via <c>ocr.models.delete</c>. The sidecar
+    /// refuses to delete a model of the active pair or one that is still downloading.
+    /// Xoá file của một model khỏi cache qua <c>ocr.models.delete</c>. Sidecar từ chối xoá
+    /// model thuộc cặp đang dùng hoặc đang tải.
+    /// </summary>
+    /// <param name="name">Catalog model name. Tên model trong catalog.</param>
+    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <returns>A task that completes once the sidecar acknowledges the delete. Task hoàn tất khi sidecar xác nhận xoá.</returns>
+    /// <exception cref="RpcException">Propagated from Core when the model is unknown, in use, or downloading. Đẩy ra từ Core khi model lạ, đang dùng, hoặc đang tải.</exception>
+    public async Task DeleteOcrModelAsync(string name, CancellationToken ct)
+    {
+        await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
+        EnsureHandlersWired();
+        await _peer.CallAsync("ocr.models.delete",
+            new JsonObject { ["name"] = name }, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Switches the sidecar's active det/rec pair via <c>ocr.models.set</c>. The models do not
+    /// need to be installed yet — a missing model surfaces as an <c>ocr-model-missing</c> start
+    /// failure instead (see <see cref="IsOcrModelMissing"/>). Persist the chosen pair in
+    /// <see cref="AppSettings"/> too, or the next <c>core.start</c> switches back.
+    /// Chuyển cặp det/rec đang dùng của sidecar qua <c>ocr.models.set</c>. Model chưa cần cài —
+    /// thiếu model sẽ lộ ra thành lỗi start <c>ocr-model-missing</c> (xem
+    /// <see cref="IsOcrModelMissing"/>). Cần lưu cặp đã chọn vào <see cref="AppSettings"/> nữa,
+    /// không thì lần <c>core.start</c> kế tiếp sẽ chuyển lại cặp cũ.
+    /// </summary>
+    /// <param name="det">Catalog det model name. Tên model det trong catalog.</param>
+    /// <param name="rec">Catalog rec model name. Tên model rec trong catalog.</param>
+    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <returns>A task that completes once the sidecar accepts the new pair. Task hoàn tất khi sidecar chấp nhận cặp mới.</returns>
+    /// <exception cref="RpcException">Propagated from Core when a name is unknown or has the wrong kind. Đẩy ra từ Core khi tên lạ hoặc sai loại model.</exception>
+    public async Task SetOcrModelPairAsync(string det, string rec, CancellationToken ct)
+    {
+        await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
+        EnsureHandlersWired();
+        await _peer.CallAsync("ocr.models.set",
+            new JsonObject { ["det"] = det, ["rec"] = rec }, ct).ConfigureAwait(false);
+    }
+
     private async Task EnsureCoreStartedAsync(CancellationToken ct)
     {
         if (!_peer.IsStarted) await _peer.StartCoreAsync(ct).ConfigureAwait(false);
@@ -297,6 +479,7 @@ public sealed class PipelineController
         IsRunning = false;
         ActiveSource = null;
         PipelineStateChanged?.Invoke(false, CoreExitedReason);
+        StateChanged?.Invoke();
     }
 
     private async Task<JsonNode?> HandleRequestAsync(string method, JsonNode? @params)
@@ -509,6 +692,7 @@ public sealed class PipelineController
             // Loop tự chết: giữ khung cuối trên camera thay vì chuyển sang đen.
             _camera?.Hold();
         }
+        StateChanged?.Invoke();
     }
 
     private void HandleTranslatePut(JsonNode? @params)
@@ -603,6 +787,14 @@ public sealed class PipelineController
         => o[key] is JsonValue value
             && value.GetValueKind() == JsonValueKind.Number
             && value.TryGetValue<double>(out double parsed)
+            ? parsed
+            : fallback;
+
+    // installed/inUse đến từ wire dưới dạng JsonElement (parse từ chuỗi JSON) hoặc bool dựng sẵn
+    // trong test — TryGetValue<bool> đọc được cả hai backing, không cần vòng giải mã như ReadLong.
+    private static bool ReadBool(JsonObject o, string key, bool fallback = false)
+        => o[key] is JsonValue value
+            && value.TryGetValue<bool>(out bool parsed)
             ? parsed
             : fallback;
 }

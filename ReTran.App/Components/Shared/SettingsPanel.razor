@@ -1,0 +1,500 @@
+@using ReTran_App.Core
+@using ReTran_App.Services
+@using ReTran_App.Services.Update
+@inject ReTran_App.Services.I18nService L
+@inject ReTran_App.Services.AppSettingsService SettingsStore
+@inject PipelineController Pipeline
+@inject UpdateCheckService Check
+@inject UpdateCoordinator Coordinator
+@inject ToastService Toast
+@inject IAppUpdateService Updates
+@inject JsInteropService Js
+@implements IDisposable
+
+<section class="rt-sect">
+    <h3>@(L["deck.settings.section.provider"])</h3>
+    <div class="rt-srow">
+        <span>@(L["deck.settings.provider"])</span>
+        <div class="rt-select">
+            <select @bind="_model.Provider" aria-label="@(L["deck.settings.provider"])">
+                <option value="google">@(L["settings.provider.google"])</option>
+                <option value="deepl" disabled>@(L["settings.provider.deepl"]) (@(L["settings.opt.comingSoon"]))</option>
+                <option value="llm" disabled>@(L["settings.provider.llm"]) (@(L["settings.opt.comingSoon"]))</option>
+            </select>
+            <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+        </div>
+    </div>
+    <div class="rt-srow">
+        <span>@(L["deck.settings.apiKey"])</span>
+        <input type="text" class="rt-input" @bind="_model.ApiKey" disabled="@(_model.Provider == "google")"
+               placeholder="@(L["deck.settings.apiKeyHint"])" aria-label="@(L["deck.settings.apiKey"])" />
+    </div>
+</section>
+
+<section class="rt-sect">
+    <h3>@(L["deck.settings.section.lang"])</h3>
+    <div class="rt-srow">
+        <span>@(L["deck.settings.src"])</span>
+        <div class="rt-select">
+            <select @bind="_model.Src" aria-label="@(L["deck.settings.src"])">
+                @foreach (string lang in _srcOptions)
+                {
+                    <option value="@lang">@(lang == "auto" ? L["settings.opt.auto"] : I18nStrings.LanguageName(lang))</option>
+                }
+            </select>
+            <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+        </div>
+    </div>
+    <div class="rt-srow">
+        <span>@(L["deck.settings.dst"])</span>
+        <div class="rt-select">
+            <select @bind="_model.Dst" aria-label="@(L["deck.settings.dst"])">
+                @foreach (string lang in _dstOptions)
+                {
+                    <option value="@lang">@(I18nStrings.LanguageName(lang))</option>
+                }
+            </select>
+            <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+        </div>
+    </div>
+    <p class="rt-hint">@(L["settings.note.srcNextStart"])</p>
+</section>
+
+<section class="rt-sect">
+    <h3>@(L["deck.settings.section.ocr"])</h3>
+    @if (_ocrModels is null)
+    {
+        <p class="rt-hint">@(_ocrLoadFailed ? L["deck.ocr.loadFailed"] : L["deck.ocr.loading"])</p>
+    }
+    else
+    {
+        <div class="rt-srow">
+            <span>@(L["deck.settings.ocr.det"])</span>
+            <div class="rt-select">
+                <select @bind="_ocrDetPick" aria-label="@(L["deck.settings.ocr.det"])">
+                    @foreach (OcrModelInfo m in _ocrModels.Where(m => m.Kind == "det"))
+                    {
+                        <option value="@m.Name">@m.Name</option>
+                    }
+                </select>
+                <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+            </div>
+        </div>
+        <div class="rt-srow">
+            <span>@(L["deck.settings.ocr.rec"])</span>
+            <div class="rt-select">
+                <select @bind="_ocrRecPick" aria-label="@(L["deck.settings.ocr.rec"])">
+                    @foreach (OcrModelInfo m in _ocrModels.Where(m => m.Kind == "rec"))
+                    {
+                        <option value="@m.Name">@m.Name</option>
+                    }
+                </select>
+                <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+            </div>
+        </div>
+        <div class="rt-field-row" style="flex-wrap: wrap; gap: 10px; margin-bottom: 8px;">
+            <button type="button" class="rt-btn rt-btn-primary rt-mini" disabled="@_ocrBusy" @onclick="SaveOcrPairAsync">@(L["deck.ocr.savePair"])</button>
+            <button type="button" class="rt-btn rt-mini" disabled="@_ocrBusy" @onclick="ReloadOcrModelsAsync">@(L["deck.ocr.refresh"])</button>
+        </div>
+        <p class="rt-hint" style="margin-bottom: 10px;">@OcrActivePairText @(L["deck.ocr.downloadHint"])</p>
+        <table style="width: 100%; border-collapse: collapse; font-size: 11.5px;">
+            <thead>
+                <tr style="color: var(--rt-dim); text-align: left;">
+                    <th style="font-weight: 500; padding: 4px 8px 4px 0;">@(L["deck.ocr.col.model"])</th>
+                    <th style="font-weight: 500; padding: 4px 8px;">@(L["deck.ocr.col.status"])</th>
+                    <th style="font-weight: 500; padding: 4px 0; text-align: right;">@(L["deck.ocr.col.actions"])</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (OcrModelInfo m in _ocrModels)
+                {
+                    <tr style="border-top: 1px solid var(--rt-line);">
+                        <td style="padding: 6px 8px 6px 0; vertical-align: top;">
+                            <div class="rt-mono">@m.Name</div>
+                            <div class="rt-hint">@OcrMetaText(m)</div>
+                        </td>
+                        <td style="padding: 6px 8px; vertical-align: top;">
+                            <span class="rt-hint" style="@(m.Installed ? "" : "color: var(--rt-danger)")">@(m.Installed ? L["deck.ocr.installed"] : L["deck.ocr.notInstalled"])</span>
+                            @if (m.InUse)
+                            {
+                                <span class="rt-hint" style="color: var(--rt-tally)">· @(L["deck.ocr.inUse"])</span>
+                            }
+                        </td>
+                        <td style="padding: 6px 0; text-align: right; vertical-align: top; white-space: nowrap;">
+                            <button type="button" class="rt-btn rt-mini" disabled="@(m.Installed || _ocrBusy)" @onclick="() => DownloadOcrModelAsync(m)">@(L["deck.ocr.download"])</button>
+                            <button type="button" class="rt-btn rt-mini" disabled="@(m.InUse || !m.Installed || _ocrBusy)" @onclick="() => DeleteOcrModelAsync(m)">@(L["deck.ocr.delete"])</button>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+</section>
+
+<section class="rt-sect">
+    <h3>@(L["deck.settings.section.look"])</h3>
+    <div class="rt-srow">
+        <span>@(L["deck.settings.theme"])</span>
+        <div class="rt-seg" role="group" aria-label="@(L["deck.settings.theme"])">
+            <button type="button" aria-pressed="@Pressed(_themeSetting == "light")" @onclick='() => SetThemeAsync("light")'>@(L["home.btn.theme.light"])</button>
+            <button type="button" aria-pressed="@Pressed(_themeSetting == "dark")" @onclick='() => SetThemeAsync("dark")'>@(L["home.btn.theme.dark"])</button>
+            <button type="button" aria-pressed="@Pressed(_themeSetting == "system")" @onclick='() => SetThemeAsync("system")'>@(L["home.btn.theme.system"])</button>
+        </div>
+    </div>
+    <div class="rt-srow">
+        <span>@(L["deck.settings.accent"])</span>
+        <div class="rt-swatches">
+            <button type="button" class="rt-swatch s-amber" aria-label="@(L["deck.settings.accent.amber"])"
+                    aria-pressed="@Pressed(_accent == "amber")" @onclick='() => SetAccentAsync("amber")'></button>
+            <button type="button" class="rt-swatch s-jade" aria-label="@(L["deck.settings.accent.jade"])"
+                    aria-pressed="@Pressed(_accent == "jade")" @onclick='() => SetAccentAsync("jade")'></button>
+            <button type="button" class="rt-swatch s-coral" aria-label="@(L["deck.settings.accent.coral"])"
+                    aria-pressed="@Pressed(_accent == "coral")" @onclick='() => SetAccentAsync("coral")'></button>
+        </div>
+    </div>
+    <div class="rt-srow">
+        <span>@(L["deck.settings.uiLang"])</span>
+        <div class="rt-seg" role="group" aria-label="@(L["deck.settings.uiLang"])">
+            <button type="button" aria-pressed="@Pressed(L.Lang == "vi")" @onclick='() => SetLangAsync("vi")'>Tiếng Việt</button>
+            <button type="button" aria-pressed="@Pressed(L.Lang == "en")" @onclick='() => SetLangAsync("en")'>English</button>
+        </div>
+    </div>
+</section>
+
+@if (UpdateFeature.IsEnabled)
+{
+    <section class="rt-sect">
+        <h3>@(L["deck.settings.section.update"])</h3>
+        <div class="rt-field-row" style="flex-wrap: wrap; gap: 10px;">
+            <span class="rt-hint rt-mono">v@_appVersion</span>
+            @if (Check.IsUpdateAvailable)
+            {
+                <span class="rt-chip live"><span class="rt-lamp"></span><span class="rt-txt">@(L["update.badge"])</span></span>
+            }
+            <button type="button" class="rt-btn rt-mini" disabled="@_checking" @onclick="CheckAsync">@(L["update.check"])</button>
+            @if (Check.IsUpdateAvailable)
+            {
+                <button type="button" class="rt-btn rt-btn-primary rt-mini" disabled="@Coordinator.UpdateInProgress" @onclick="UpdateNow">@(L["update.now"])</button>
+            }
+        </div>
+    </section>
+}
+
+<div class="rt-sheet-foot">
+    <button type="button" class="rt-btn rt-btn-primary" @onclick="Save">@(L["settings.btn.save"])</button>
+    @if (StatusText.Length > 0)
+    {
+        <span class="rt-hint" style="@(_statusKind == "saved" ? "" : "color: var(--rt-danger)")">@StatusText</span>
+    }
+</div>
+
+@code {
+    // Model mutable cho @bind — AppSettings là record init-only nên không bind trực tiếp được.
+    private sealed class SettingsModel
+    {
+        public string Provider { get; set; } = "google";
+        public string Src { get; set; } = "auto";
+        public string Dst { get; set; } = "vi";
+        public string? ApiKey { get; set; }
+    }
+
+    private static readonly string[] SrcCodes = ["auto", "en", "ja", "ko", "zh", "ru", "fr", "de", "es"];
+    private static readonly string[] DstCodes = ["vi", "en", "ja", "ko", "zh", "ru", "fr", "de", "es"];
+
+    private readonly SettingsModel _model = new();
+    private string[] _srcOptions = SrcCodes;
+    private string[] _dstOptions = DstCodes;
+    private string? _statusKind; // "saved" | "saveFailed" | null
+    private string _appVersion = string.Empty;
+    private bool _checking;
+    private string _themeSetting = "system";
+    private string _accent = "amber";
+    private bool _appearanceLoaded;
+
+    // OCR model manager: null = chưa nạp catalog; _ocrBusy chặn bấm chồng khi RPC đang chạy.
+    private IReadOnlyList<OcrModelInfo>? _ocrModels;
+    private bool _ocrLoadFailed;
+    private bool _ocrBusy;
+    private string _ocrDetPick = "PP-OCRv6_small_det";
+    private string _ocrRecPick = "PP-OCRv6_small_rec";
+
+    private string StatusText => _statusKind switch
+    {
+        "saved" => L["settings.status.saved"],
+        "saveFailed" => L["settings.status.saveFailed"],
+        _ => string.Empty,
+    };
+
+    private static string Pressed(bool value) => value ? "true" : "false";
+
+    protected override void OnInitialized()
+    {
+        AppSettings current = SettingsStore.Load();
+        _model.Provider = current.Provider;
+        _model.Src = current.Src;
+        _model.Dst = current.Dst;
+        _model.ApiKey = current.ApiKey;
+        _ocrDetPick = current.OcrDet;
+        _ocrRecPick = current.OcrRec;
+        _appVersion = AppVersionFormatter.Format(Updates.CurrentVersion);
+        // File ghi tay có thể chứa giá trị ngoài danh sách — thêm vào để select không bị trống.
+        if (Array.IndexOf(_srcOptions, current.Src) < 0) _srcOptions = [current.Src, .. _srcOptions];
+        if (Array.IndexOf(_dstOptions, current.Dst) < 0) _dstOptions = [current.Dst, .. _dstOptions];
+        L.Changed += OnStateChanged;
+        Js.OnWebViewReady += OnStateChanged;
+        _ = LoadOcrModelsAsync(); // nạp catalog model từ Core (fire-and-forget như Home)
+        base.OnInitialized();
+    }
+
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (firstRender) _ = LoadAppearanceAsync();
+        base.OnAfterRender(firstRender);
+    }
+
+    private void OnStateChanged() => _ = InvokeAsync(async () =>
+    {
+        await LoadAppearanceAsync();
+        StateHasChanged();
+    });
+
+    // Theme/accent sống trong localStorage của WebView — đọc lại sau khi JS bridge sẵn sàng.
+    private async Task LoadAppearanceAsync()
+    {
+        if (_appearanceLoaded || !Js.IsWebViewReady) return;
+        try
+        {
+            string? theme = await Js.GetThemeSettingAsync();
+            string? accent = await Js.GetAccentAsync();
+            if (theme is "light" or "dark" or "system") _themeSetting = theme;
+            if (accent is "amber" or "jade" or "coral") _accent = accent;
+            _appearanceLoaded = true;
+        }
+        catch (Exception)
+        {
+            // JS chưa sẵn sàng — giữ mặc định, lần mở sheet sau đọc lại.
+        }
+    }
+
+    private void Save()
+    {
+        try
+        {
+            // `with` giữ nguyên overlay/capture options hiện có — form này chỉ sửa provider/ngôn ngữ.
+            SettingsStore.Save(SettingsStore.Load() with
+            {
+                Provider = _model.Provider,
+                Src = _model.Src,
+                Dst = _model.Dst,
+                ApiKey = _model.ApiKey,
+            });
+            _statusKind = "saved";
+            Toast.Show(L["settings.status.saved"]);
+        }
+        catch (Exception)
+        {
+            _statusKind = "saveFailed";
+        }
+    }
+
+    // Cặp det/rec đang dùng của sidecar — hai model có cờ InUse trong catalog.
+    private string OcrActivePairText
+    {
+        get
+        {
+            if (_ocrModels is null) return string.Empty;
+            OcrModelInfo? det = _ocrModels.FirstOrDefault(m => m.Kind == "det" && m.InUse);
+            OcrModelInfo? rec = _ocrModels.FirstOrDefault(m => m.Kind == "rec" && m.InUse);
+            return det is null || rec is null ? string.Empty : L.Fmt("deck.ocr.activePair", det.Name, rec.Name);
+        }
+    }
+
+    private string OcrMetaText(OcrModelInfo m) =>
+        $"{m.Kind} · {L.Fmt("deck.ocr.langsCount", m.Langs.Count)} · {m.SizeMb:0.#} MB";
+
+    // Nạp catalog model từ Core; lỗi → giữ placeholder, Làm mới thử lại.
+    private async Task LoadOcrModelsAsync()
+    {
+        try
+        {
+            IReadOnlyList<OcrModelInfo> models = await Pipeline.ListOcrModelsAsync(CancellationToken.None);
+            _ocrModels = models;
+            _ocrLoadFailed = false;
+            // Select chạy theo cặp đang dùng thật của sidecar (InUse), không theo guesses.
+            OcrModelInfo? activeDet = models.FirstOrDefault(m => m.Kind == "det" && m.InUse);
+            OcrModelInfo? activeRec = models.FirstOrDefault(m => m.Kind == "rec" && m.InUse);
+            if (activeDet is not null) _ocrDetPick = activeDet.Name;
+            if (activeRec is not null) _ocrRecPick = activeRec.Name;
+        }
+        catch (Exception)
+        {
+            // Core chưa sẵn sàng — giữ danh sách cũ/placeholder, bấm Làm mới thử lại.
+            _ocrLoadFailed = true;
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ReloadOcrModelsAsync()
+    {
+        if (_ocrBusy) return;
+        _ocrBusy = true;
+        try
+        {
+            await LoadOcrModelsAsync();
+        }
+        finally
+        {
+            _ocrBusy = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task DownloadOcrModelAsync(OcrModelInfo model)
+    {
+        if (_ocrBusy) return;
+        _ocrBusy = true;
+        try
+        {
+            await Pipeline.DownloadOcrModelAsync(model.Name, CancellationToken.None);
+            Toast.Show(L.Fmt("deck.ocr.downloadStarted", model.Name));
+            await LoadOcrModelsAsync(); // model tải ngầm phía sidecar — Làm mới để thấy Đã cài.
+        }
+        catch (Exception ex)
+        {
+            Toast.Show(L.Fmt("deck.ocr.actionFailed", ex.Message), ToastSeverity.Error);
+        }
+        finally
+        {
+            _ocrBusy = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task DeleteOcrModelAsync(OcrModelInfo model)
+    {
+        if (_ocrBusy) return;
+        _ocrBusy = true;
+        try
+        {
+            await Pipeline.DeleteOcrModelAsync(model.Name, CancellationToken.None);
+            Toast.Show(L.Fmt("deck.ocr.deleted", model.Name));
+            await LoadOcrModelsAsync();
+        }
+        catch (Exception ex)
+        {
+            Toast.Show(L.Fmt("deck.ocr.actionFailed", ex.Message), ToastSeverity.Error);
+        }
+        finally
+        {
+            _ocrBusy = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task SaveOcrPairAsync()
+    {
+        if (_ocrBusy) return;
+        _ocrBusy = true;
+        try
+        {
+            await Pipeline.SetOcrModelPairAsync(_ocrDetPick, _ocrRecPick, CancellationToken.None);
+            // Cặp đã chọn phải vào settings.json nữa — core.start lần sau gửi đúng cặp này
+            // (Core sẽ chuyển sidecar về cặp trong settings, không tự theo cặp vừa set).
+            SettingsStore.Save(SettingsStore.Load() with { OcrDet = _ocrDetPick, OcrRec = _ocrRecPick });
+            Toast.Show(L["deck.ocr.pairSaved"]);
+            await LoadOcrModelsAsync();
+        }
+        catch (Exception ex)
+        {
+            Toast.Show(L.Fmt("deck.ocr.actionFailed", ex.Message), ToastSeverity.Error);
+        }
+        finally
+        {
+            _ocrBusy = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task SetThemeAsync(string theme)
+    {
+        try
+        {
+            await Js.SetThemeAsync(theme);
+            _themeSetting = theme;
+        }
+        catch (Exception)
+        {
+            // Không đổi được theme không phá form; giữ lựa chọn cũ.
+        }
+    }
+
+    private async Task SetAccentAsync(string accent)
+    {
+        try
+        {
+            await Js.SetAccentAsync(accent);
+            _accent = accent;
+        }
+        catch (Exception)
+        {
+            // Như trên.
+        }
+    }
+
+    private async Task SetLangAsync(string lang)
+    {
+        if (lang == L.Lang) return;
+        L.Set(lang);
+        try
+        {
+            await Js.SetLangAsync(lang);
+        }
+        catch (Exception)
+        {
+            // Lưu thất bại không ảnh hưởng ngôn ngữ đã áp trong RAM.
+        }
+    }
+
+    private async Task CheckAsync()
+    {
+        if (_checking) return;
+        _checking = true;
+        try
+        {
+            // Bắt trạng thái TRƯỚC khi check: chuyển tiếp none→available sẽ bắn UpdateFound
+            // (MainLayout đã toast) — chỉ toast khi user check lại update đã biết.
+            var wasAvailable = Check.IsUpdateAvailable;
+            var result = await Check.CheckOnceAsync();
+            if (result == UpdateCheckResult.UpdateAvailable && wasAvailable
+                && Check.AvailableRelease is { } release)
+            {
+                Toast.Show(string.Format(L["update.available"], release.TagName));
+            }
+            else if (result == UpdateCheckResult.AlreadyLatest)
+            {
+                Toast.Show(L["update.latest"]);
+            }
+            else if (result == UpdateCheckResult.Failed)
+            {
+                Toast.Show(L["update.checkFailed"], ToastSeverity.Error);
+            }
+        }
+        finally
+        {
+            _checking = false;
+        }
+    }
+
+    private void UpdateNow()
+    {
+        if (Check.AvailableRelease is not { } release) return;
+        if (Coordinator.UpdateInProgress) return;
+        _ = Coordinator.StartUpdateAsync(release);
+    }
+
+    public void Dispose()
+    {
+        L.Changed -= OnStateChanged;
+        Js.OnWebViewReady -= OnStateChanged;
+    }
+}
