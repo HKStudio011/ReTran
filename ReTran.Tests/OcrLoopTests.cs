@@ -51,6 +51,9 @@ public class OcrLoopTests
 
     private static Frame TinyFrame() => Frame.FromBgra(2, 2, new byte[16]);
 
+    /// <summary>A 1080p all-zero frame: proves the spot request stays tiny even for big frames. Khung 1080p toàn số 0: chứng minh request spot vẫn nhỏ dù khung to.</summary>
+    private static Frame BigFrame() => Frame.FromBgra(1920, 1080, new byte[1920 * 1080 * 4]);
+
     [Fact]
     public void TryParse_ValidArgs_ReturnsOptions()
     {
@@ -105,7 +108,8 @@ public class OcrLoopTests
         var stderr = new StringWriter();
 
         Task<int> run = Task.Run(() =>
-            OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr, CancellationToken.None));
+            OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr,
+                CancellationToken.None, shmName: OcrTestSupport.UniqueOcrShmName("loop-maxframes")));
 
         await Task.Delay(400, TestContext.Current.CancellationToken); // first-frame wait polls every 50 ms — A consumed by now
         source.Raise(TinyFrame());
@@ -126,7 +130,7 @@ public class OcrLoopTests
     }
 
     [Fact]
-    public async Task RunAsync_PayloadSentToSpot_IsJpegNotPng()
+    public async Task RunAsync_SpotParams_AreSeqWidthHeight_NotImage()
     {
         var options = new OcrLoopOptions(false, 0, 0, Fps: 1, MaxFrames: 1);
         using var source = new FakeCaptureSource();
@@ -137,18 +141,24 @@ public class OcrLoopTests
         var stderr = new StringWriter();
 
         Task<int> run = Task.Run(() =>
-            OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr, CancellationToken.None));
+            OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr,
+                CancellationToken.None, shmName: OcrTestSupport.UniqueOcrShmName("loop-params")));
 
         await Task.Delay(400, TestContext.Current.CancellationToken); // first frame consumed
-        source.Raise(TinyFrame()); // cycle 1 -> SpotAsync payload recorded
+        source.Raise(BigFrame()); // cycle 1 -> publish + SpotAsync(seq, w, h) recorded
         Assert.True(await stdout.WaitForLineCount(1, TimeSpan.FromSeconds(10)), "no line 1");
         Assert.Equal(0, await run);
 
-        string b64 = rpc.LastParams!["image"]!.GetValue<string>();
-        byte[] payload = Convert.FromBase64String(b64);
-        Assert.True(payload.Length > 4);
-        Assert.Equal(new byte[] { 0xFF, 0xD8 }, payload[..2]);   // JPEG SOI marker
-        Assert.NotEqual(new byte[] { 0x89, 0x50, 0x4E, 0x47 }, payload[..4]); // not the PNG signature
+        JsonObject p = rpc.LastParams!.AsObject();
+        Assert.Equal(2, p["seq"]!.GetValue<long>());      // first publish on a fresh section
+        Assert.Equal(1920, p["width"]!.GetValue<int>());
+        Assert.Equal(1080, p["height"]!.GetValue<int>());
+        Assert.Null(p["image"]);                          // raw transport: no base64 on the wire
+        // rpc_MBps ~ 0: the whole spot request is a few dozen bytes even for a 1080p frame,
+        // where the old base64 path put a ~100 KB JPEG in every request.
+        // rpc_MBps ~ 0: toàn bộ request spot chỉ vài chục byte dù khung 1080p, trong khi
+        // đường base64 cũ nhét JPEG ~100 KB vào mỗi request.
+        Assert.True(p.ToJsonString().Length < 128, $"spot params too big: {p.ToJsonString()}");
     }
 
     [Fact]
@@ -163,7 +173,8 @@ public class OcrLoopTests
         using var cts = new CancellationTokenSource();
 
         Task<int> run = Task.Run(() =>
-            OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr, cts.Token));
+            OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr,
+                cts.Token, shmName: OcrTestSupport.UniqueOcrShmName("loop-noemit")));
 
         await Task.Delay(1500, TestContext.Current.CancellationToken); // first frame consumed, >=1 tick elapsed with an empty buffer
         Assert.Empty(stdout.Snapshot()); // skipped ticks emit nothing
@@ -180,7 +191,8 @@ public class OcrLoopTests
         var stdout = new SyncTextWriter();
         var stderr = new StringWriter();
 
-        int exit = await OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr, CancellationToken.None);
+        int exit = await OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr,
+            CancellationToken.None, shmName: OcrTestSupport.UniqueOcrShmName("loop-firsttimeout"));
 
         Assert.Equal(1, exit);
         Assert.Contains("timed out", stderr.ToString(), StringComparison.OrdinalIgnoreCase);
@@ -204,7 +216,8 @@ public class OcrLoopTests
         var stderr = new StringWriter();
 
         Task<int> run = Task.Run(() =>
-            OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr, CancellationToken.None));
+            OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr,
+                CancellationToken.None, shmName: OcrTestSupport.UniqueOcrShmName("loop-timeout")));
 
         await Task.Delay(400, TestContext.Current.CancellationToken);   // first frame (A) consumed
         source.Raise(TinyFrame()); // cycle 1 -> times out at ~1.3 s -> warn + skip
@@ -230,7 +243,8 @@ public class OcrLoopTests
         var stderr = new StringWriter();
 
         Task<int> run = Task.Run(() =>
-            OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr, CancellationToken.None));
+            OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(stdout), stderr,
+                CancellationToken.None, shmName: OcrTestSupport.UniqueOcrShmName("loop-sidedead")));
 
         await Task.Delay(400, TestContext.Current.CancellationToken);
         source.Raise(TinyFrame()); // processed on the first tick -> fatal

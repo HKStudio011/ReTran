@@ -29,10 +29,33 @@ def decode_image_b64(image_b64: str) -> npt.NDArray[np.uint8]:
     Raises:
         ValueError: The input is not valid base64 or not a decodable image.
     """
+    return decode_image_b64_with_size(image_b64)[0]
+
+
+def decode_image_b64_with_size(
+    image_b64: str,
+) -> tuple[npt.NDArray[np.uint8], tuple[int, int]]:
+    """Decode a base64 image and report the original source size.
+
+    The returned array may be downscaled to ``MAX_INPUT_DIM`` (long side).
+    The size is the image's size before downscaling, so callers can map
+    engine coordinates back to the submitted image's pixel space.
+
+    Args:
+        image_b64: Base64-encoded PNG or JPEG bytes, no data-url prefix.
+
+    Returns:
+        ``(pixels, (source_width, source_height))`` where pixels are HWC BGR.
+
+    Raises:
+        ValueError: The input is not valid base64 or not a decodable image.
+    """
     try:
         raw = base64.b64decode(image_b64, validate=True)
         rgb = Image.open(io.BytesIO(raw)).convert("RGB")
     except Exception as exc:
         raise ValueError(f"invalid image: {exc}") from exc
+
+    source_size = rgb.size
     rgb.thumbnail((MAX_INPUT_DIM, MAX_INPUT_DIM), Image.Resampling.BILINEAR)
-    return np.asarray(rgb, dtype=np.uint8)[:, :, ::-1].copy()
+    return np.asarray(rgb, dtype=np.uint8)[:, :, ::-1].copy(), source_size

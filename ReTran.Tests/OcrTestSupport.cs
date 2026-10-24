@@ -50,6 +50,15 @@ internal static class OcrTestSupport
         }
     }
 
+    /// <summary>
+    /// A fresh OCR shared-memory mapping name per call, so tests never collide with each other
+    /// or with the real <see cref="ReTran.Core.Ocr.OcrShm.Name"/> section.
+    /// Tên mapping OCR mới mỗi lần gọi, để test không đụng nhau và không chạm vùng
+    /// <see cref="ReTran.Core.Ocr.OcrShm.Name"/> thật.
+    /// </summary>
+    public static string UniqueOcrShmName(string stem) =>
+        $@"Local\ReTran.Tests.OcrShm.{stem}.{Guid.NewGuid():N}";
+
     /// <summary>Draws HELLO RETRAN on white; returns the temp PNG path (caller deletes).</summary>
     public static string CreateTextFixturePng()
     {

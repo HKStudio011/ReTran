@@ -152,6 +152,12 @@ public static class OcrLoop
     /// invoked right before returning 1. Callback tùy chọn nhận lý do lỗi nghiêm trọng
     /// ("capture-error" hoặc "sidecar-exited"), gọi ngay trước khi return 1.
     /// </param>
+    /// <param name="shmName">
+    /// Name of the OCR shared-memory section the frames are published into; the default is
+    /// <see cref="OcrShm.Name"/> and tests pass a unique name to stay isolated.
+    /// Tên vùng shared memory OCR để ghi khung; mặc định là <see cref="OcrShm.Name"/>,
+    /// test truyền tên riêng để không đụng nhau.
+    /// </param>
     /// <returns>0 = clean stop; 1 = first-frame timeout or sidecar lost. 0 = dừng sạch; 1 = hết chờ frame đầu hoặc mất sidecar.</returns>
     /// <exception cref="ArgumentNullException">Thrown when any reference parameter is null.</exception>
     public static async Task<int> RunAsync(
@@ -161,7 +167,8 @@ public static class OcrLoop
         ICycleSink sink,
         TextWriter stderr,
         CancellationToken ct,
-        Action<string>? onFatal = null)
+        Action<string>? onFatal = null,
+        string shmName = OcrShm.Name)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(source);
@@ -200,6 +207,16 @@ public static class OcrLoop
             }
 
             long seq = 0;
+            // Raw-frame transport: each captured frame is published into the OCR shared-memory
+            // section once, and the ocr.spot request only carries {seq, width, height} — the
+            // base64 JPEG this loop used to encode per frame (100s of KB over stdio) is gone.
+            // The writer is disposed at the end of the run; a reader still open keeps the
+            // section (and its last frame) alive.
+            // Truyền khung raw: mỗi khung đã chụp được ghi một lần vào vùng shared memory OCR,
+            // request ocr.spot chỉ còn mang {seq, width, height} — JPEG base64 mà vòng này từng
+            // mã hoá mỗi khung (hàng trăm KB qua stdio) không còn nữa. Writer được dispose khi
+            // kết thúc lượt chạy; reader còn mở vẫn giữ section (và khung cuối) sống.
+            using var writer = new OcrShmWriter(shmName);
             using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(1000.0 / options.Fps));
             while (await timer.WaitForNextTickAsync(ct))
             {
@@ -212,8 +229,8 @@ public static class OcrLoop
                 {
                     using (frame)
                     {
-                        string b64 = BgraJpegEncoder.ToJpegBase64(frame);
-                        JsonObject result = await pipeline.SpotAsync(b64, ct);
+                        long frameSeq = writer.Publish(frame);
+                        JsonObject result = await pipeline.SpotAsync(frameSeq, frame.Width, frame.Height, ct);
                         seq++;
                         await sink.OnCycleAsync(seq, frame.Width, frame.Height, result, ct);
                         if (options.MaxFrames > 0 && seq >= options.MaxFrames)

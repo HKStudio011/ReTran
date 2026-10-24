@@ -15,6 +15,7 @@ from .ocr.models import (
     model_cache_dir,
 )
 from .ocr.paddle_engine import PaddleOcrEngine
+from .ocr.shm import ShmReader
 
 
 def _handlers():
@@ -27,7 +28,9 @@ def _handlers():
     handlers = {
         "sidecar.ping": lambda p: "pong",
         "sidecar.version": lambda p: __version__,
-        "ocr.spot": make_spot_handler(engine),
+        # ShmReader is handed over as the reader factory: the sidecar maps the
+        # OCR shared-memory section lazily, on the first {seq} spot request.
+        "ocr.spot": make_spot_handler(engine, reader_factory=ShmReader),
     }
     handlers.update(make_model_handlers(manager))
     return handlers
