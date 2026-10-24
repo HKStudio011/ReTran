@@ -721,6 +721,113 @@ A/B post-fix (T6c 10 fps vs T6d 2 fps: 46,0 % vs 11,0 %, 8,77 vs 1,72 fps, **cù
 
 ---
 
+## Annotate style v2 — tick + pill theo mockup (2026-10-22)
+
+Đổi cách vẽ box ở **cả** preview/camera ảo (Core) và overlay trên game (App): tick teal
+`#4FD8C4` 4 góc + pill tối phủ kín lòng box (inset 4 trái/trên/dưới, sát phải), chữ `#F3EEDD`.
+Cỡ chữ scale theo **chiều cao box** (`clamp(0.5 × boxH, 12, 40) × FontScale`, thu nhỏ tới 9 px),
+wrap tối đa 2 dòng; font cache theo cỡ nguyên 9–40 px.
+
+### Benchmark code thật (Debug, frame synthetic 1920×1080, 20 reps/N)
+
+| Snapshot | Trước (baseline 22/10) | Sau | Δ |
+| --- | --- | --- | --- |
+| 0 box | 11,95 ms | 11,65 ms | −0,3 ms |
+| **63 box** | **19,37 ms** | **16,79 ms** | **−2,6 ms (−13 %)** |
+| 150 box | 24,07 ms | 22,38 ms | −1,7 ms |
+| 300 box | 35,78 ms | 30,61 ms | −5,2 ms |
+
+- Budget annotate **≤ 40 ms/khung @ ~60 box**: **PASS** (16,8 ms @63 box).
+- Nhanh hơn chủ yếu nhờ font cache + không tạo `Font`/format mới mỗi khung; chi phí tick + pill
+  bo góc nằm trong nhiễu.
+- Chưa đo app-driven/overlay thật trong game (cần user mở game) — số trên là benchmark code thật,
+  cùng phương pháp với §M5-fix.
+
+---
+
 ## M1 capture baseline
 
 (chưa đo — ghi tại milestone có capture loop chạy thật)
+
+---
+
+## OCR model A/B — PP-OCRv5 mobile vs PP-OCRv6 (2026-10-25)
+
+### Bối cảnh đo
+
+- **Máy:** như §M5 (i5-13400F 10c/16t; RTX 5060 Ti — `nvidia-smi`: 16311 MiB). Stack xác minh lúc đo: `paddleocr 3.7.0` + `paddlepaddle-gpu 3.4.0` **CUDA build** (`is_compiled_with_cuda() → True`) + `paddlex 3.7.2`, `numpy 2.3.5`.
+- **Bench:** `Tools/Perf/ocrbench/bench.py` — chạy đúng handler sản xuất `make_spot_handler(PaddleOcrEngine(det, rec))` qua đường base64 `{image}` (decode PNG + downscale 1280 + inference đều nằm trong `elapsed_ms` mà sidecar báo mỗi chu kỳ). Mỗi cặp model chạy **một process riêng** (A/B sạch, không chia sẻ VRAM/kết quả); **1 lượt warm-up bỏ qua** (nạp model + init CUDA) trước khi tính giờ — số dưới đây là steady-state.
+- **Frames:** 24 PNG 1920×1080 chụp màn hình 0 thật bằng `ReTran.Core.exe capture screen` trong 28,6 s (màn HDR → đường GDI fallback như §OCR GPU); 7 nội dung khác nhau (SHA1). Nội dung = desktop thật của user lúc đo: cửa sổ terminal/agent đang soạn lệnh export Godot/Android (text kỹ thuật tiếng Anh), UI tiếng Việt, taskbar/tray — **không cố định nội dung**, đây là đo thực địa.
+- **Model cache:** v5 mobile có sẵn sẵn trong `~/.paddlex/official_models`; v6 small tải lần đầu **30,1 MB trong warm-up** (không tính vào số).
+- **Nền máy:** khá rảnh so với các đợt đo trước (M2–M5: 42–96%): CPU nền 4,4–9,3% trước khi chụp frame, 3–15% quanh các run bench — không có game/OBS.
+
+### Số liệu (24 khung, steady-state sau 1 warm-up)
+
+| Cặp (det + rec) | Warm-up (bỏ qua) | min | median | mean | max | spots/khung | VRAM (delta `nvidia-smi`) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| v5 mobile (`PP-OCRv5_mobile_det` + `en_PP-OCRv5_mobile_rec`) | 13,2 s | 196 | **213,0 ms** | 212,8 | 245 | **81,0** | +369 MiB |
+| **v6 small — mặc định** (`PP-OCRv6_small_det` + `PP-OCRv6_small_rec`) | 27,1 s (gồm tải 30,1 MB) | 338 | **352,5 ms** | 355,1 | 390 | **58,2** | +707 MiB |
+| v6 tiny (`PP-OCRv6_tiny_det` + `PP-OCRv6_tiny_rec`) | 5,6 s | 212 | **226,0 ms** | 227,6 | 245 | 74,0 | +425→505 MiB |
+
+Chất lượng text trên **cùng một dòng UI tiếng Việt** (frame_01; text thật: "Tiếp tục nâng cấp bản dịch"):
+
+| Cặp | Text nhận được | Nhận xét |
+| --- | --- | --- |
+| v5 mobile (rec en) | `Tiép tyc nang cap ban dich d:` | méo tiếng Việt hoàn toàn — rec en không hỗ trợ `vi` |
+| v6 small | `Tiép tuc nâng cáp bàn djch d:` | gần đúng hơn nhiều, vẫn sai dấu ở vài chữ |
+| v6 tiny | `Tiép tuc nâng cáp bân dich d` | tương tự v6 small, nhiễu ký tự hơi nhiều hơn |
+
+Text kỹ thuật tiếng Anh: v6 small sạch nhất — v5 đọc `andzoid`, `LASTExITCoDE`; v6 tiny có lỗi ghép ký tự (`jlexport_presets.cfg` thay vì `export_presets.cfg`). Spot/khung thấp hơn của v6 small (58,2 vs 81,0) = det chọn lọc hơn, bớt box rác/fragment ⇒ giảm tải đường annotate + diff translation downstream.
+
+### Kích thước request OCR — shm vs base64 (trên chính bộ 24 frame này)
+
+| Đường | Kích thước request/khung | Nguồn |
+| --- | --- | --- |
+| `{image}` PNG base64 (đường bench) | **271 125 B (~265 KB)** mean | đo trong bench (PNG 198,6 KB → base64) |
+| `{seq,width,height}` shm (đường production) | **36 B** | đo trong bench |
+| Tham chiếu: JPEG base64 thời T4 | ~200 KB | e2e Task-8 (`8665f6e`), nội dung khác |
+| Tham chiếu: pin test C# | params < 128 B cho khung 1080p | `RunAsync_SpotParams_AreSeqWidthHeight_NotImage` |
+
+Request OCR qua shm nhỏ hơn ~7 500× so với PNG-base64 trên nội dung này. (Con số "~490 KB" ước tính khi lập kế hoạch không tái hiện trên desktop này — kích thước base64 phụ thuộc nội dung; máy này PNG 1080p chỉ 198,6 KB/khung.)
+
+### Đối chiếu budget
+
+| Budget | Đo được | Kết luận |
+| --- | --- | --- |
+| OCR ~3 fps (≤ ~333 ms/chu kỳ) | v5 mobile 213 ms median → **~4,7 fps**; v6 tiny 226 ms → **~4,4 fps**; v6 small 352,5 ms → **~2,8 fps** | v5 mobile / v6 tiny **PASS**; v6 small **≈ PASS** (thấp hơn mục tiêu ~3 fps khoảng 6% — đọc kèm hạn chế 1–2) |
+| OCR VRAM < 1 GB | v5 mobile +369 MiB · v6 small +707 MiB · v6 tiny +425–505 MiB | **PASS** cả ba (xấp xỉ — hạn chế 3) |
+| (tham chiếu) e2e shm Task-8, cặp v6 small, ít chữ | steady 261 ms/chu kỳ | transport shm không phải nút cổ chai |
+
+**Verdict:** cặp mặc định **v6 small** đạt VRAM và đạt xấp xỉ ~3 fps trên nội dung dày chữ (58 box/khung); chậm hơn v5 mobile ~1,66× nhưng đổi lại đọc được text đa ngôn ngữ có dấu (v5-en méo hoàn toàn tiếng Việt) và box sạch hơn (58,2 vs 81,0 spots/khung). Không có lý do đổi mặc định; nếu cần ~4,4 fps thì **v6 tiny** là phương án giữa (chất lượng text hơi kém hơn v6 small, vẫn đọc được tiếng Việt tốt hơn hẳn v5-en).
+
+### Ghi chú / hạn chế đo (đọc trước khi dùng số)
+
+1. **Nội dung không kiểm soát** — desktop thật (terminal Godot/Android + UI tiếng Việt + taskbar). Ba cặp chạy trên **cùng một bộ 24 PNG** nên A/B là so sánh đúng trên cùng pixel; nhưng spot/khung khác nhau theo model (81/58/74) nên `elapsed_ms` là chi phí thực của từng cặp trên nội dung này, không phải "cùng một việc" — không khái quát hoá cho nội dung khác (mật độ chữ và số box quyết định).
+2. **Đường `{image}` khác đường production shm:** bench tính decode PNG + downscale 1280 trong `elapsed_ms`; production shm gửi BGRA full-res 1920×1080 **không downscale** ⇒ det chạy trên ảnh lớn hơn. Tham chiếu chéo: e2e Task-8 (đường shm, cặp v6 small, ít box) steady 261 ms/chu kỳ. Không chạy A/B trên đường shm vì cần C# writer chạy đồng thời.
+3. **VRAM là delta `nvidia-smi --query-gpu=memory.used` toàn GPU** quanh lúc nạp model — driver này **không hỗ trợ per-process** (`--query-computed-apps` bị từ chối với "Option not recognized", hành vi WDDM); số có thể dính nhiễu từ process GPU khác trong ~30 s run, nhưng after_warmup = after_loop với v5/v6 small nên nhiễu thấp.
+4. **Nền 3–15% CPU** — thấp hơn hẳn mọi đợt đo trước (M2–M5: 42–96%); số này gần quiet-machine hơn, nhưng vẫn không phải máy trống tuyệt đối.
+5. `elapsed_ms` là `int` ms (làm tròn xuống phía sidecar) — mỗi khung chỉ chính xác đến 1 ms; median/mean trên 24 khung thì đủ mượt.
+6. Chất lượng text chỉ so bằng mắt trên vài dòng anchor (không có ground-truth/WER) — kết luận chất lượng là định tính, không định lượng.
+
+### Lệnh reproduce
+
+```powershell
+# 1) Chụp ≥20 khung thật (Core exe Debug; màn HDR tự rơi vào GDI fallback — đúng cảnh báo trong stderr)
+1..24 | ForEach-Object {
+  & "ReTran.Core\bin\Debug\net10.0-windows\ReTran.Core.exe" capture screen --monitor 0 `
+    --out ("Tools\Perf\ocrbench\data\frame_{0:D2}.png" -f $_) | Out-Null
+  Start-Sleep -Milliseconds 750
+}
+# 2) Mỗi cặp một process riêng; warm-up 1 lượt tự bỏ qua (v6 small lần đầu tự tải 30,1 MB)
+uv run --project ReTran.OCR python Tools/Perf/ocrbench/bench.py --data Tools/Perf/ocrbench/data `
+  --det PP-OCRv5_mobile_det --rec en_PP-OCRv5_mobile_rec --label v5_mobile `
+  --csv Tools/Perf/ocrbench/bench_v5_mobile_20261025.csv
+uv run --project ReTran.OCR python Tools/Perf/ocrbench/bench.py --data Tools/Perf/ocrbench/data `
+  --det PP-OCRv6_small_det --rec PP-OCRv6_small_rec --label v6_small `
+  --csv Tools/Perf/ocrbench/bench_v6_small_20261025.csv
+uv run --project ReTran.OCR python Tools/Perf/ocrbench/bench.py --data Tools/Perf/ocrbench/data `
+  --det PP-OCRv6_tiny_det --rec PP-OCRv6_tiny_rec --label v6_tiny `
+  --csv Tools/Perf/ocrbench/bench_v6_tiny_20261025.csv
+# CSV per-frame (elapsed_ms, spots, texts): Tools/Perf/ocrbench/bench_*_20261025.csv
+# Log run đầy đủ (local, không commit): Tools/Perf/ocrbench/data/bench_*.log
+```

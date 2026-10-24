@@ -49,7 +49,7 @@ Current state: M0 IPC backbone done (App launches Core, Core spawns sidecar, all
 | **C++** (MSVC x64)          | Native DirectShow source filter `ReTran.Camera.dll` (virtual camera): reads the App's shared-memory frame (seqlock + heartbeat), converts BGRA→YUY2 1280×720@30, registered per-user in HKCU | done (M5) |
 | **TypeScript / JavaScript** | UI logic in the WebView (overlay drawing, result display); built by Vite from`ReTran.App/vite-project`                                                                                                                                                       | scaffolded                                           |
 | **HTML / CSS**              | WebView markup and styling (Tailwind v4)                                                                                                                                                                                                                       | scaffolded                                           |
-| **Python**                  | OCR sidecar (`retran-core`): long-lived PaddleOCR process spawned by the C# core, JSON-RPC over stdio; local translation models later                                                                                                                        | working (PP-OCR mobile, paddlepaddle-gpu cu129, warmup on serve) |
+| **Python**                  | OCR sidecar (`retran-core`): long-lived PaddleOCR process spawned by the C# core, JSON-RPC over stdio (OCR frames over shared memory `Local\ReTran.Ocr.V1`); local translation models later                                                                                                                        | working (paddleocr 3.7 / PP-OCRv6, paddlepaddle-gpu cu129, warmup on serve) |
 | **Rust**                    | Native hook DLL for exclusive fullscreen game capture (OBS-style D3D11 Present hook, injected into the game process)                                                                                                                                           | planned —`cargo` not installed on dev machine yet |
 
 ## Product Pipeline
@@ -109,7 +109,7 @@ The app runs **while the user is gaming and streaming** — every component must
 | UI/overlay updates               | throttled to 10–15 fps                                                  |
 | Virtual camera output            | ~10 fps frame updates (1280×720 YUY2@30 stream to OBS/Zoom/Discord)      |
 | Đường annotate (GDI+)            | ≤ 40 ms/khung @ ~60 box (benchmark code thật, Debug) và ≤ 0,5 core @10 fps scripted |
-| JSON-RPC stdio                   | khung annotated đi qua shared memory (`Local\ReTran.Preview.V1`) ⇒ stdio ≈ 0 cho khung; mọi JSON-RPC khác ≤ 1,5 MB/s |
+| JSON-RPC stdio                   | khung annotated đi qua shared memory (`Local\ReTran.Preview.V1`) và khung OCR qua `Local\ReTran.Ocr.V1` ⇒ stdio ≈ 0 cho khung; mọi JSON-RPC khác ≤ 1,5 MB/s |
 | Total extra footprint            | < 8% CPU, < 500 MB RAM while gaming + streaming                          |
 
 Note (2026-10-21): RAM < 500 MB **chưa đạt** vì sidecar Paddle ~2 GB — open item (chờ quyết định), không phải regression.

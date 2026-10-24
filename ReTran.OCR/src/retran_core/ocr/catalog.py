@@ -123,8 +123,8 @@ def recommended(src: str, dst: str) -> tuple[str, str]:
     "auto" and any language covered by the v6 unified model resolve to the
     default v6 small pair; languages outside v6 coverage fall back to the
     first legacy rec model that declares the language (e.g. ko -> korean,
-    ru -> cyrillic). Unrecognized codes fall back to the v6 small pair, the
-    broadest multilingual model available.
+    ru -> cyrillic). Unrecognized or uncovered codes fall back to the v6
+    small pair, the broadest multilingual model available.
 
     The det slot is always the default v6 tier: detection is line/script
     level and the catalog intentionally ships no legacy det models.

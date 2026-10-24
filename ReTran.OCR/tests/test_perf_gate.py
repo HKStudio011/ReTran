@@ -1,12 +1,16 @@
 """M3 perf-gate unit tests: engine constructor kwargs (no real paddle needed)."""
 from __future__ import annotations
 
+import base64
+import io
 import sys
 import types
 
 import numpy as np
+from PIL import Image
 
 from retran_core.ocr.catalog import recommended
+from retran_core.ocr.image import MAX_INPUT_DIM, decode_image_b64
 from retran_core.ocr.paddle_engine import PaddleOcrEngine
 
 
@@ -67,14 +71,6 @@ def test_engine_disables_doc_pipelines_and_leaves_mkldnn_alone(monkeypatch):
     # parse path still works with the fake predict payload:
     assert [s.text for s in spots] == ["HI"]
     assert spots[0].box == [[10.0, 10.0], [60.0, 10.0], [60.0, 30.0], [10.0, 30.0]]
-
-
-import base64
-import io
-
-from PIL import Image
-
-from retran_core.ocr.image import MAX_INPUT_DIM, decode_image_b64
 
 
 def _png_b64(w: int, h: int) -> str:

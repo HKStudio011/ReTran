@@ -1,0 +1,3 @@
+# Bench frames are local-only run artifacts (real desktop screenshots);
+# committed evidence is the bench script + CSV results beside this file.
+data/

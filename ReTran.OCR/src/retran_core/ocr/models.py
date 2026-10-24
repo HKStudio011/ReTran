@@ -67,7 +67,7 @@ def _paddlex_downloader(name: str) -> Path:
     ``paddlex.inference.models`` uses to resolve a model by name:
     ``official_models[name]`` downloads into
     ``<PADDLE_PDX_CACHE_HOME>/official_models/<name>`` when missing and
-    returns the local path. paddlex 3.4.x has no cleaner public per-model
+    returns the local path. paddlex 3.7.x has no cleaner public per-model
     download function.
 
     Limitation: paddlex reads ``PADDLE_PDX_CACHE_HOME`` at import time and the
