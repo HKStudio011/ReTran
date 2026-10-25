@@ -257,6 +257,30 @@ def test_spot_handler_seq_malformed_raises_invalid_params():
             handler(bad)
 
 
+def test_spot_handler_seq_size_mismatch_raises_invalid_params():
+    # The {seq,width,height} request must describe the frame the section
+    # actually holds for that seq; anything else is bad params (-32602).
+    reader = FakeReader(_bgra(w=6, h=4))
+    handler = make_spot_handler(FakeEngine(), reader_factory=lambda: reader)
+
+    with pytest.raises(RpcInvalidParams):
+        handler({"seq": 2, "width": 7, "height": 4})  # width mismatch
+    with pytest.raises(RpcInvalidParams):
+        handler({"seq": 2, "width": 6, "height": 5})  # height mismatch
+    with pytest.raises(RpcInvalidParams):
+        handler({"seq": 2, "width": 0, "height": 4})  # bogus zero width
+
+
+def test_handle_line_seq_size_mismatch_maps_to_32602():
+    reader = FakeReader(_bgra(w=6, h=4))
+    handlers = {"ocr.spot": make_spot_handler(FakeEngine(), reader_factory=lambda: reader)}
+    req = json.dumps(
+        {"jsonrpc": "2.0", "id": "1", "method": "ocr.spot", "params": {"seq": 2, "width": 1920, "height": 1080}}
+    )
+    resp = json.loads(handle_line(req, handlers))
+    assert resp["error"]["code"] == -32602
+
+
 def test_spot_handler_seq_shm_unavailable_propagates_not_invalid_params():
     # A failed shm read is a transport failure, not bad params: it must surface
     # as JSON-RPC -32603 (internal error), never -32602.

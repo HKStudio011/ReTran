@@ -39,8 +39,11 @@ _V6_LANGS: tuple[str, ...] = ("zh", "zh-hant", "en", "ja", *_LATIN_LANGS)
 _V6_TINY_LANGS: tuple[str, ...] = ("zh", "zh-hant", "en", *_LATIN_LANGS)
 
 # Cyrillic-script languages of cyrillic_PP-OCRv5_mobile_rec (33 + English).
+# Serbian is script-split upstream: paddleocr/_utils/langs.py uses the
+# abbreviation `rs_cyrillic` (there is no single `sr` code), so the catalog
+# keeps that canonical spelling only.
 _CYRILLIC_LANGS: tuple[str, ...] = (
-    "ru", "be", "uk", "bg", "sr", "rs_cyrillic", "mk", "mn", "ab", "ady", "kbd", "av",
+    "ru", "be", "uk", "bg", "rs_cyrillic", "mk", "mn", "ab", "ady", "kbd", "av",
     "dar", "inh", "ce", "lki", "lez", "tab", "kk", "ky", "tg", "tt", "cv", "ba", "mhr",
     "mo", "udm", "kv", "os", "bua", "xal", "tyv", "sah", "kaa", "en",
 )
@@ -140,7 +143,7 @@ def recommended(src: str, dst: str) -> tuple[str, str]:
     code = src.strip().lower()
     if code == "auto":
         return (_DEFAULT_DET, _DEFAULT_REC)
-    if code in spec(_DEFAULT_REC).langs:  # v6 unified coverage wins
+    if code in _V6_LANGS:  # v6 unified coverage wins (= the default rec's langs)
         return (_DEFAULT_DET, _DEFAULT_REC)
     for m in CATALOG:
         if m.kind == "rec" and m.group == "legacy" and code in m.langs:

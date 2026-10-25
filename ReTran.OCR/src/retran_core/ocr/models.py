@@ -212,7 +212,10 @@ class ModelManager:
         immediately reports the model as not installed while the download
         runs), then downloads on a daemon thread. The marker is removed only
         on success; a failed download keeps it so partial files never count
-        as installed, and a retry clears the leftovers first.
+        as installed, and a retry clears the leftovers first. Calling this
+        for a model that is already installed or currently downloading is a
+        no-op: the method returns without starting a thread or touching the
+        filesystem.
 
         Args:
             name: Catalog model name.

@@ -104,7 +104,7 @@ The app runs **while the user is gaming and streaming** — every component must
 | Component                        | Budget                                                                   |
 | -------------------------------- | ------------------------------------------------------------------------ |
 | Capture (screen/window)          | < 2% CPU                                                                 |
-| OCR (GPU, PP-OCR mobile default) | throttled to ~3 fps, VRAM < 1 GB, drop frames if busy                    |
+| OCR (GPU, PP-OCRv6 small default) | throttled to ~3 fps, VRAM < 1 GB, drop frames if busy                    |
 | Translation                      | diff-based (only new text), cached, fully async — never blocks pipeline |
 | UI/overlay updates               | throttled to 10–15 fps                                                  |
 | Virtual camera output            | ~10 fps frame updates (1280×720 YUY2@30 stream to OBS/Zoom/Discord)      |

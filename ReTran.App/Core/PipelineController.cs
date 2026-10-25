@@ -454,6 +454,43 @@ public sealed class PipelineController
             new JsonObject { ["det"] = det, ["rec"] = rec }, ct).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Applies a new det/rec pair only while no pipeline session is running (spec C8): switching
+    /// the sidecar's models mid-session would drop its cached predictor and cost a full model
+    /// reload (worst measured 27.1 s), so the change is deferred to the next
+    /// <see cref="StartAsync"/> instead. When <see cref="IsRunning"/> is true the call returns
+    /// <see langword="false"/> without sending any RPC — callers persist the pair in settings
+    /// (which the next <c>core.start</c> sends) and hint that it applies after Stop.
+    /// Chỉ áp dụng cặp det/rec mới khi không có phiên pipeline đang chạy (spec C8): đổi model
+    /// giữa phiên làm mất predictor đã nạp của sidecar và tốn một lần nạp lại cả model (đo
+    /// được tối đa 27,1 s), nên thay đổi được hoãn tới <see cref="StartAsync"/> kế tiếp. Khi
+    /// <see cref="IsRunning"/> là true, lời gọi trả <see langword="false"/> và không gửi RPC
+    /// nào — bên gọi lưu cặp vào settings (lần <c>core.start</c> kế sẽ gửi nó) và gợi ý rằng
+    /// cặp mới áp dụng sau khi Dừng.
+    /// </summary>
+    /// <param name="det">Catalog det model name. Tên model det trong catalog.</param>
+    /// <param name="rec">Catalog rec model name. Tên model rec trong catalog.</param>
+    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <returns>
+    /// True when the pipeline was idle and <c>ocr.models.set</c> was sent; false when a session
+    /// is running and the switch was skipped (no RPC went out).
+    /// True khi pipeline đang idle và đã gửi <c>ocr.models.set</c>; false khi có phiên đang
+    /// chạy và lượt chuyển bị bỏ qua (không RPC nào đi).
+    /// </returns>
+    /// <exception cref="RpcException">Propagated from Core when a name is unknown or has the wrong kind. Đẩy ra từ Core khi tên lạ hoặc sai loại model.</exception>
+    public async Task<bool> ApplyOcrPairIfIdleAsync(string det, string rec, CancellationToken ct)
+    {
+        if (IsRunning)
+        {
+            return false;
+        }
+        await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
+        EnsureHandlersWired();
+        await _peer.CallAsync("ocr.models.set",
+            new JsonObject { ["det"] = det, ["rec"] = rec }, ct).ConfigureAwait(false);
+        return true;
+    }
+
     private async Task EnsureCoreStartedAsync(CancellationToken ct)
     {
         if (!_peer.IsStarted) await _peer.StartCoreAsync(ct).ConfigureAwait(false);

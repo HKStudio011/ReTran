@@ -808,6 +808,7 @@ Request OCR qua shm nhỏ hơn ~7 500× so với PNG-base64 trên nội dung nà
 4. **Nền 3–15% CPU** — thấp hơn hẳn mọi đợt đo trước (M2–M5: 42–96%); số này gần quiet-machine hơn, nhưng vẫn không phải máy trống tuyệt đối.
 5. `elapsed_ms` là `int` ms (làm tròn xuống phía sidecar) — mỗi khung chỉ chính xác đến 1 ms; median/mean trên 24 khung thì đủ mượt.
 6. Chất lượng text chỉ so bằng mắt trên vài dòng anchor (không có ground-truth/WER) — kết luận chất lượng là định tính, không định lượng.
+7. **Quyền riêng tư (25/10/2026):** cột `texts` (OCR nguyên văn desktop thật của user) đã bị xoá khỏi các CSV bench đã commit — text thô chỉ còn ở local trong log run (`data/bench_*.log`, không commit); bản cũ chứa text vẫn còn trong git history.
 
 ### Lệnh reproduce
 
@@ -828,6 +829,6 @@ uv run --project ReTran.OCR python Tools/Perf/ocrbench/bench.py --data Tools/Per
 uv run --project ReTran.OCR python Tools/Perf/ocrbench/bench.py --data Tools/Perf/ocrbench/data `
   --det PP-OCRv6_tiny_det --rec PP-OCRv6_tiny_rec --label v6_tiny `
   --csv Tools/Perf/ocrbench/bench_v6_tiny_20261025.csv
-# CSV per-frame (elapsed_ms, spots, texts): Tools/Perf/ocrbench/bench_*_20261025.csv
-# Log run đầy đủ (local, không commit): Tools/Perf/ocrbench/data/bench_*.log
+# CSV per-frame (image, elapsed_ms, spot_count — cột texts đã bỏ vì quyền riêng tư, xem ghi chú 7)
+# Log run đầy đủ có text (local, không commit): Tools/Perf/ocrbench/data/bench_*.log
 ```

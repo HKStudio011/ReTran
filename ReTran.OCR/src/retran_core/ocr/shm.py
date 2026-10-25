@@ -78,8 +78,10 @@ class ShmReader:
 
         Waits up to ~1 s for the section's seqlock counter to reach
         ``expected_seq`` (even = stable), then copies the payload out under
-        seqlock rules: a frame overwritten mid-read (torn) is discarded and
-        retried, at most 100 times.
+        seqlock rules: a frame overwritten mid-read (torn) — or one whose
+        header is invalid mid-copy, i.e. caught in a writer's update window —
+        is discarded and retried, at most 100 times and never past the ~1 s
+        deadline.
 
         Args:
             expected_seq: The stable seq ``OcrShmWriter.Publish`` returned for
@@ -91,8 +93,9 @@ class ShmReader:
 
         Raises:
             ShmUnavailable: The section cannot be opened, its header is not a
-                ReTran OCR section, the frame header is invalid, the expected
-                seq never appeared, or reads stayed torn.
+                ReTran OCR section, the expected seq never appeared, or reads
+                stayed torn (or the header stayed invalid) past the retry
+                budget.
         """
         section = self._ensure_section()
         deadline = time.monotonic() + _WAIT_FOR_SEQ_SECONDS
@@ -109,16 +112,32 @@ class ShmReader:
                 time.sleep(_POLL_SECONDS)
                 continue
 
-            frame = self._copy_frame(section)
+            try:
+                frame = self._copy_frame(section)
+            except ShmUnavailable as exc:
+                # A frame header that is invalid while the seqlock reads even
+                # is a torn window (the writer was mid-update when we copied):
+                # retry like a torn read instead of failing the transport.
+                torn += 1
+                if torn >= _MAX_TORN_RETRIES or time.monotonic() >= deadline:
+                    raise ShmUnavailable(
+                        f"frame header at seq {expected_seq} in shared memory "
+                        f"{self._name!r} stayed invalid for {torn} read(s) "
+                        f"(cap {_MAX_TORN_RETRIES} or {_WAIT_FOR_SEQ_SECONDS:.0f}s deadline)"
+                    ) from exc
+                time.sleep(_POLL_SECONDS)
+                continue
+
             (seq_after,) = struct.unpack_from("<q", section, OFFSET_SEQ)
             if seq_after == seq_before:
                 return frame
             # Torn: a writer moved on while we were copying — discard and retry.
             torn += 1
-            if torn >= _MAX_TORN_RETRIES:
+            if torn >= _MAX_TORN_RETRIES or time.monotonic() >= deadline:
                 raise ShmUnavailable(
                     f"frame at seq {expected_seq} in shared memory {self._name!r} stayed torn "
-                    f"after {_MAX_TORN_RETRIES} reads"
+                    f"after {torn} read(s) (cap {_MAX_TORN_RETRIES} or "
+                    f"{_WAIT_FOR_SEQ_SECONDS:.0f}s deadline)"
                 )
             time.sleep(_POLL_SECONDS)
 

@@ -41,7 +41,9 @@ def make_spot_handler(
 
     Raises:
         RpcInvalidParams: Missing/undecodable ``{image}``, malformed ``{seq}``
-            params, or ``{seq}`` params without a configured reader factory.
+            params, ``{seq}`` params without a configured reader factory, or
+            ``width``/``height`` not matching the frame actually read from
+            shared memory.
         ShmUnavailable: The shared-memory read failed (maps to JSON-RPC
             -32603, never -32602 — the params were valid).
     """
@@ -64,6 +66,19 @@ def make_spot_handler(
             # Full-res frame straight from shared memory: the engine sees the
             # real pixels, so its boxes are already in frame coordinates.
             bgra = reader.read(seq)
+            # Cross-check the request's {width, height} against the frame the
+            # section actually holds for this seq: a mismatch means the request
+            # describes a different (e.g. overwritten) frame — bad params, not
+            # a transport failure.
+            height, width = bgra.shape[0], bgra.shape[1]
+            if "width" in params and params["width"] != width:
+                raise RpcInvalidParams(
+                    f"width mismatch: request {params['width']}, frame {width}"
+                )
+            if "height" in params and params["height"] != height:
+                raise RpcInvalidParams(
+                    f"height mismatch: request {params['height']}, frame {height}"
+                )
             spots = engine.spot(bgra[:, :, :3])
             return {"spots": [s.to_dict() for s in spots], "elapsed_ms": int((time.perf_counter() - t0) * 1000)}
 

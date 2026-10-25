@@ -7,4 +7,9 @@
     <AssemblyName>CSharpWriter</AssemblyName>
     <RootNamespace>CSharpWriter</RootNamespace>
   </PropertyGroup>
+  <ItemGroup>
+    <!-- Publish through the production OcrShmWriter so this probe checks the real
+         C#-Python shm contract, not a hand-mirrored spike layout. -->
+    <ProjectReference Include="..\..\..\..\ReTran.Core\ReTran.Core.csproj" />
+  </ItemGroup>
 </Project>

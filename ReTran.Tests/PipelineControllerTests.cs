@@ -641,6 +641,38 @@ public class PipelineControllerTests : IDisposable
     }
 
     [Fact]
+    public async Task ApplyOcrPairIfIdle_WhenIdle_SendsModelsSetAndReturnsTrue()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        bool applied = await controller.ApplyOcrPairIfIdleAsync(
+            "PP-OCRv6_tiny_det", "PP-OCRv6_tiny_rec", CancellationToken.None);
+
+        Assert.True(applied);
+        (string Method, JsonNode? Params) call = Assert.Single(peer.Calls);
+        Assert.Equal("ocr.models.set", call.Method);
+        Assert.Equal("PP-OCRv6_tiny_det", call.Params!["det"]!.GetValue<string>());
+        Assert.Equal("PP-OCRv6_tiny_rec", call.Params!["rec"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task ApplyOcrPairIfIdle_WhenRunning_ReturnsFalseWithoutRpc()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        PipelineController controller = CreateController(peer, new OverlayState());
+        await controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None);
+        int callsBefore = peer.Calls.Count;
+
+        // C8: đổi model giữa phiên bị hoãn — không RPC nào đi wire khi đang chạy.
+        bool applied = await controller.ApplyOcrPairIfIdleAsync(
+            "PP-OCRv6_tiny_det", "PP-OCRv6_tiny_rec", CancellationToken.None);
+
+        Assert.False(applied);
+        Assert.Equal(callsBefore, peer.Calls.Count); // no ocr.models.set went out mid-session
+    }
+
+    [Fact]
     public async Task Stop_ClearsActiveSource()
     {
         var peer = new FakeCorePeer { IsStarted = true };

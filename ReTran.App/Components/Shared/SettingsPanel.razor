@@ -92,6 +92,10 @@
                 <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
             </div>
         </div>
+        @if (OcrSrcNotCovered is { } src)
+        {
+            <p class="rt-hint" style="color: var(--rt-danger); margin: 0 0 8px;">@(L.Fmt("deck.ocr.srcNotCovered", src))</p>
+        }
         <div class="rt-field-row" style="flex-wrap: wrap; gap: 10px; margin-bottom: 8px;">
             <button type="button" class="rt-btn rt-btn-primary rt-mini" disabled="@_ocrBusy" @onclick="SaveOcrPairAsync">@(L["deck.ocr.savePair"])</button>
             <button type="button" class="rt-btn rt-mini" disabled="@_ocrBusy" @onclick="ReloadOcrModelsAsync">@(L["deck.ocr.refresh"])</button>
@@ -310,7 +314,29 @@
     }
 
     private string OcrMetaText(OcrModelInfo m) =>
-        $"{m.Kind} · {L.Fmt("deck.ocr.langsCount", m.Langs.Count)} · {m.SizeMb:0.#} MB";
+        $"{m.Kind} · {L.Fmt("deck.ocr.langsCount", m.Langs.Count)} · {CompactLangs(m)} · {m.SizeMb:0.#} MB";
+
+    // Danh sách ngôn ngữ nén để vừa một dòng hint: tối đa 6 mã, phần còn lại gộp "+N".
+    private static string CompactLangs(OcrModelInfo m)
+    {
+        string head = string.Join(", ", m.Langs.Take(6));
+        return m.Langs.Count > 6 ? $"{head} +{m.Langs.Count - 6}" : head;
+    }
+
+    // Spec §6.1: cảnh báo khi ngôn ngữ nguồn (khác auto) không nằm trong phạm vi model rec
+    // đang dùng của sidecar (ví dụ src "ko" trên cặp v6) — trả mã ngôn ngữ để format chuỗi,
+    // null khi không có gì để cảnh báo.
+    private string? OcrSrcNotCovered
+    {
+        get
+        {
+            if (_ocrModels is null) return null;
+            OcrModelInfo? activeRec = _ocrModels.FirstOrDefault(m => m.Kind == "rec" && m.InUse);
+            return activeRec is not null && !OcrModelCoverage.Covers(activeRec, _model.Src)
+                ? _model.Src
+                : null;
+        }
+    }
 
     // Nạp catalog model từ Core; lỗi → giữ placeholder, Làm mới thử lại.
     private async Task LoadOcrModelsAsync()
@@ -397,11 +423,14 @@
         _ocrBusy = true;
         try
         {
-            await Pipeline.SetOcrModelPairAsync(_ocrDetPick, _ocrRecPick, CancellationToken.None);
-            // Cặp đã chọn phải vào settings.json nữa — core.start lần sau gửi đúng cặp này
-            // (Core sẽ chuyển sidecar về cặp trong settings, không tự theo cặp vừa set).
+            // Cặp đã chọn phải vào settings.json trước tiên — core.start lần sau gửi đúng cặp
+            // này kể cả khi bên dưới bị hoãn (đang chạy thì không đổi model giữa phiên, C8).
             SettingsStore.Save(SettingsStore.Load() with { OcrDet = _ocrDetPick, OcrRec = _ocrRecPick });
-            Toast.Show(L["deck.ocr.pairSaved"]);
+            // C8: pipeline đang chạy → không gọi ocr.models.set (sidecar giữ predictor đang
+            // nạp; đổi giữa phiên tốn nạp lại cả model, đo được tới 27,1 s) — cặp mới áp dụng
+            // ở lần start kế tiếp.
+            bool appliedNow = await Pipeline.ApplyOcrPairIfIdleAsync(_ocrDetPick, _ocrRecPick, CancellationToken.None);
+            Toast.Show(appliedNow ? L["deck.ocr.pairSaved"] : L["deck.ocr.pairDeferred"]);
             await LoadOcrModelsAsync();
         }
         catch (Exception ex)

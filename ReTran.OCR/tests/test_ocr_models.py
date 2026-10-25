@@ -151,6 +151,7 @@ def test_model_cache_dir_reads_env_at_call_time(tmp_path, monkeypatch):
     assert model_cache_dir() == tmp_path / "b"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only default: %LOCALAPPDATA%\\ReTran\\models")
 def test_model_cache_dir_windows_default_is_localappdata(monkeypatch):
     monkeypatch.delenv("PADDLE_PDX_CACHE_HOME", raising=False)
     assert model_cache_dir() == Path(os.environ["LOCALAPPDATA"]) / "ReTran" / "models"

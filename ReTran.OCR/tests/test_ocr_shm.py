@@ -203,3 +203,55 @@ def test_read_overwritten_mid_copy_is_never_returned_torn():
     finally:
         flipper.join(2)
         section.close()
+
+
+def test_read_invalid_frame_header_is_retried_not_hard_failed():
+    # The frame header is invalid while the seqlock reads even (the writer was
+    # caught mid-update): the reader must treat that as a torn window and
+    # retry — not fail the transport on first sight. A "writer" completing
+    # the header shortly after makes the read succeed.
+    name = _unique_name()
+    section = _open_writable(name)
+    good = _gradient(4, 3)
+    try:
+        _publish(section, seq=2, width=4, height=3, pixels=good)
+        struct.pack_into("<i", section, OFFSET_STRIDE, 999)  # torn header, seq still even
+        fix = threading.Timer(
+            0.05, lambda: _publish(section, seq=2, width=4, height=3, pixels=good)
+        )
+        fix.daemon = True
+
+        reader = ShmReader(name)
+        fix.start()
+        frame = reader.read(2)
+
+        fix.join(2)
+        assert np.array_equal(frame, _as_frame(good, 4, 3))
+    finally:
+        section.close()
+
+
+def test_read_invalid_frame_header_gives_up_at_deadline():
+    # A header that never becomes valid must give up within the bounded retry
+    # budget (100 tries AND the ~1s wall-clock deadline), raising
+    # ShmUnavailable instead of spinning forever. For this tiny frame each
+    # retry is one 1 ms poll, so the 100-count cap fires first (~0.1 s); the
+    # deadline bound is what caps slow retries (e.g. torn 4K copies).
+    name = _unique_name()
+    section = _open_writable(name)
+    try:
+        _publish(section, seq=2, width=4, height=3, pixels=_gradient(4, 3))
+        struct.pack_into("<i", section, OFFSET_STRIDE, 999)  # invalid forever
+        reader = ShmReader(name)
+        t0 = time.monotonic()
+
+        with pytest.raises(ShmUnavailable):
+            reader.read(2)
+
+        # It really retried (100 polls ~ 0.1 s — the old code failed on first
+        # sight in ~1 ms), but bounded.
+        elapsed = time.monotonic() - t0
+        assert elapsed >= 0.05
+        assert elapsed < 5
+    finally:
+        section.close()

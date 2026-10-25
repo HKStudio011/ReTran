@@ -103,6 +103,18 @@ def test_recommended_russian_uses_v5_cyrillic_rec():
     assert det == "PP-OCRv6_small_det"
 
 
+def test_recommended_belarusian_uses_v5_cyrillic_rec():
+    """East Slavic "be" routes to the general cyrillic model (cyrillic wins over eslav)."""
+    det, rec = recommended("be", "vi")
+    assert rec == "cyrillic_PP-OCRv5_mobile_rec"
+    assert det == "PP-OCRv6_small_det"
+
+
+def test_recommended_normalizes_source_code_case():
+    """Uppercase/mixed-case source codes route like their lowercase form ("KO" == "ko")."""
+    assert recommended("KO", "vi") == ("PP-OCRv6_small_det", "korean_PP-OCRv5_mobile_rec")
+
+
 def test_recommended_auto_uses_v6_small_pair():
     assert recommended("auto", "vi") == ("PP-OCRv6_small_det", "PP-OCRv6_small_rec")
 
