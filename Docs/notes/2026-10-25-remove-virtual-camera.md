@@ -23,4 +23,4 @@ regsvr32 /u "<đường dẫn cũ>\ReTran.Camera.dll"
 
 ## OBS nên chuyển sang gì
 
-OBS không dùng thiết bị "ReTran Camera" nữa — chuyển sang **Browser Source** với URL từ card "Overlay cho OBS" trên trang điều khiển của app (xem `Docs/` và card trên trang chủ).
+OBS không dùng thiết bị "ReTran Camera" nữa — trên OBS thêm nguồn **Browser Source** rồi dán URL copy từ card "Overlay cho OBS" trên trang điều khiển của app (làm theo hướng dẫn trong card: đặt kích thước 1920×1080; overlay là trang trong suốt, hộp/bản dịch cập nhật qua SSE).

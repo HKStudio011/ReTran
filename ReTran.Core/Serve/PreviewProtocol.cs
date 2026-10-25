@@ -26,11 +26,9 @@ namespace ReTran.Core.Serve;
 /// 24    8    lastWriteTickMs
 /// 32    ...  jpeg bytes
 /// </code>
-/// The App does not reference <c>ReTran.Core</c> (the same reason the native camera filter mirrors
-/// <c>CameraProtocol</c>), so both sides duplicate this layout and
+/// The App does not reference <c>ReTran.Core</c>, so both sides duplicate this layout and
 /// <c>ReTran.Tests/PreviewProtocolTests.cs</c> asserts the two constant sets stay equal.
-/// App không tham chiếu <c>ReTran.Core</c> (cùng lý do filter camera native nhân bản
-/// <c>CameraProtocol</c>), nên hai phía copy bố cục này và
+/// App không tham chiếu <c>ReTran.Core</c>, nên hai phía copy bố cục này và
 /// <c>ReTran.Tests/PreviewProtocolTests.cs</c> assert hai bộ hằng số luôn khớp nhau.
 /// </remarks>
 public static class PreviewProtocol

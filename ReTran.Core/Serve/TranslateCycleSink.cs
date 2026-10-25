@@ -35,7 +35,7 @@ public sealed class TranslateCycleSink : ICycleSink
     private readonly IJsonRpcNotifier _notifier;
     private readonly TextWriter _stderr;
 
-    /// <summary>Hand-off slot for the annotation loop (camera/preview). Khe giao cho vòng ghi chú khung (camera/preview).</summary>
+    /// <summary>Hand-off slot for the annotation loop (preview). Khe giao cho vòng ghi chú khung (preview).</summary>
     private readonly AnnotationSnapshot _snapshot;
 
     /// <summary>Bounds concurrent translator calls to 4 (spec §4.2). Giới số lời gọi dịch đồng thời ở 4 (spec §4.2).</summary>

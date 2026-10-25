@@ -581,9 +581,9 @@ public sealed class PipelineHost : IAsyncDisposable
             throw new RpcMethodException(RpcErrorCodes.InvalidParams, "'captureFps' must be an integer 1..60.");
         }
 
-        // User font multiplier for annotated frames (preview + virtual camera). The App
+        // User font multiplier for annotated frames (preview). The App
         // persists 0.85/1.0/1.25; (0, 4] guards against degenerate values.
-        // Hệ số cỡ chữ cho khung ghi chú (preview + camera ảo). App lưu 0.85/1.0/1.25;
+        // Hệ số cỡ chữ cho khung ghi chú (preview). App lưu 0.85/1.0/1.25;
         // khoảng (0, 4] chặn giá trị vô lý.
         double fontScale = 1.0;
         if (p["fontScale"] is JsonValue fontValue

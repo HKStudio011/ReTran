@@ -70,9 +70,9 @@ public sealed record AnnotatedFrame(byte[] Jpeg, int Width, int Height);
 
 /// <summary>
 /// Renders a captured frame with its text boxes and translations as <see cref="AnnotatedFrame"/>
-/// (single source of truth for both the local preview and the virtual camera). Vẽ khung chụp
+/// (single source of truth for the local preview). Vẽ khung chụp
 /// kèm box text và bản dịch thành <see cref="AnnotatedFrame"/> (nguồn sự thật duy nhất cho
-/// preview local và camera ảo).
+/// preview local).
 /// </summary>
 public interface IFrameAnnotator
 {
