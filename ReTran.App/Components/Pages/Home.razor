@@ -3,8 +3,10 @@
 @using ReTran_App.Core
 @using ReTran_App.Services
 @using ReTran_App.Services.Camera
+@using ReTran_App.Services.OverlayFeed
 @inject PreviewState Preview
 @inject OverlayState Overlay
+@inject OverlayFeedServer Feed
 @inject JsInteropService Js
 @inject I18nService L
 @inject AppSettingsService SettingsStore
@@ -249,13 +251,13 @@
                 </section>
 
                 <section class="rt-rail-sec">
-                    <div class="rt-sec-head"><h3>@(L["deck.chain.camera"])</h3></div>
+                    <div class="rt-sec-head"><h3>@(L["deck.overlay.obs.title"])</h3></div>
                     <div class="rt-device">
-                        <span class="rt-mono">@CameraRegistrar.DeviceName</span>
-                        <button type="button" class="rt-copy" @onclick="CopyCameraAsync">@(L["deck.camera.copy"])</button>
+                        <span class="rt-mono">@OverlayUrl</span>
+                        <button type="button" class="rt-copy" @onclick="CopyOverlayUrlAsync">@(L["deck.overlay.obs.copy"])</button>
                     </div>
-                    <p class="rt-note">@(L["home.camera.note"])</p>
-                    <p class="rt-note">@(L["deck.camera.hold"])</p>
+                    <p class="rt-note">@(L["deck.overlay.obs.hint.setup"])</p>
+                    <p class="rt-note">@(L["deck.overlay.obs.hint.split"])</p>
                 </section>
             </div>
         </aside>
@@ -323,6 +325,9 @@
         ? L.Fmt("deck.run.hint.live", SourceDisplay)
         : L["deck.run.hint.idle"];
 
+    // URL overlay OBS — Port là cổng feed thực sự bind (fallback khi 17863 bận).
+    private string OverlayUrl => $"http://127.0.0.1:{Feed.Port}/overlay";
+
     private string ProviderShort => _provider switch
     {
         "google" => "Google",
@@ -378,6 +383,21 @@
         _fpsWindowStart = Environment.TickCount64;
         _fpsTimer = new Timer(_ => TickFps(), null, 1000, 1000);
         base.OnInitialized();
+    }
+
+    // Feed overlay OBS start một lần mỗi phiên app (singleton). Vào lại trang thì StartAsync ném
+    // "already started" — nuốt như lỗi bind cổng, không được phá trang.
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            await Feed.StartAsync(CancellationToken.None);
+        }
+        catch (Exception)
+        {
+            // Đã start từ lần vào trước, hoặc hết cổng loopback — trang vẫn phải sống.
+        }
+        await base.OnInitializedAsync();
     }
 
     private void ApplySettings(AppSettings current)
@@ -633,12 +653,12 @@
         }
     }
 
-    private async Task CopyCameraAsync()
+    private async Task CopyOverlayUrlAsync()
     {
         try
         {
-            await Js.CopyTextAsync(CameraRegistrar.DeviceName);
-            Toast.Show(L["deck.camera.copied"]);
+            await Js.CopyTextAsync(OverlayUrl);
+            Toast.Show(L["deck.overlay.obs.copied"]);
         }
         catch (Exception)
         {

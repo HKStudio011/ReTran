@@ -1,0 +1,75 @@
+/*
+ * ReTran OBS overlay page.
+ * Transparent background so an OBS browser source composites the boxes over the game.
+ * Boxes arrive over SSE and are drawn as percentage-positioned elements:
+ * a dark rounded pill with the translated text plus four teal corner ticks.
+ */
+
+html,
+body {
+  background: transparent;
+  margin: 0;
+  overflow: hidden;
+}
+
+#stage {
+  position: absolute;
+  inset: 0;
+}
+
+.box {
+  position: absolute;
+}
+
+.box .pill {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  padding: 0 6px;
+  background: rgba(5, 12, 14, 0.86);
+  color: #f3eedd;
+  border-radius: 4px;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  line-height: 1.15;
+  text-align: center;
+  overflow: hidden;
+}
+
+/* Teal corner ticks frame each box; painted after the pill so they stay visible. */
+.box .tick {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border: 0 solid #4fd8c4;
+}
+
+.box .tick.t1 {
+  top: 0;
+  left: 0;
+  border-top-width: 2px;
+  border-left-width: 2px;
+}
+
+.box .tick.t2 {
+  top: 0;
+  right: 0;
+  border-top-width: 2px;
+  border-right-width: 2px;
+}
+
+.box .tick.t3 {
+  bottom: 0;
+  left: 0;
+  border-bottom-width: 2px;
+  border-left-width: 2px;
+}
+
+.box .tick.t4 {
+  bottom: 0;
+  right: 0;
+  border-bottom-width: 2px;
+  border-right-width: 2px;
+}

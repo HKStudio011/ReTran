@@ -14,6 +14,21 @@ namespace ReTran_App.Services.OverlayFeed;
 /// </summary>
 /// <remarks>
 /// <para>
+/// <c>GET /overlay</c> serves the transparent overlay page (<c>wwwroot/overlay-feed/overlay.html</c>) and
+/// <c>GET /overlay/overlay.js</c> / <c>GET /overlay/overlay.css</c> serve its script and stylesheet with
+/// <c>application/javascript</c> / <c>text/css</c> content types. The asset folder is resolved beside the
+/// running binaries first (MAUI copies wwwroot content into the app output, and it flows into the test
+/// output via the project reference), then by walking parent directories for
+/// <c>ReTran.App/wwwroot/overlay-feed</c>; a missing folder or file answers 404.
+/// </para>
+/// <para>
+/// <c>GET /overlay</c> phục vụ trang overlay trong suốt (<c>wwwroot/overlay-feed/overlay.html</c>) và
+/// <c>GET /overlay/overlay.js</c> / <c>GET /overlay/overlay.css</c> phục vụ script/stylesheet của trang với
+/// content type <c>application/javascript</c> / <c>text/css</c>. Thư mục asset được phân giải cạnh binary đang
+/// chạy trước (MAUI copy nội dung wwwroot vào output app, và nó chảy sang output test qua project reference),
+/// rồi đi lên các thư mục cha tìm <c>ReTran.App/wwwroot/overlay-feed</c>; thiếu thư mục hoặc file thì trả 404.
+/// </para>
+/// <para>
 /// <c>GET /events</c> answers with content type <c>text/event-stream</c>: it first sends a snapshot of the
 /// latest frame (empty <c>boxes</c> when nothing was published yet), then one <c>data:</c> event per
 /// <see cref="OverlayState.Changed"/> with payload
@@ -44,21 +59,13 @@ public sealed class OverlayFeedServer : IAsyncDisposable
     private const int MaxPortOffset = 10;
     private static readonly TimeSpan DefaultHeartbeat = TimeSpan.FromSeconds(15);
 
-    // Minimal placeholder page; task B2 replaces it with the real static overlay page.
-    // Trang giữ chỗ tối thiểu; tác vụ B2 thay bằng trang overlay thật.
-    private static readonly byte[] OverlayPageBytes = Encoding.UTF8.GetBytes(
-        """
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-          <meta charset="utf-8">
-          <title>ReTran Overlay</title>
-        </head>
-        <body>
-          <!-- Task B2 serves the real overlay page here. / Tác vụ B2 phục vụ trang overlay thật tại đây. -->
-        </body>
-        </html>
-        """);
+    // Static overlay page assets, served from wwwroot/overlay-feed.
+    // Asset tĩnh của trang overlay, phục vụ từ wwwroot/overlay-feed.
+    private const string OverlayFolderName = "overlay-feed";
+
+    // Resolved once per process: beside the binaries first, then up the repo tree.
+    // Chỉ phân giải một lần mỗi tiến trình: cạnh binary trước, rồi đi lên cây thư mục.
+    private static readonly Lazy<string?> OverlayFolderLazy = new(ResolveOverlayFolder);
 
     private readonly OverlayState _state;
     private readonly int _requestedPort;
@@ -258,7 +265,15 @@ public sealed class OverlayFeedServer : IAsyncDisposable
             var path = context.Request.Url?.AbsolutePath;
             if (path == "/overlay")
             {
-                ServeOverlayPage(context);
+                ServeAsset(context, "overlay.html", "text/html; charset=utf-8");
+            }
+            else if (path == "/overlay/overlay.js")
+            {
+                ServeAsset(context, "overlay.js", "application/javascript; charset=utf-8");
+            }
+            else if (path == "/overlay/overlay.css")
+            {
+                ServeAsset(context, "overlay.css", "text/css; charset=utf-8");
             }
             else if (path == "/events")
             {
@@ -277,14 +292,55 @@ public sealed class OverlayFeedServer : IAsyncDisposable
         }
     }
 
-    private static void ServeOverlayPage(HttpListenerContext context)
+    private static void ServeAsset(HttpListenerContext context, string fileName, string contentType)
     {
+        string? path = OverlayFolderLazy.Value is { } folder ? Path.Combine(folder, fileName) : null;
+        if (path is null || !File.Exists(path))
+        {
+            CloseWithStatus(context.Response, 404);
+            return;
+        }
+
+        // The assets are a few KB and cold — a synchronous read off the request task is fine.
+        // Asset chỉ vài KB và lạnh — đọc đồng bộ trên task của request là đủ.
+        var bytes = File.ReadAllBytes(path);
         var response = context.Response;
         response.StatusCode = (int)HttpStatusCode.OK;
-        response.ContentType = "text/html; charset=utf-8";
-        response.ContentLength64 = OverlayPageBytes.Length;
-        response.OutputStream.Write(OverlayPageBytes, 0, OverlayPageBytes.Length);
+        response.ContentType = contentType;
+        response.ContentLength64 = bytes.Length;
+        response.OutputStream.Write(bytes, 0, bytes.Length);
         response.Close();
+    }
+
+    /// <summary>
+    /// Locates <c>wwwroot/overlay-feed</c>: beside the running binaries first (MAUI copies
+    /// wwwroot content into the app output, and it flows into the test output via the project
+    /// reference), then by walking parent directories for <c>ReTran.App/wwwroot/overlay-feed</c>.
+    /// <see langword="null"/> when no folder is found.
+    /// Tìm <c>wwwroot/overlay-feed</c>: cạnh binary đang chạy trước (MAUI copy nội dung wwwroot
+    /// vào output app, và nó chảy sang output test qua project reference), rồi đi lên các thư mục
+    /// cha tìm <c>ReTran.App/wwwroot/overlay-feed</c>. Trả <see langword="null"/> khi không thấy.
+    /// </summary>
+    private static string? ResolveOverlayFolder()
+    {
+        string baseDir = AppContext.BaseDirectory;
+        string local = Path.Combine(baseDir, "wwwroot", OverlayFolderName);
+        if (Directory.Exists(local))
+        {
+            return local;
+        }
+
+        for (string? dir = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(baseDir));
+             dir is not null;
+             dir = Path.GetDirectoryName(dir))
+        {
+            string candidate = Path.Combine(dir, "ReTran.App", "wwwroot", OverlayFolderName);
+            if (Directory.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     private void ServeEvents(HttpListenerContext context)

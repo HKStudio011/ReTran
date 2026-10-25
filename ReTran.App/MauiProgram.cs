@@ -4,6 +4,7 @@ using ReTran_App.Core;
 using ReTran_App.Data;
 using ReTran_App.Services;
 using ReTran_App.Services.Camera;
+using ReTran_App.Services.OverlayFeed;
 using ReTran_App.Services.OverlayWindow;
 using ReTran_App.Services.Update;
 
@@ -28,6 +29,10 @@ namespace ReTran_App
             builder.Services.AddSingleton<ToastService>();
             builder.Services.AddSingleton<OverlayState>();
             builder.Services.AddSingleton<PreviewState>();
+
+            // OBS overlay feed: loopback server serving the transparent /overlay page + SSE /events.
+            // Feed overlay OBS: server loopback phục vụ trang trong suốt /overlay + SSE /events.
+            builder.Services.AddSingleton<OverlayFeedServer>();
 
             // Local game overlay: layered Win32 window + window/monitor anchor tracker.
             // Overlay game local: cửa sổ layered Win32 + tracker neo theo cửa sổ/monitor.

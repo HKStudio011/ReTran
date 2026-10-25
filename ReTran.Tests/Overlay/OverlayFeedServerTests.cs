@@ -51,6 +51,35 @@ public sealed class OverlayFeedServerTests
     }
 
     [Fact]
+    public async Task Overlay_Assets_AreServed()
+    {
+        var state = new OverlayState();
+        await using var server = new OverlayFeedServer(state, FreePort());
+        await server.StartAsync(CancellationToken.None);
+
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+
+        // The page must reference its own assets (absolute paths: it is served at /overlay).
+        // Trang phải tham chiếu asset của chính nó (đường dẫn tuyệt đối: nó được phục vụ tại /overlay).
+        using var page = await http.GetAsync($"http://127.0.0.1:{server.Port}/overlay");
+        Assert.Equal(HttpStatusCode.OK, page.StatusCode);
+        string html = await page.Content.ReadAsStringAsync();
+        Assert.Contains("/overlay/overlay.js", html);
+        Assert.Contains("/overlay/overlay.css", html);
+
+        using var js = await http.GetAsync($"http://127.0.0.1:{server.Port}/overlay/overlay.js");
+        Assert.Equal(HttpStatusCode.OK, js.StatusCode);
+        Assert.NotNull(js.Content.Headers.ContentType);
+        Assert.Contains("javascript", js.Content.Headers.ContentType.ToString());
+        Assert.Contains("EventSource", await js.Content.ReadAsStringAsync());
+
+        using var css = await http.GetAsync($"http://127.0.0.1:{server.Port}/overlay/overlay.css");
+        Assert.Equal(HttpStatusCode.OK, css.StatusCode);
+        Assert.NotNull(css.Content.Headers.ContentType);
+        Assert.Contains("text/css", css.Content.Headers.ContentType.ToString());
+    }
+
+    [Fact]
     public async Task Events_SendsInitialSnapshot()
     {
         var state = new OverlayState();
