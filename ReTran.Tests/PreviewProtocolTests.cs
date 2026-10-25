@@ -3,10 +3,10 @@ using AppPreview = ReTran_App.Services.Preview.PreviewProtocol;
 
 /// <summary>
 /// App does not reference ReTran.Core, so the preview wire contract must be duplicated on both
-/// sides (same pattern as the camera protocol). These tests assert the two constant sets match:
-/// if someone changes one side only, the channel breaks silently — the test catches it.
-/// App không tham chiếu ReTran.Core, nên hợp đồng dây của preview phải copy ở cả hai phía (cùng
-/// pattern giao thức camera). Test assert hai bộ hằng số khớp nhau; nếu ai đó đổi một bên thì
+/// sides. These tests assert the two constant sets match: if someone changes one side only, the
+/// channel breaks silently — the test catches it.
+/// App không tham chiếu ReTran.Core, nên hợp đồng dây của preview phải copy ở cả hai phía.
+/// Test assert hai bộ hằng số khớp nhau; nếu ai đó đổi một bên thì
 /// channel vỡ âm thầm — test này sẽ bắt.
 /// </summary>
 public class PreviewProtocolTests

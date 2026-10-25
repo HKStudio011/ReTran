@@ -2,7 +2,6 @@
 @using System.Globalization
 @using ReTran_App.Core
 @using ReTran_App.Services
-@using ReTran_App.Services.Camera
 @using ReTran_App.Services.OverlayFeed
 @inject PreviewState Preview
 @inject OverlayState Overlay
@@ -185,16 +184,6 @@
                             <div class="rt-read">
                                 <span>@ProviderShort</span><span class="rt-dot">·</span><span>@DirectionText</span>
                                 <span class="rt-dot">·</span><span>@LinesText</span>
-                            </div>
-                        </div>
-                    </li>
-                    <li class="rt-step">
-                        <span class="rt-idx">04</span>
-                        <div class="rt-step-body">
-                            <div class="rt-step-row"><span class="rt-name">@(L["deck.chain.camera"])</span><span class="rt-step-lamp"></span></div>
-                            <div class="rt-read">
-                                <span>@CameraRegistrar.DeviceName</span><span class="rt-dot">·</span><span>@FpsText</span>
-                                <span class="rt-dot">·</span><span>@(L["deck.camera.format"])</span>
                             </div>
                         </div>
                     </li>
@@ -642,8 +631,8 @@
         OverlaySvc.ApplyOptions(fontScale: scale);
         try
         {
-            // Core renders the preview/camera frame; tell it the new size right away.
-            // Core vẽ khung preview/camera; báo cỡ mới ngay để không phải chờ phiên sau.
+            // Core renders the preview frame; tell it the new size right away.
+            // Core vẽ khung preview; báo cỡ mới ngay để không phải chờ phiên sau.
             await Pipeline.SetAnnotationFontScaleAsync(scale, CancellationToken.None);
         }
         catch (Exception)

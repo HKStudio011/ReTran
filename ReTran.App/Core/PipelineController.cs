@@ -2,7 +2,6 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
 using ReTran_App.Services;
-using ReTran_App.Services.Camera;
 using ReTran_App.Services.Preview;
 
 namespace ReTran_App.Core;
@@ -66,7 +65,6 @@ public sealed class PipelineController
     private readonly TranslationCache _cache;
     private readonly OverlayState _overlay;
     private readonly PreviewState? _preview;
-    private readonly ICameraOutput? _camera;
     private readonly ILogger<PipelineController> _log;
     private readonly string _previewMapName;
     private readonly SemaphoreSlim _cacheGate = new(1, 1);
@@ -100,12 +98,6 @@ public sealed class PipelineController
     /// xuất bản từ <c>frame.annotated</c>; <see langword="null"/> tắt xuất bản preview (test cũ
     /// không vỡ).
     /// </param>
-    /// <param name="camera">
-    /// Optional virtual-camera output fed from <c>frame.annotated</c> and held when the pipeline
-    /// stops; <see langword="null"/> disables the camera path. Đầu ra camera ảo tùy chọn được cấp
-    /// khung từ <c>frame.annotated</c> và giữ khung khi pipeline dừng; <see langword="null"/> tắt
-    /// đường camera.
-    /// </param>
     /// <param name="previewMapName">
     /// Shared-memory name of the preview channel Core writes; tests pass a unique name to stay
     /// isolated. Tên shared memory của channel preview mà Core ghi; test truyền tên riêng để không
@@ -119,7 +111,6 @@ public sealed class PipelineController
         OverlayState overlay,
         ILogger<PipelineController> log,
         PreviewState? preview = null,
-        ICameraOutput? camera = null,
         string previewMapName = PreviewProtocol.MapName)
     {
         _peer = peer ?? throw new ArgumentNullException(nameof(peer));
@@ -128,7 +119,6 @@ public sealed class PipelineController
         _overlay = overlay ?? throw new ArgumentNullException(nameof(overlay));
         _log = log ?? throw new ArgumentNullException(nameof(log));
         _preview = preview;
-        _camera = camera;
         _previewMapName = string.IsNullOrWhiteSpace(previewMapName) ? PreviewProtocol.MapName : previewMapName;
     }
 
@@ -246,12 +236,10 @@ public sealed class PipelineController
     }
 
     /// <summary>
-    /// Sends <c>core.stop</c> to end the current session; Core treats it as idempotent. The virtual
-    /// camera is then held on the last frame (Core sends no <c>pipeline.state</c> for a normal stop,
-    /// so this is where HOLD is set for a user-initiated stop).
-    /// Gửi <c>core.stop</c> để kết thúc phiên hiện tại; Core coi lệnh này là idempotent. Camera ảo
-    /// sau đó được giữ ở khung cuối (Core không gửi <c>pipeline.state</c> khi dừng bình thường, nên
-    /// đây là chỗ bật HOLD cho lần dừng do người dùng).
+    /// Sends <c>core.stop</c> to end the current session; Core treats it as idempotent (Core sends
+    /// no <c>pipeline.state</c> for a normal stop).
+    /// Gửi <c>core.stop</c> để kết thúc phiên hiện tại; Core coi lệnh này là idempotent (Core
+    /// không gửi <c>pipeline.state</c> khi dừng bình thường).
     /// </summary>
     /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
     /// <returns>A task that completes once Core acknowledges the stop. Task hoàn tất khi Core xác nhận dừng.</returns>
@@ -260,15 +248,14 @@ public sealed class PipelineController
         await _peer.CallAsync("core.stop", null, ct).ConfigureAwait(false);
         IsRunning = false;
         ActiveSource = null;
-        _camera?.Hold();
         StateChanged?.Invoke();
     }
 
     /// <summary>
-    /// Sends <c>core.set_font_scale</c> so the preview/camera annotation uses the new size
+    /// Sends <c>core.set_font_scale</c> so the preview annotation uses the new size
     /// immediately, without restarting the session. The setting is also persisted by the overlay
     /// service and sent again in the next <c>core.start</c>.
-    /// Gửi <c>core.set_font_scale</c> để phần ghi chú preview/camera dùng cỡ mới ngay, không cần
+    /// Gửi <c>core.set_font_scale</c> để phần ghi chú preview dùng cỡ mới ngay, không cần
     /// khởi động lại phiên. Cài đặt cũng được overlay service lưu lại và gửi kèm <c>core.start</c>
     /// lần sau.
     /// </summary>
@@ -608,12 +595,12 @@ public sealed class PipelineController
     }
 
     /// <summary>
-    /// Turns one slim <c>frame.annotated {seq,w,h}</c> notification into a preview frame and a
-    /// camera submit by reading the JPEG out of the preview shared memory. Notifications never
-    /// throw: an absent section, a torn read or an out-of-order seq simply drops the frame.
-    /// Biến một thông báo gọn <c>frame.annotated {seq,w,h}</c> thành khung preview và một lần nạp
-    /// camera bằng cách đọc JPEG từ shared memory preview. Thông báo không bao giờ ném: thiếu vùng
-    /// nhớ, đọc bị xé, hay seq sai thứ tự đều chỉ bỏ khung đó.
+    /// Turns one slim <c>frame.annotated {seq,w,h}</c> notification into a preview frame by
+    /// reading the JPEG out of the preview shared memory. Notifications never throw: an absent
+    /// section, a torn read or an out-of-order seq simply drops the frame.
+    /// Biến một thông báo gọn <c>frame.annotated {seq,w,h}</c> thành khung preview bằng cách đọc
+    /// JPEG từ shared memory preview. Thông báo không bao giờ ném: thiếu vùng nhớ, đọc bị xé, hay
+    /// seq sai thứ tự đều chỉ bỏ khung đó.
     /// </summary>
     private void HandleFrameAnnotated(JsonNode? @params)
     {
@@ -625,11 +612,11 @@ public sealed class PipelineController
         // hoặc cũ hơn không được xuất bản lại.
         if (seq <= _lastPreviewSeq) return;
 
-        // No preview and no camera (test-only setups): skip the shared-memory read and the
-        // encode/submit work entirely — nothing consumes it.
-        // Không có preview lẫn camera (chỉ gặp trong cấu hình test): bỏ hẳn bước đọc shared
-        // memory và phần encode/nạp — không có ai tiêu thụ.
-        if (_preview is null && _camera is null) return;
+        // No preview consumer (test-only setups): skip the shared-memory read entirely — nothing
+        // consumes it.
+        // Không có preview (chỉ gặp trong cấu hình test): bỏ hẳn bước đọc shared memory — không
+        // có ai tiêu thụ.
+        if (_preview is null) return;
 
         PreviewChannelReader? reader = EnsurePreviewChannel();
         if (reader is null || !reader.TryRead(out PreviewChannelFrame frame)) return;
@@ -647,19 +634,6 @@ public sealed class PipelineController
         // memory; chỉ seq (khởi động lại mỗi phiên) lấy từ wire.
         _preview?.Publish(new PreviewFrame(
             seq, frame.Width, frame.Height, Convert.ToBase64String(frame.Jpeg)));
-
-        if (_camera is null) return;
-        try
-        {
-            _camera.Submit(seq, frame.Width, frame.Height, frame.Jpeg);
-        }
-        catch (Exception ex)
-        {
-            // The camera is a best-effort output: a bad payload must never kill the frame loop or
-            // the preview that was just published. Camera là đầu ra best-effort: payload hỏng không
-            // được giết vòng lặp khung hay preview vừa xuất bản.
-            _log.LogWarning(ex, "Camera submit failed for frame {Seq}.", seq);
-        }
     }
 
     /// <summary>
@@ -723,12 +697,6 @@ public sealed class PipelineController
             : null;
         IsRunning = running;
         PipelineStateChanged?.Invoke(running, reason);
-        if (!running)
-        {
-            // The loop died on its own: keep the last frame on the camera instead of going black.
-            // Loop tự chết: giữ khung cuối trên camera thay vì chuyển sang đen.
-            _camera?.Hold();
-        }
         StateChanged?.Invoke();
     }
 

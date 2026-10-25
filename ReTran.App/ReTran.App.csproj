@@ -83,13 +83,4 @@
         </ProjectReference>
     </ItemGroup>
 
-    <!-- Copy the native virtual-camera DLL beside the app output when it has been built.
-         Copy DLL camera ảo cạnh output app khi đã build (bỏ qua khi chưa build). -->
-    <Target Name="CopyCameraDll" AfterTargets="Build"
-            Condition="Exists('$(MSBuildProjectDirectory)\..\ReTran.Camera\x64\$(Configuration)\ReTran.Camera.dll')">
-        <Copy SourceFiles="$(MSBuildProjectDirectory)\..\ReTran.Camera\x64\$(Configuration)\ReTran.Camera.dll"
-              DestinationFolder="$(OutDir)"
-              SkipUnchangedFiles="true" />
-    </Target>
-
 </Project>

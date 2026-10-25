@@ -86,12 +86,12 @@ public class PreviewChannelTests
         // The section outlives a writer generation (the App's reader keeps it open across sessions),
         // so the seqlock counter must be continuous per SECTION: an old-session frame must never
         // out-rank a new-session frame. Regression for the poisoned-guard scenario, where a stale
-        // notification after a session restart made the App freeze preview/camera until the new
+        // notification after a session restart made the App freeze the preview until the new
         // writer's counter caught up with the old session's last seq.
         // Vùng nhớ sống lâu hơn một thế hệ writer (reader phía App giữ nó qua các phiên), nên bộ đếm
         // seqlock phải liên tục theo VÙNG NHỚ: khung của phiên cũ không bao giờ được xếp trên khung
         // của phiên mới. Test hồi quy cho kịch bản "guard bị nhiễm độc": một thông báo cũ sau khi
-        // restart phiên từng làm App đóng băng preview/camera cho tới khi bộ đếm writer mới đuổi kịp
+        // restart phiên từng làm App đóng băng preview cho tới khi bộ đếm writer mới đuổi kịp
         // seq cuối của phiên cũ.
         string mapName = UniqueName("generations");
         var first = new CorePreview.PreviewChannelWriter(mapName);

@@ -3,7 +3,6 @@ using Microsoft.Extensions.Logging;
 using ReTran_App.Core;
 using ReTran_App.Data;
 using ReTran_App.Services;
-using ReTran_App.Services.Camera;
 using ReTran_App.Services.OverlayFeed;
 using ReTran_App.Services.OverlayWindow;
 using ReTran_App.Services.Update;
@@ -49,7 +48,6 @@ namespace ReTran_App
             builder.Services.AddSingleton<CoreProcessClient>();
             builder.Services.AddSingleton<ICorePeer>(sp => sp.GetRequiredService<CoreProcessClient>());
             builder.Services.AddSingleton<TranslationCache>();
-            builder.Services.AddSingleton<ICameraOutput, CameraOutputService>();
             builder.Services.AddSingleton<PipelineController>();
 
             builder.Services.AddSingleton(_ => new HttpClient());

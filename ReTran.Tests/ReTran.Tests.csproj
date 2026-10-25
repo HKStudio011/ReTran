@@ -40,13 +40,4 @@
     <Using Include="Xunit" />
   </ItemGroup>
 
-  <!-- Copy the native virtual-camera DLL beside the test output so the interop test can run.
-       Copy DLL camera ảo native cạnh output test để test interop chạy được. -->
-  <Target Name="CopyCameraDll" AfterTargets="Build"
-          Condition="Exists('$(MSBuildProjectDirectory)\..\ReTran.Camera\x64\$(Configuration)\ReTran.Camera.dll')">
-    <Copy SourceFiles="$(MSBuildProjectDirectory)\..\ReTran.Camera\x64\$(Configuration)\ReTran.Camera.dll"
-          DestinationFolder="$(OutDir)"
-          SkipUnchangedFiles="true" />
-  </Target>
-
 </Project>

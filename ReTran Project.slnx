@@ -2,9 +2,6 @@
   <Project Path="ReTran.App/ReTran.App.csproj">
     <Deploy Solution="Debug|*" />
   </Project>
-  <Project Path="ReTran.Camera/ReTran.Camera.vcxproj" Id="6e2c8a1f-4b57-49d2-9e10-7a3f5c9b82d4">
-    <Build Project="false" />
-  </Project>
   <Project Path="ReTran.Core/ReTran.Core.csproj" />
   <Project Path="ReTran.Updater/ReTran.Updater.csproj" />
   <Project Path="ReTran.OCR/ReTran.OCR.pyproj" Type="888888a0-9f3d-457c-b088-3a5042f75d52" Id="a3d32e99-7355-4817-b5cc-f59a9ba18d40">
