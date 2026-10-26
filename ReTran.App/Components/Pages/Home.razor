@@ -242,11 +242,18 @@
                 <section class="rt-rail-sec">
                     <div class="rt-sec-head"><h3>@(L["deck.overlay.obs.title"])</h3></div>
                     <div class="rt-device">
-                        <span class="rt-mono">@OverlayUrl</span>
-                        <button type="button" class="rt-copy" @onclick="CopyOverlayUrlAsync">@(L["deck.overlay.obs.copy"])</button>
+                        <span class="rt-mono">@(_overlayFeedFailed ? "—" : OverlayUrl)</span>
+                        <button type="button" class="rt-copy" disabled="@_overlayFeedFailed" @onclick="CopyOverlayUrlAsync">@(L["deck.overlay.obs.copy"])</button>
                     </div>
-                    <p class="rt-note">@(L["deck.overlay.obs.hint.setup"])</p>
-                    <p class="rt-note">@(L["deck.overlay.obs.hint.split"])</p>
+                    @if (_overlayFeedFailed)
+                    {
+                        <p class="rt-note" role="alert">@(L["deck.overlay.obs.error"])</p>
+                    }
+                    else
+                    {
+                        <p class="rt-note">@(L["deck.overlay.obs.hint.setup"])</p>
+                        <p class="rt-note">@(L["deck.overlay.obs.hint.split"])</p>
+                    }
                 </section>
             </div>
         </aside>
@@ -270,6 +277,7 @@
     private string? _pipelineError;
     private bool _showOcrNotice;                // first-run: chưa có model OCR nào cài
     private bool _overlayOn;
+    private bool _overlayFeedFailed;          // feed OBS không bind được cổng nào — card báo lỗi, không hiện URL chết
     private string _overlayMode = "subtitle";   // "subtitle" | "panel"
     private string _overlayCorner = "bl";       // "tl" | "tr" | "bl" | "br"
     private double _overlayFontScale = 1.0;
@@ -375,16 +383,22 @@
     }
 
     // Feed overlay OBS start một lần mỗi phiên app (singleton). Vào lại trang thì StartAsync ném
-    // "already started" — nuốt như lỗi bind cổng, không được phá trang.
+    // "already started" — chỉ nuốt đúng trường hợp đó (Feed.Started == true); start thất bại
+    // (hết cổng loopback) phải hiện lên card, không được lặng lẽ copy URL chết.
     protected override async Task OnInitializedAsync()
     {
         try
         {
             await Feed.StartAsync(CancellationToken.None);
         }
+        catch (InvalidOperationException) when (Feed.Started)
+        {
+            // Đã start từ lần vào trước — không phải lỗi.
+        }
         catch (Exception)
         {
-            // Đã start từ lần vào trước, hoặc hết cổng loopback — trang vẫn phải sống.
+            // Mọi cổng bận: không có URL thật để copy — card chuyển sang trạng thái lỗi.
+            _overlayFeedFailed = true;
         }
         await base.OnInitializedAsync();
     }

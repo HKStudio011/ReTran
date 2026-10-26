@@ -74,4 +74,9 @@
 
   var source = new EventSource("/events");
   source.onmessage = onMessage;
+
+  /* Debug aid for the OBS smoke test: SSE errors are otherwise invisible in a browser source. */
+  source.onerror = function (event) {
+    console.warn("ReTran overlay: SSE /events error — EventSource reconnects automatically.", event);
+  };
 })();
