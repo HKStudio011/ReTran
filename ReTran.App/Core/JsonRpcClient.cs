@@ -65,6 +65,10 @@ public sealed class JsonRpcClient : IAsyncDisposable
     /// Sends a request and awaits its response (matched by id).
     /// Gửi yêu cầu và chờ phản hồi tương ứng (khớp theo id).
     /// </summary>
+    /// <returns>
+    /// The response result as a detached clone (no parent), safe to re-parent or serialize.
+    /// Kết quả phản hồi dưới dạng bản sao tách rời (không có parent), an toàn để gắn vào node khác hoặc serialize.
+    /// </returns>
     public async Task<JsonNode?> CallAsync(string method, JsonNode? @params, CancellationToken ct)
     {
         string id = Interlocked.Increment(ref _nextId).ToString(CultureInfo.InvariantCulture);
@@ -141,7 +145,9 @@ public sealed class JsonRpcClient : IAsyncDisposable
                     }
                     else
                     {
-                        tcs.TrySetResult(node["result"]);
+                        // DeepClone: the result must not stay a child of the parsed envelope, or re-parenting it
+                        // into a serialized response throws InvalidOperationException "The node already has a parent."
+                        tcs.TrySetResult(node["result"]?.DeepClone());
                     }
                 }
             }

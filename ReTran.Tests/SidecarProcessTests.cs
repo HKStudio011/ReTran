@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using ReTran.Core.JsonRpc;
 using ReTran.Core.Ocr;
 using ReTran.Core.OcrClient;
 using Xunit;
@@ -7,6 +8,24 @@ namespace RetranCore.Tests;
 
 public class SidecarProcessTests
 {
+    [Fact]
+    public void ResponseLine_DeliversDetachedClone_SerializableResponse()
+    {
+        JsonNode? delivered = null;
+        string? deliveredId = null;
+        bool handled = SidecarProcess.TryRouteResponseLine(
+            "{\"jsonrpc\":\"2.0\",\"id\":\"7\",\"result\":{\"params\":[\"a\"]}}",
+            (id, result) => { deliveredId = id; delivered = result; },
+            (_, ex) => throw ex);
+
+        Assert.True(handled);
+        Assert.Equal("7", deliveredId);
+        // Trước fix: node còn parent (con của envelope) → dòng dưới ném
+        // InvalidOperationException "The node already has a parent."
+        string line = JsonRpc.SerializeResponse(new JsonRpcResponse(deliveredId!, delivered, null));
+        Assert.Contains("\"params\":[\"a\"]", line);
+    }
+
     [Fact]
     public async Task Ping_RoundTrips_ThroughRealPythonProcess()
     {

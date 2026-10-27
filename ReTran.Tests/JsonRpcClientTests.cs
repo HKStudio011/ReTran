@@ -46,6 +46,41 @@ public class JsonRpcClientTests
     }
 
     [Fact]
+    public async Task CallAsync_ResultNode_CanBeReparented()
+    {
+        // Same pipe setup as CallAsync_WritesRequest_AndResolvesOnMatchingResponse; the server-side
+        // handles are intentionally NOT disposed (disposing them crashes testhost on Windows/.NET 10).
+        var serverIn = new AnonymousPipeServerStream(PipeDirection.In);
+        var clientOut = new AnonymousPipeClientStream(PipeDirection.Out, serverIn.ClientSafePipeHandle);
+        var serverOut = new AnonymousPipeServerStream(PipeDirection.Out);
+        var clientIn = new AnonymousPipeClientStream(PipeDirection.In, serverOut.ClientSafePipeHandle);
+
+        await using var _ = clientIn;
+        await using var __ = clientOut;
+
+        await using var client = new JsonRpcClient(
+            new StreamReader(clientIn),
+            new StreamWriter(clientOut) { NewLine = "\n" });
+
+        Task<JsonNode?> callTask = client.CallAsync("core.ping", null, CancellationToken.None);
+
+        // Drain the request line so the write completes before the response is fed back.
+        string? sentLine = await new StreamReader(serverIn).ReadLineAsync(TestContext.Current.CancellationToken);
+        Assert.Equal("1", JsonNode.Parse(sentLine!)!["id"]!.GetValue<string>());
+
+        var respWriter = new StreamWriter(serverOut) { NewLine = "\n" };
+        await respWriter.WriteLineAsync(
+            "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"result\":{\"a\":1}}");
+        await respWriter.FlushAsync(TestContext.Current.CancellationToken);
+
+        JsonNode? result = await callTask;
+        // Trước fix: node còn parent (con của envelope) → dòng dưới ném
+        // InvalidOperationException "The node already has a parent."
+        var envelope = new JsonObject { ["copy"] = result };
+        Assert.Equal(1, envelope["copy"]!["a"]!.GetValue<int>());
+    }
+
+    [Fact]
     public async Task CallAsync_ErrorResponse_FaultsWithRpcException()
     {
         // Same pipe setup as the happy-path test; server-side handles intentionally NOT disposed

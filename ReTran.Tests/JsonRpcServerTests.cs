@@ -99,6 +99,20 @@ public class JsonRpcServerTests
     }
 
     [Fact]
+    public async Task RouteResponse_DetachesResultFromEnvelope()
+    {
+        var waiter = new TaskCompletionSource<JsonNode?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        JsonRpcServer.RouteResponse(waiter,
+            JsonNode.Parse("""{"jsonrpc":"2.0","id":"1","result":{"a":1}}""")!);
+
+        JsonNode? result = await waiter.Task;
+        // Trước fix: node còn parent (con của envelope) → dòng dưới ném
+        // InvalidOperationException "The node already has a parent."
+        string line = JsonRpc.SerializeResponse(new JsonRpcResponse("1", result, null));
+        Assert.Contains("\"a\":1", line);
+    }
+
+    [Fact]
     public async Task Ping_ReturnsPong()
     {
         var server = new JsonRpcServer();

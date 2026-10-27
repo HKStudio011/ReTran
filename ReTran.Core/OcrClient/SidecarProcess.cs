@@ -73,23 +73,7 @@ public sealed class SidecarProcess : IAsyncDisposable, ISidecarRpc
             {
                 string? line;
                 while ((line = await reader.ReadLineAsync()) is not null)
-                {
-                    if (Rpc.ParseLine(line) is not { } n
-                        || n["id"]?.GetValue<string>() is not { } id)
-                        continue;
-                    if (n["result"] is { } r)
-                    {
-                        Deliver(id, r);
-                    }
-                    else if (n["error"] is { } err)
-                    {
-                        int code = err["code"] is JsonValue cv && cv.TryGetValue<int>(out var c)
-                            ? c : RpcErrorCodes.InternalError;
-                        string msg = err["message"] is JsonValue mv && mv.TryGetValue<string>(out var m)
-                            ? m : "sidecar error";
-                        Fail(id, new SidecarRpcException(code, msg));
-                    }
-                }
+                    TryRouteResponseLine(line, Deliver, Fail);
             }
             catch { /* unexpected read failure; waiters are failed in finally */ }
             finally
@@ -100,9 +84,41 @@ public sealed class SidecarProcess : IAsyncDisposable, ISidecarRpc
     }
 
     /// <summary>
+    /// Parses and routes one response line; the delivered result is a clone detached from the parsed envelope.
+    /// Phân tích và định tuyến một dòng phản hồi; node kết quả giao ra là bản sao đã tách khỏi envelope đã phân tích.
+    /// </summary>
+    /// <param name="line">One raw response line. Một dòng phản hồi thô.</param>
+    /// <param name="deliver">Receives the id and the detached result node. Nhận id và node kết quả đã tách.</param>
+    /// <param name="fail">Receives the id and the sidecar error to surface. Nhận id và lỗi sidecar cần ném ra.</param>
+    /// <returns>
+    /// <see langword="true"/> when the line was a valid response and was routed; <see langword="false"/> for
+    /// blank lines, non-responses and notifications.
+    /// Trả <see langword="true"/> khi dòng là phản hồi hợp lệ và đã được định tuyến; <see langword="false"/> với
+    /// dòng trống, dòng không phải phản hồi và thông báo.
+    /// </returns>
+    internal static bool TryRouteResponseLine(string line, Action<string, JsonNode?> deliver, Action<string, Exception> fail)
+    {
+        if (Rpc.ParseLine(line) is not { } n || n["id"]?.GetValue<string>() is not { } id)
+            return false;
+        if (n["result"] is { } r) { deliver(id, r.DeepClone()); return true; }
+        if (n["error"] is { } err)
+        {
+            int code = err["code"] is JsonValue cv && cv.TryGetValue<int>(out var c) ? c : RpcErrorCodes.InternalError;
+            string msg = err["message"] is JsonValue mv && mv.TryGetValue<string>(out var m) ? m : "sidecar error";
+            fail(id, new SidecarRpcException(code, msg));
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Sends a request and awaits its response (matched by id); throws when the sidecar has already exited.
     /// Gửi yêu cầu và đợi phản hồi (ghép theo id); ném ngoại lệ khi sidecar đã thoát.
     /// </summary>
+    /// <returns>
+    /// The response result as a detached clone (no parent), safe to re-parent or serialize.
+    /// Kết quả phản hồi dưới dạng bản sao tách rời (không có parent), an toàn để gắn vào node khác hoặc serialize.
+    /// </returns>
     /// <exception cref="SidecarRpcException">
     /// Thrown when the sidecar has already exited, or exits before replying.
     /// Khi sidecar đã thoát, hoặc thoát trước khi phản hồi.

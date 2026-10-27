@@ -78,8 +78,8 @@ public sealed class JsonRpcServer : IJsonRpcNotifier
     /// <param name="@params">Optional request parameters; serialized as an empty object when null.
     /// Tham số tùy chọn; khi null sẽ được đóng gói thành object rỗng.</param>
     /// <param name="ct">Token used to cancel the wait for the response. Token dùng để hủy lời chờ phản hồi.</param>
-    /// <returns>The <c>result</c> of the matching response; a null result yields null.
-    /// Kết quả <c>result</c> của phản hồi tương ứng; nếu result là null thì trả về null.</returns>
+    /// <returns>The <c>result</c> of the matching response as a detached clone (no parent); a null result yields null.
+    /// Kết quả <c>result</c> của phản hồi tương ứng dưới dạng bản sao tách rời (không có parent); nếu result là null thì trả về null.</returns>
     /// <exception cref="RpcMethodException">
     /// Thrown when the peer answers with an error object. Khi peer trả về đối tượng lỗi.
     /// </exception>
@@ -172,15 +172,17 @@ public sealed class JsonRpcServer : IJsonRpcNotifier
     }
 
     /// <summary>
-    /// Completes the CallAsync waiter registered for a response line (result or error).
-    /// Hoàn tất waiter của CallAsync đã đăng ký cho dòng phản hồi (result hoặc error).
+    /// Completes the CallAsync waiter registered for a response line (result or error); the result is a detached clone.
+    /// Hoàn tất waiter của CallAsync đã đăng ký cho dòng phản hồi (result hoặc error); kết quả là bản sao tách rời.
     /// </summary>
-    private static void RouteResponse(TaskCompletionSource<JsonNode?> waiter, JsonNode response)
+    internal static void RouteResponse(TaskCompletionSource<JsonNode?> waiter, JsonNode response)
     {
         JsonNode? errorNode = response["error"];
         if (errorNode is null)
         {
-            waiter.TrySetResult(response["result"]);
+            // DeepClone: the result must not stay a child of the parsed envelope, or re-parenting it
+            // into a serialized response throws InvalidOperationException "The node already has a parent."
+            waiter.TrySetResult(response["result"]?.DeepClone());
             return;
         }
 
