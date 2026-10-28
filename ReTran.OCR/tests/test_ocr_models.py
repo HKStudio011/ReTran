@@ -122,7 +122,7 @@ class CountingPaddleOCR:
         CountingPaddleOCR.instances.append(self)
         CountingPaddleOCR.last_kwargs = kwargs
 
-    def predict(self, image):
+    def predict(self, image, **kwargs):
         return [
             {
                 "dt_polys": np.array([[[0, 0], [1, 0], [1, 1], [0, 1]]]),
@@ -478,6 +478,8 @@ def test_main_handlers_register_model_rpc(tmp_path, monkeypatch):
         "ocr.models.download",
         "ocr.models.delete",
         "ocr.models.set",
+        "ocr.config.schema",
+        "ocr.config.set",
     }
 
     # One engine shared: ocr.models.set must change the active pair that

@@ -1,4 +1,6 @@
-"""Unit tests for the OCR engine config surface (schema / replace / defer). Offline: no paddle import."""
+"""Unit tests for the OCR engine config surface (schema / replace / defer),
+its ocr.config.* handlers and the engine wiring. Offline: the engine tests
+inject a fake paddleocr; only the signature-coverage test imports the real one."""
 from __future__ import annotations
 
 import importlib.util
@@ -111,3 +113,75 @@ def test_predict_kwargs_have_all_live_defaults():
     c.set({"return_word_box": True, "device": "cpu"}, defer_reload=True)
     assert c.predict_kwargs()["return_word_box"] is True
     assert "device" not in c.predict_kwargs()                 # reload group không đi predict
+
+
+class RecordingPaddleOCR:
+    instances: list["RecordingPaddleOCR"] = []
+    ctor_kwargs: dict = {}
+    predict_kwargs: dict = {}
+
+    def __init__(self, **kwargs):
+        RecordingPaddleOCR.instances.append(self)
+        RecordingPaddleOCR.ctor_kwargs = kwargs
+
+    def predict(self, image, **kwargs):
+        RecordingPaddleOCR.predict_kwargs = kwargs
+        return [{"dt_polys": [[[0, 0], [1, 0], [1, 1], [0, 1]]], "rec_texts": ["X"], "rec_scores": [0.5]}]
+
+
+@pytest.fixture
+def fake_paddle(monkeypatch):
+    import sys, types
+    fake = types.ModuleType("paddleocr")
+    fake.PaddleOCR = RecordingPaddleOCR
+    monkeypatch.setitem(sys.modules, "paddleocr", fake)
+    RecordingPaddleOCR.instances = []
+    yield RecordingPaddleOCR
+
+
+def test_engine_passes_schema_defaults_to_constructor(fake_paddle):
+    from retran_core.ocr.paddle_engine import PaddleOcrEngine
+    import numpy as np
+    engine = PaddleOcrEngine("PP-OCRv6_tiny_det", "PP-OCRv6_tiny_rec")
+    engine.spot(np.zeros((4, 4, 3), dtype=np.uint8))
+    kw = fake_paddle.ctor_kwargs
+    assert kw["text_detection_model_name"] == "PP-OCRv6_tiny_det"
+    assert kw["use_doc_orientation_classify"] is False
+    assert kw["text_recognition_batch_size"] == 6        # reload group đi constructor
+    assert "text_det_thresh" not in kw                   # live group không đi constructor
+    assert fake_paddle.predict_kwargs["text_det_thresh"] == 0.3
+    assert fake_paddle.predict_kwargs["text_det_limit_side_len"] == 64
+
+
+def test_reload_param_resets_predictor_and_applies_next_spot(fake_paddle):
+    from retran_core.ocr.paddle_engine import PaddleOcrEngine
+    import numpy as np
+    engine = PaddleOcrEngine("PP-OCRv6_tiny_det", "PP-OCRv6_tiny_rec")
+    engine.spot(np.zeros((4, 4, 3), dtype=np.uint8))
+    assert len(fake_paddle.instances) == 1
+    engine.config.set({"text_recognition_batch_size": 12}, defer_reload=True)
+    engine.spot(np.zeros((4, 4, 3), dtype=np.uint8))
+    assert len(fake_paddle.instances) == 1          # defer: không nạp lại
+    engine.config.set({"text_recognition_batch_size": 12}, defer_reload=False)  # không đổi -> no-op
+    engine.config.set({"cpu_threads": 4}, defer_reload=False)
+    engine.spot(np.zeros((4, 4, 3), dtype=np.uint8))
+    assert len(fake_paddle.instances) == 2
+    assert fake_paddle.ctor_kwargs["cpu_threads"] == 4
+
+
+def test_handlers_schema_and_set():
+    from retran_core.jsonrpc import handle_line
+    from retran_core.ocr.config import make_config_handlers
+    c = cfg.OcrConfig()
+    handlers = make_config_handlers(c)
+
+    line = handle_line('{"jsonrpc":"2.0","id":"1","method":"ocr.config.schema"}', handlers)
+    assert '"params"' in line
+    line = handle_line(
+        '{"jsonrpc":"2.0","id":"2","method":"ocr.config.set","params":{"params":{"text_det_thresh":0.35}}}',
+        handlers)
+    assert '"live":["text_det_thresh"]' in line.replace(" ", "")
+    assert c.get("text_det_thresh") == 0.35
+    line = handle_line(
+        '{"jsonrpc":"2.0","id":"3","method":"ocr.config.set","params":{"params":{"bogus":1}}}', handlers)
+    assert '"code":-32602' in line.replace(" ", "")

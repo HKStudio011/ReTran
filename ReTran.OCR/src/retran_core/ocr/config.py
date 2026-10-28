@@ -8,6 +8,8 @@ parameter with its UI group, JSON type, ReTran default and reload behaviour;
 :meth:`OcrConfig.set` validates the whole payload before touching any state
 and reports which keys took effect immediately (``live``) and which need a
 model reload (``deferred`` until the pipeline stops).
+:func:`make_config_handlers` exposes that surface over JSON-RPC as
+``ocr.config.schema`` and ``ocr.config.set``.
 
 Offline by design: no paddle import, so the schema and its semantics are
 testable without the optional OCR stack.
@@ -18,7 +20,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from ..jsonrpc import RpcInvalidParams
+from ..jsonrpc import Handler, RpcInvalidParams
 
 
 @dataclass(frozen=True)
@@ -344,3 +346,31 @@ class OcrConfig:
             for p in PARAMS
             if not p.reload_required and (value := self.get(p.key)) is not None
         }
+
+
+def make_config_handlers(config: OcrConfig) -> dict[str, Handler]:
+    """Build the ``ocr.config.*`` JSON-RPC handlers bound to one config.
+
+    Args:
+        config: Override map the handlers read and replace; not owned by the
+            handlers.
+
+    Returns:
+        Handlers for ``ocr.config.schema`` (params ignored; returns the full
+        :func:`schema`) and ``ocr.config.set`` (payload
+        ``{"params": {...}, "deferReload": bool}`` with ``deferReload``
+        defaulting to false; returns the :meth:`OcrConfig.set` summary). A
+        payload that is not an object, or whose ``params`` entry is not an
+        object, raises ``RpcInvalidParams`` (-32602).
+    """
+
+    def set_config(params: Any) -> dict:
+        if not isinstance(params, dict):
+            raise RpcInvalidParams("params must be an object ({params, deferReload?})")
+        raw = params.get("params")
+        if not isinstance(raw, dict):
+            raise RpcInvalidParams("'params' must be an object")
+        defer = params.get("deferReload", False)
+        return config.set(raw, defer_reload=bool(defer))
+
+    return {"ocr.config.schema": lambda _p: schema(), "ocr.config.set": set_config}

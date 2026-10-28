@@ -22,7 +22,7 @@ class RecordingPaddleOCR:
     def __init__(self, **kwargs):
         RecordingPaddleOCR.last_kwargs = kwargs
 
-    def predict(self, image):
+    def predict(self, image, **kwargs):
         return [
             {
                 "dt_polys": np.array([[[10, 10], [60, 10], [60, 30], [10, 30]]]),
@@ -52,7 +52,7 @@ def test_spot_uses_pinned_models(monkeypatch):
     assert "lang" not in kwargs
 
 
-def test_engine_disables_doc_pipelines_and_leaves_mkldnn_alone(monkeypatch):
+def test_engine_disables_doc_pipelines_and_keeps_mkldnn_enabled(monkeypatch):
     fake = types.ModuleType("paddleocr")
     fake.PaddleOCR = RecordingPaddleOCR
     monkeypatch.setitem(sys.modules, "paddleocr", fake)
@@ -63,8 +63,9 @@ def test_engine_disables_doc_pipelines_and_leaves_mkldnn_alone(monkeypatch):
     kwargs = RecordingPaddleOCR.last_kwargs
     # The paddleocr 3.7 / paddlepaddle 3.4 stack runs without the oneDNN
     # workaround (PaddlePaddle/Paddle#77340), so the engine no longer
-    # disables mkldnn; paddleocr's own default (enabled) applies.
-    assert "enable_mkldnn" not in kwargs
+    # disables mkldnn: it passes the config default (enabled) through
+    # explicitly, which matches paddleocr's own default.
+    assert kwargs["enable_mkldnn"] is True
     assert kwargs["use_doc_orientation_classify"] is False
     assert kwargs["use_doc_unwarping"] is False
     assert kwargs["use_textline_orientation"] is False

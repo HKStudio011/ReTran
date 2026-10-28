@@ -7,6 +7,7 @@ import sys
 from . import __version__
 from .jsonrpc import serve
 from .ocr.catalog import recommended
+from .ocr.config import make_config_handlers
 from .ocr.handlers import make_spot_handler
 from .ocr.models import (
     ModelManager,
@@ -19,9 +20,10 @@ from .ocr.shm import ShmReader
 
 
 def _handlers():
-    # One engine instance shared by ocr.spot and the model handlers, so
-    # ocr.models.set switches the engine the next spot call will use. The
-    # engine stays lazy: models load on the first spot call.
+    # One engine instance shared by ocr.spot, the model handlers and the
+    # config handlers, so ocr.models.set switches the engine the next spot
+    # call will use and ocr.config.set targets the engine's parameter map.
+    # The engine stays lazy: models load on the first spot call.
     det, rec = recommended("auto", "vi")
     engine = PaddleOcrEngine(det, rec)
     manager = ModelManager(model_cache_dir(), engine=engine)
@@ -33,6 +35,7 @@ def _handlers():
         "ocr.spot": make_spot_handler(engine, reader_factory=ShmReader),
     }
     handlers.update(make_model_handlers(manager))
+    handlers.update(make_config_handlers(engine.config))
     return handlers
 
 
