@@ -100,6 +100,12 @@ public static class Program
         server.Register("ocr.models.download", p => host.DownloadOcrModelAsync(p, CancellationToken.None));
         server.Register("ocr.models.delete", p => host.DeleteOcrModelAsync(p, CancellationToken.None));
         server.Register("ocr.models.set", p => host.SetOcrModelPairAsync(p, CancellationToken.None));
+        // ocr.config.* proxies: the Settings UI reads the engine-parameter schema and saves
+        // values through the core; the core forces deferReload from the session state.
+        // Proxy ocr.config.*: UI Settings đọc schema tham số engine và lưu giá trị qua core;
+        // core ép deferReload theo trạng thái phiên.
+        server.Register("ocr.config.schema", _ => host.OcrConfigSchemaAsync(CancellationToken.None));
+        server.Register("ocr.config.set", p => host.SetOcrConfigAsync(p, CancellationToken.None));
 
         var transport = new LineJsonRpcTransport(
             new StreamReader(Console.OpenStandardInput()),

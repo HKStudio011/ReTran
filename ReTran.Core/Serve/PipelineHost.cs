@@ -114,22 +114,22 @@ public sealed class PipelineHost : IAsyncDisposable
     }
 
     /// <summary>
-    /// Starts one pipeline session (<c>core.start</c>): validates params, verifies and
-    /// switches the OCR model pair when <c>ocr:{det,rec}</c> is given, opens the capture
-    /// source, launches the loop in the background, then fires one fire-and-forget
-    /// warmup spot.
-    /// Khởi động một phiên pipeline (<c>core.start</c>): kiểm tra tham số, xác minh và
-    /// chuyển cặp model OCR khi có <c>ocr:{det,rec}</c>, mở capture source, chạy loop ở
-    /// chế độ nền, rồi bắn một lượt warmup spot kiểu fire-and-forget.
+    /// Starts one pipeline session (<c>core.start</c>): validates params, applies the
+    /// requested OCR engine params (schema-filtered) and switches the OCR model pair when
+    /// <c>ocr:{det,rec}</c> is given, opens the capture source, launches the loop in the
+    /// background, then fires one fire-and-forget warmup spot.
+    /// Khởi động một phiên pipeline (<c>core.start</c>): kiểm tra tham số, áp tham số engine
+    /// OCR yêu cầu (lọc theo schema) và chuyển cặp model OCR khi có <c>ocr:{det,rec}</c>, mở
+    /// capture source, chạy loop ở chế độ nền, rồi bắn một lượt warmup spot kiểu fire-and-forget.
     /// </summary>
     /// <param name="@params">
     /// <c>{source:{kind:"screen",monitor}|"window",hwnd}, translate:{provider,src,dst},
-    /// ocr?:{det,rec}, ocrFps?, captureFps?, fontScale?}</c> — missing fps values fall
+    /// ocr?:{det,rec,params}, ocrFps?, captureFps?, fontScale?}</c> — missing fps values fall
     /// back to <see cref="CoreConfig"/> defaults; a missing <c>ocr</c> keeps the sidecar's
-    /// current pair (no <c>ocr.models.*</c> call).
+    /// current pair and engine config (no <c>ocr.models.*</c>/<c>ocr.config.set</c> call).
     /// Tham số theo hợp đồng spec §3.1 — fps thiếu thì lấy default từ
-    /// <see cref="CoreConfig"/>; thiếu <c>ocr</c> thì giữ cặp model hiện tại của sidecar
-    /// (không gọi <c>ocr.models.*</c>).
+    /// <see cref="CoreConfig"/>; thiếu <c>ocr</c> thì giữ cặp model và cấu hình engine hiện
+    /// tại của sidecar (không gọi <c>ocr.models.*</c>/<c>ocr.config.set</c>).
     /// </param>
     /// <param name="ct">Caller token; the session runs on its own token. Token của caller; phiên chạy bằng token riêng.</param>
     /// <returns><c>{"running": true}</c>. Kết quả <c>{"running": true}</c>.</returns>
@@ -161,6 +161,26 @@ public sealed class PipelineHost : IAsyncDisposable
         ISidecarRpc rpc = _rpc
             ?? throw new RpcMethodException(RpcErrorCodes.InternalError,
                 "sidecar not available (python/venv missing or spawn failed).");
+
+        // core.start ocr.params: filter the requested engine params against the sidecar
+        // schema — unknown keys are dropped with a warning (a hand-edited settings.json must
+        // not break Start) — and apply them before the model pair is switched, so the session
+        // this core.start launches runs with exactly the requested configuration.
+        // core.start ocr.params: lọc tham số engine yêu cầu theo schema sidecar — key lạ bị bỏ
+        // kèm cảnh báo (settings.json sửa tay không được làm hỏng lần Start) — và áp chúng
+        // trước khi chuyển cặp model, để phiên mà core.start này chạy đúng cấu hình yêu cầu.
+        if (spec.OcrParams is JsonObject requested)
+        {
+            HashSet<string> allowed = await LoadOcrSchemaKeysAsync(rpc, ct);
+            var filtered = new JsonObject();
+            foreach (KeyValuePair<string, JsonNode?> kv in requested)
+            {
+                if (allowed.Contains(kv.Key)) filtered[kv.Key] = kv.Value?.DeepClone();
+                else _stderr.WriteLine($"warn: ocr.params: dropping unknown key '{kv.Key}'.");
+            }
+            await rpc.CallAsync("ocr.config.set",
+                new JsonObject { ["params"] = filtered, ["deferReload"] = false }, ct);
+        }
 
         // core.start ocr:{det,rec}: verify both models against the sidecar catalog and
         // switch the pair BEFORE any loop (or warmup) can touch the engine — the sidecar's
@@ -436,10 +456,86 @@ public sealed class PipelineHost : IAsyncDisposable
         ForwardToSidecarAsync("ocr.models.set", @params, ct);
 
     /// <summary>
-    /// Shared body of the <c>ocr.models.*</c> proxies: forwards the method and params
-    /// verbatim to the sidecar, or throws -32603 when it never spawned.
-    /// Thân chung của các proxy <c>ocr.models.*</c>: chuyển tiếp method và params nguyên
-    /// văn sang sidecar, hoặc ném -32603 khi sidecar không khởi tạo được.
+    /// Tells whether a pipeline session currently occupies the slot (evaluated under the
+    /// session lock, so it cannot race the start/stop state toggles).
+    /// Cho biết slot hiện có phiên pipeline đang chạy hay không (đánh giá dưới lock phiên,
+    /// nên không thể đua với các lần bật/tắt trạng thái của start/stop).
+    /// </summary>
+    private bool IsRunning
+    {
+        get
+        {
+            lock (_sync) return _session is not null;
+        }
+    }
+
+    /// <summary>
+    /// Proxies <c>ocr.config.schema</c> to the sidecar: the full engine-parameter schema the
+    /// Settings UI renders, unchanged.
+    /// Proxy <c>ocr.config.schema</c> sang sidecar: toàn bộ schema tham số engine mà UI
+    /// Settings dựng, nguyên trạng.
+    /// </summary>
+    /// <param name="ct">Token for the sidecar call. Token cho lời gọi sidecar.</param>
+    /// <returns>The sidecar's <c>{params: [...]}</c> reply, unchanged. Phản hồi <c>{params: [...]}</c> của sidecar, nguyên trạng.</returns>
+    /// <exception cref="RpcMethodException">-32603 when the sidecar is unavailable. -32603 khi sidecar không sẵn sàng.</exception>
+    public Task<JsonNode?> OcrConfigSchemaAsync(CancellationToken ct) =>
+        ForwardToSidecarAsync("ocr.config.schema", null, ct);
+
+    /// <summary>
+    /// Proxies <c>ocr.config.set</c> to the sidecar with <c>deferReload</c> forced from
+    /// <see cref="IsRunning"/> — a caller-supplied value is ignored. Reload-required params
+    /// must never reset the predictor mid-session, while an idle host applies them at once.
+    /// The caller's params node is never mutated or re-parented.
+    /// Proxy <c>ocr.config.set</c> sang sidecar với <c>deferReload</c> bị ép theo
+    /// <see cref="IsRunning"/> — giá trị caller gửi bị bỏ qua. Tham số cần nạp lại không bao
+    /// giờ reset predictor giữa phiên, còn host rảnh thì áp ngay. Node params của caller
+    /// không bao giờ bị sửa hay đổi parent.
+    /// </summary>
+    /// <param name="params">Object <c>{params: {...}}</c> with the full override map; validated by the sidecar. Object <c>{params: {...}}</c> chứa toàn bộ map override; sidecar kiểm tra.</param>
+    /// <param name="ct">Token for the sidecar call. Token cho lời gọi sidecar.</param>
+    /// <returns>The sidecar's <c>{live, deferred, reloadRequired}</c> reply, unchanged. Phản hồi <c>{live, deferred, reloadRequired}</c> của sidecar, nguyên trạng.</returns>
+    /// <exception cref="RpcMethodException">-32603 when the sidecar is unavailable. -32603 khi sidecar không sẵn sàng.</exception>
+    public Task<JsonNode?> SetOcrConfigAsync(JsonNode? @params, CancellationToken ct)
+    {
+        // Clone before adding deferReload: the caller's (server's) node must never be mutated,
+        // and each value is deep-cloned so nothing is re-parented into the forwarded object.
+        // Clone trước khi thêm deferReload: node của caller (server) không bao giờ bị sửa, và
+        // từng giá trị được deep-clone để không bị đổi parent sang object chuyển tiếp.
+        JsonNode? forwarded = @params is JsonObject o
+            ? new JsonObject(o.Select(kv => KeyValuePair.Create(kv.Key, kv.Value?.DeepClone())))
+            {
+                ["deferReload"] = IsRunning,
+            }
+            : @params;
+        return ForwardToSidecarAsync("ocr.config.set", forwarded, ct);
+    }
+
+    /// <summary>
+    /// Fetches <c>ocr.config.schema</c> once per call and returns the set of param keys it
+    /// exposes; the reply must carry a <c>params</c> array.
+    /// Lấy <c>ocr.config.schema</c> mỗi lần gọi một lần và trả tập key tham số mà nó phơi ra;
+    /// phản hồi bắt buộc phải có mảng <c>params</c>.
+    /// </summary>
+    /// <param name="rpc">Sidecar peer. Peer sidecar.</param>
+    /// <param name="ct">Caller token, honored on the sidecar call. Token của caller, được tôn trọng trên lời gọi sidecar.</param>
+    /// <returns>Allowed keys, compared ordinal. Các key được phép, so sánh ordinal.</returns>
+    /// <exception cref="RpcMethodException">-32603 when the schema reply has no <c>params</c> array. -32603 khi phản hồi schema không có mảng <c>params</c>.</exception>
+    private static async Task<HashSet<string>> LoadOcrSchemaKeysAsync(ISidecarRpc rpc, CancellationToken ct)
+    {
+        JsonNode? schema = await rpc.CallAsync("ocr.config.schema", null, ct);
+        if (schema?["params"] is not JsonArray paramsArray)
+            throw new RpcMethodException(RpcErrorCodes.InternalError, "ocr.config.schema: missing 'params'.");
+        var keys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (JsonNode? p in paramsArray)
+            if (p?["key"]?.GetValue<string>() is { } key) keys.Add(key);
+        return keys;
+    }
+
+    /// <summary>
+    /// Shared body of the <c>ocr.models.*</c> and <c>ocr.config.*</c> proxies: forwards the
+    /// method and params verbatim to the sidecar, or throws -32603 when it never spawned.
+    /// Thân chung của các proxy <c>ocr.models.*</c> và <c>ocr.config.*</c>: chuyển tiếp method
+    /// và params nguyên văn sang sidecar, hoặc ném -32603 khi sidecar không khởi tạo được.
     /// </summary>
     /// <exception cref="RpcMethodException">-32603 when <see cref="_rpc"/> is null. -32603 khi <see cref="_rpc"/> là null.</exception>
     private Task<JsonNode?> ForwardToSidecarAsync(string method, JsonNode? @params, CancellationToken ct)
@@ -595,26 +691,39 @@ public sealed class PipelineHost : IAsyncDisposable
                 "'fontScale' must be a number in (0, 4].");
         }
 
-        // Optional OCR model pair (ocr: {det, rec}). Absent -> the sidecar keeps its
-        // current pair and core.start makes no ocr.models.* call; present -> both names
-        // must be non-empty strings (-32602 here), and StartAsync verifies them against
-        // the sidecar catalog before starting any loop.
-        // Cặp model OCR tùy chọn (ocr: {det, rec}). Thiếu -> sidecar giữ cặp hiện tại và
-        // core.start không gọi ocr.models.*; có -> hai tên phải là chuỗi khác rỗng
-        // (-32602 ở đây), và StartAsync kiểm tra với catalog sidecar trước khi chạy loop.
+        // Optional OCR model pair (ocr: {det, rec}) and engine params (ocr.params). Absent ->
+        // the sidecar keeps its current pair and config, and core.start makes no
+        // ocr.models.*/ocr.config.set call; present -> both names must be non-empty strings
+        // (-32602 here) and StartAsync verifies them against the sidecar catalog before
+        // starting any loop.
+        // Cặp model OCR tùy chọn (ocr: {det, rec}) và tham số engine (ocr.params). Thiếu ->
+        // sidecar giữ cặp và cấu hình hiện tại, core.start không gọi ocr.models.*/
+        // ocr.config.set; có -> hai tên phải là chuỗi khác rỗng (-32602 ở đây), và StartAsync
+        // kiểm tra với catalog sidecar trước khi chạy loop.
         string? detModel = null;
         string? recModel = null;
+        JsonObject? ocrParams = null;
         if (p.TryGetPropertyValue("ocr", out JsonNode? ocrNode))
         {
             if (ocrNode is not JsonObject ocr)
                 throw new RpcMethodException(RpcErrorCodes.InvalidParams,
-                    "'ocr' must be an object ({det, rec}).");
+                    "'ocr' must be an object ({det, rec, params?}).");
             detModel = RequiredString(ocr, "ocr", "det");
             recModel = RequiredString(ocr, "ocr", "rec");
+            // JSON null counts as absent: "keep the sidecar's current config" is the only
+            // sane reading of an explicit null in a hand-edited settings file.
+            // JSON null được tính là thiếu: "giữ cấu hình hiện tại của sidecar" là cách đọc
+            // hợp lý duy nhất cho null tường minh trong file settings sửa tay.
+            if (ocr.TryGetPropertyValue("params", out JsonNode? paramsNode) && paramsNode is not null)
+            {
+                ocrParams = paramsNode as JsonObject
+                    ?? throw new RpcMethodException(RpcErrorCodes.InvalidParams,
+                        "'ocr.params' must be an object.");
+            }
         }
 
         return new StartSpec(useWindow, monitor, hwnd, provider, src, dst, translator, ocrFps,
-            captureFps, fontScale, detModel, recModel);
+            captureFps, fontScale, detModel, recModel, ocrParams);
     }
 
     /// <summary>
@@ -980,7 +1089,8 @@ public sealed class PipelineHost : IAsyncDisposable
         int CaptureFps,
         double FontScale,
         string? DetModel,
-        string? RecModel)
+        string? RecModel,
+        JsonObject? OcrParams)
     {
         /// <summary>
         /// Builds the loop options; <see cref="StartSpec.CaptureFps"/> only cadences the capture

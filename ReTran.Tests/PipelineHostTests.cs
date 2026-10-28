@@ -853,6 +853,13 @@ public class PipelineHostTests
         var ex3 = await Assert.ThrowsAsync<RpcMethodException>(
             () => host.StartAsync(missingRec, CancellationToken.None));
         Assert.Equal(RpcErrorCodes.InvalidParams, ex3.Code);
+
+        var badParams = StartParams();
+        badParams["ocr"] = new JsonObject { ["det"] = "detA", ["rec"] = "recA", ["params"] = "nope" };
+        var ex4 = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(badParams, CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InvalidParams, ex4.Code);
+        Assert.Equal("'ocr.params' must be an object.", ex4.Message);
     }
 
     [Fact]
@@ -916,5 +923,95 @@ public class PipelineHostTests
 
         JsonNode? stopped = await host.StopAsync(null, CancellationToken.None);
         Assert.False(stopped!["running"]!.GetValue<bool>());
+    }
+
+    //
+    // core.start ocr.params + ocr.config.set — schema-filtered engine params applied before
+    // the model pair, and the forced deferReload while a session is running.
+    // core.start ocr.params + ocr.config.set — tham số engine lọc theo schema, áp trước cặp
+    // model, và deferReload bị ép khi phiên đang chạy.
+    //
+
+    [Fact]
+    public async Task Start_OcrParamsNull_CountsAsAbsent()
+    {
+        var sources = new List<FakeCaptureSource>();
+        var rpc = new FakeSidecarRpc { NextResult = SpotResult() };
+        rpc.ResultsByMethod["ocr.models.list"] = CatalogResult(("detA", true), ("recA", true));
+        await using var host = CreateHost(
+            rpc, RegistryWith(new CountingTranslator()), new JsonRpcServer(), sources);
+
+        var parameters = StartParams();
+        // JSON null = "keep the sidecar's current config": no -32602, no ocr.config.set.
+        // JSON null = "giữ cấu hình hiện tại của sidecar": không -32602, không ocr.config.set.
+        parameters["ocr"] = new JsonObject { ["det"] = "detA", ["rec"] = "recA", ["params"] = null };
+        JsonNode? started = await host.StartAsync(parameters, CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+
+        Assert.DoesNotContain(rpc.Calls, c => c.Method == "ocr.config.set");
+    }
+
+    [Fact]
+    public async Task Start_SendsFilteredOcrParams_BeforeModelsSet()
+    {
+        var sources = new List<FakeCaptureSource>();
+        var stderr = new StringWriter();
+        var rpc = new FakeSidecarRpc { NextResult = SpotResult() };
+        rpc.ResultsByMethod["ocr.config.schema"] = JsonNode.Parse("""
+            {"params":[{"key":"device","group":"device","type":"string","default":null,"reloadRequired":true},
+                       {"key":"text_det_thresh","group":"det","type":"float","default":0.3,"reloadRequired":false}]}
+            """);
+        rpc.ResultsByMethod["ocr.models.list"] = JsonNode.Parse("""
+            {"catalog":[{"name":"PP-OCRv6_small_det","kind":"det","installed":true},
+                        {"name":"PP-OCRv6_small_rec","kind":"rec","installed":true}]}
+            """);
+        await using var host = CreateHost(
+            rpc, RegistryWith(new CountingTranslator()), new JsonRpcServer(), sources, stderr);
+
+        // One payload node reused by both starts: a second start on the same node must not
+        // throw the JsonNode "node already has a parent" error.
+        // Một node payload dùng cho cả hai lần start: lần start thứ hai trên cùng node không
+        // được ném lỗi "node already has a parent" của JsonNode.
+        JsonNode payload = JsonNode.Parse("""
+            {"source":{"kind":"screen","monitor":0},
+             "translate":{"provider":"google","src":"auto","dst":"vi"},
+             "ocr":{"det":"PP-OCRv6_small_det","rec":"PP-OCRv6_small_rec",
+                    "params":{"device":"cpu","bogus":1}}}
+            """)!;
+        JsonNode? started = await host.StartAsync(payload, CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+
+        var setCall = rpc.Calls.Single(c => c.Method == "ocr.config.set");
+        var sent = (JsonObject)setCall.Params!;
+        Assert.True(sent["params"]!["device"]!.GetValue<string>() == "cpu");
+        Assert.Null(sent["params"]!["bogus"]);           // key lạ bị lọc
+        Assert.False(sent["deferReload"]!.GetValue<bool>());
+        Assert.Contains("dropping unknown key 'bogus'", stderr.ToString(), StringComparison.Ordinal);
+        // thứ tự: config.set trước models.set
+        var methods = rpc.Calls.Select(c => c.Method).ToList();
+        Assert.True(methods.IndexOf("ocr.config.set") < methods.IndexOf("ocr.models.set"));
+
+        // gọi lần hai sau core.stop không được ném node-parent
+        await host.StopAsync(null, CancellationToken.None);
+        JsonNode? restarted = await host.StartAsync(payload, CancellationToken.None);
+        Assert.True(restarted!["running"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task SetOcrConfig_WhileRunning_ForcesDeferReloadTrue()
+    {
+        var sources = new List<FakeCaptureSource>();
+        var rpc = new FakeSidecarRpc { NextResult = SpotResult() };
+        await using var host = CreateHost(
+            rpc, RegistryWith(new CountingTranslator()), new JsonRpcServer(), sources);
+
+        JsonNode? started = await host.StartAsync(StartParams(), CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+
+        await host.SetOcrConfigAsync(new JsonObject { ["params"] = new JsonObject { ["device"] = "cpu" } },
+            CancellationToken.None);
+
+        var sent = (JsonObject)rpc.Calls.Last(c => c.Method == "ocr.config.set").Params!;
+        Assert.True(sent["deferReload"]!.GetValue<bool>());   // IsRunning => Core ép true
     }
 }
