@@ -46,6 +46,40 @@ public sealed record OcrModelInfo(
     string Name, string Kind, IReadOnlyList<string> Langs, double SizeMb, bool Installed, bool InUse);
 
 /// <summary>
+/// One OCR engine parameter from the sidecar schema (<c>ocr.config.schema</c>): its key, UI
+/// group, wire type, schema default and the constraints the settings UI renders.
+/// Một tham số engine OCR từ schema sidecar (<c>ocr.config.schema</c>): khóa, nhóm UI, kiểu
+/// trên wire, giá trị mặc định theo schema và các ràng buộc mà UI cài đặt dựng.
+/// </summary>
+/// <param name="Key">PaddleOCR keyword, also the <c>ocr.config.set</c> key. Từ khóa PaddleOCR, cũng là khóa <c>ocr.config.set</c>.</param>
+/// <param name="Group">UI group: <c>device</c>, <c>models</c>, <c>preprocess</c>, <c>det</c> or <c>rec</c>. Nhóm UI: <c>device</c>, <c>models</c>, <c>preprocess</c>, <c>det</c> hoặc <c>rec</c>.</param>
+/// <param name="Type">Validation/rendering type: <c>bool</c>, <c>int</c>, <c>float</c>, <c>string</c>, <c>enum</c>, <c>json</c> or <c>shape</c>. Kiểu kiểm tra/hiển thị: <c>bool</c>, <c>int</c>, <c>float</c>, <c>string</c>, <c>enum</c>, <c>json</c> hoặc <c>shape</c>.</param>
+/// <param name="Default">Schema default; <see langword="null"/> means the engine decides. Mặc định theo schema; <see langword="null"/> nghĩa là engine tự quyết.</param>
+/// <param name="ReloadRequired">True for constructor options — changing them needs a model reload. True với tùy chọn constructor — đổi chúng cần nạp lại model.</param>
+/// <param name="Values">Allowed strings for <c>enum</c>; empty for every other type. Chuỗi hợp lệ cho <c>enum</c>; rỗng với mọi kiểu khác.</param>
+/// <param name="Min">Inclusive lower bound for numeric params, or <see langword="null"/>. Biên dưới (bao gồm) cho tham số số, hoặc <see langword="null"/>.</param>
+/// <param name="Max">Inclusive upper bound for numeric params, or <see langword="null"/>. Biên trên (bao gồm) cho tham số số, hoặc <see langword="null"/>.</param>
+/// <param name="Step">UI input step for numeric params, or <see langword="null"/>. Bước nhập liệu UI cho tham số số, hoặc <see langword="null"/>.</param>
+/// <param name="Placeholder">UI hint shown while the field is empty, or <see langword="null"/>. Gợi ý hiển thị khi ô nhập trống, hoặc <see langword="null"/>.</param>
+public sealed record OcrParamSpec(
+    string Key, string Group, string Type, JsonNode? Default, bool ReloadRequired,
+    IReadOnlyList<string> Values, double? Min, double? Max, double? Step, string? Placeholder);
+
+/// <summary>
+/// Outcome of one <c>ocr.config.set</c> (<see cref="PipelineController.SetOcrConfigAsync"/>):
+/// which changed keys took effect immediately, which wait for the next model reload, and
+/// whether at least one changed key is a constructor option.
+/// Kết quả một lần <c>ocr.config.set</c> (<see cref="PipelineController.SetOcrConfigAsync"/>):
+/// các khóa đổi được áp dụng ngay, các khóa chờ lần nạp model kế tiếp, và liệu có ít nhất một
+/// khóa đổi là tùy chọn constructor hay không.
+/// </summary>
+/// <param name="Live">Changed keys applied immediately, in schema order. Các khóa đổi được áp ngay, theo thứ tự schema.</param>
+/// <param name="Deferred">Changed constructor keys that wait for the next reload. Các khóa constructor đổi, chờ lần nạp kế tiếp.</param>
+/// <param name="ReloadRequired">True when at least one changed key is a constructor option. True khi có ít nhất một khóa đổi là tùy chọn constructor.</param>
+public sealed record OcrConfigSetResult(
+    IReadOnlyList<string> Live, IReadOnlyList<string> Deferred, bool ReloadRequired);
+
+/// <summary>
 /// App-side orchestrator over <see cref="ICorePeer"/>: starts/stops the Core pipeline
 /// (<c>core.start</c>/<c>core.stop</c>/<c>core.list_sources</c>), answers Core's cache
 /// requests from the SQLite translation cache, and turns Core notifications into
@@ -159,15 +193,15 @@ public sealed class PipelineController
     /// <summary>
     /// Ensures the core is running, wires the Core→App handlers once, then sends
     /// <c>core.start</c> built from the persisted settings (via <see cref="AppSettingsService.Load"/>)
-    /// and the given source. <c>ocrFps</c>/<c>captureFps</c> are omitted so Core applies its defaults;
-    /// <c>fontScale</c> carries the overlay font setting so the preview starts at the right size;
-    /// <c>ocr</c> carries the configured det/rec pair, which Core verifies against the sidecar
-    /// catalog before any loop starts.
+    /// and the given source: OCR/capture rhythm (<c>ocrFps</c>/<c>captureFps</c>) and the
+    /// configured det/rec pair — which Core verifies against the sidecar catalog before any
+    /// loop starts — plus the persisted engine overrides as <c>ocr.params</c> whenever any are
+    /// set (Core drops unknown keys).
     /// Đảm bảo core đang chạy, gắn handler Core→App một lần, rồi gửi <c>core.start</c> dựng từ
-    /// cài đặt đã lưu (qua <see cref="AppSettingsService.Load"/>) và nguồn đã cho. <c>ocrFps</c>/
-    /// <c>captureFps</c> được bỏ qua để Core dùng mặc định của nó; <c>fontScale</c> mang cỡ chữ
-    /// overlay để preview bắt đầu đúng cỡ ngay từ đầu; <c>ocr</c> mang cặp det/rec đã cấu hình,
-    /// Core kiểm tra với catalog sidecar trước khi loop nào chạy.
+    /// cài đặt đã lưu (qua <see cref="AppSettingsService.Load"/>) và nguồn đã cho: nhịp
+    /// OCR/capture (<c>ocrFps</c>/<c>captureFps</c>) và cặp det/rec đã cấu hình — Core kiểm tra
+    /// cặp này với catalog sidecar trước khi loop nào chạy — kèm các tham số engine đã lưu dưới
+    /// dạng <c>ocr.params</c> khi có ghi đè (khóa lạ bị Core bỏ).
     /// </summary>
     /// <remarks>
     /// Starting a session clears the wire-seq guard before <c>core.start</c> is sent, because Core
@@ -198,6 +232,13 @@ public sealed class PipelineController
         EnsureHandlersWired();
 
         AppSettings settings = _settings.Load();
+        // Chỉ gửi ocr.params khi có ghi đè: vắng mặt = sidecar giữ cấu hình hiện tại. Mỗi giá
+        // trị được DeepClone để tách khỏi node settings trước khi gắn vào params (tránh lỗi
+        // "node already has a parent" khi node bị dùng lại ở lần start sau).
+        var ocr = new JsonObject { ["det"] = settings.OcrDet, ["rec"] = settings.OcrRec };
+        JsonObject? ocrParams = BuildOcrParams(settings.OcrEngine ?? new Dictionary<string, JsonNode?>());
+        if (ocrParams is not null) ocr["params"] = ocrParams;
+
         var @params = new JsonObject
         {
             ["source"] = source.UseWindow
@@ -209,12 +250,9 @@ public sealed class PipelineController
                 ["src"] = settings.Src,
                 ["dst"] = settings.Dst,
             },
-            ["ocr"] = new JsonObject
-            {
-                ["det"] = settings.OcrDet,
-                ["rec"] = settings.OcrRec,
-            },
-            ["fontScale"] = settings.OverlayFontScale,
+            ["ocr"] = ocr,
+            ["ocrFps"] = settings.OcrFps,
+            ["captureFps"] = settings.CaptureFps,
         };
 
         // Cleared before core.start is sent (never after it returns) because Core restarts its
@@ -476,6 +514,107 @@ public sealed class PipelineController
         await _peer.CallAsync("ocr.models.set",
             new JsonObject { ["det"] = det, ["rec"] = rec }, ct).ConfigureAwait(false);
         return true;
+    }
+
+    /// <summary>
+    /// Ensures the core process is running, then asks the sidecar (through Core's
+    /// <c>ocr.config.schema</c> proxy) for the full engine-parameter schema the settings UI
+    /// renders. Missing optional fields come back as empty/null instead of throwing.
+    /// Đảm bảo tiến trình core đang chạy, rồi hỏi sidecar (qua proxy <c>ocr.config.schema</c>
+    /// của Core) toàn bộ schema tham số engine mà UI cài đặt dựng. Trường tùy chọn thiếu trả về
+    /// rỗng/null thay vì ném.
+    /// </summary>
+    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <returns>The schema entries in sidecar order. Các mục schema theo thứ tự sidecar.</returns>
+    /// <exception cref="RpcException">Propagated unchanged from Core when the sidecar is unavailable (-32603). Đẩy ra nguyên vẹn từ Core khi sidecar không sẵn sàng (-32603).</exception>
+    public async Task<IReadOnlyList<OcrParamSpec>> GetOcrConfigSchemaAsync(CancellationToken ct)
+    {
+        await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
+        EnsureHandlersWired();
+
+        JsonNode? result = await _peer.CallAsync("ocr.config.schema", null, ct).ConfigureAwait(false);
+        var specs = new List<OcrParamSpec>();
+        if (result?["params"] is JsonArray paramArray)
+        {
+            foreach (JsonNode? node in paramArray)
+            {
+                if (node is not JsonObject param) continue;
+                specs.Add(new OcrParamSpec(
+                    ReadString(param, "key"),
+                    ReadString(param, "group"),
+                    ReadString(param, "type"),
+                    param["default"],
+                    ReadBool(param, "reloadRequired"),
+                    ReadStringArray(param["values"]),
+                    ReadNullableDouble(param, "min"),
+                    ReadNullableDouble(param, "max"),
+                    ReadNullableDouble(param, "step"),
+                    ReadNullableString(param, "placeholder")));
+            }
+        }
+        return specs;
+    }
+
+    /// <summary>
+    /// Ensures the core process is running, then replaces the sidecar's engine override map
+    /// through Core's <c>ocr.config.set</c> proxy. The map is the whole desired override map
+    /// (replace semantics): keys absent from it fall back to their schema default, and an
+    /// empty map restores every default. Values are deep-cloned onto the wire, so the caller's
+    /// nodes can be reused across calls. <c>deferReload</c> is not sent — Core forces it from
+    /// its run state.
+    /// Đảm bảo tiến trình core đang chạy, rồi thay thế map ghi đè tham số engine của sidecar
+    /// qua proxy <c>ocr.config.set</c> của Core. Map là toàn bộ map ghi đè mong muốn (ngữ nghĩa
+    /// thay thế): khóa vắng mặt quay về mặc định schema, và map rỗng khôi phục mọi mặc định.
+    /// Giá trị được deep-clone lên wire, nên node của bên gọi dùng lại được qua nhiều lần gọi.
+    /// Không gửi <c>deferReload</c> — Core tự ép theo trạng thái chạy của nó.
+    /// </summary>
+    /// <param name="values">Override map: param key → JSON value; <see langword="null"/> means "use the default". Map ghi đè: khóa tham số → giá trị JSON; <see langword="null"/> nghĩa là dùng mặc định.</param>
+    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <returns>Which keys applied live, which were deferred, and whether a reload is required. Các khóa áp ngay, các khóa bị hoãn, và liệu có cần nạp lại model hay không.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="values"/> is null. Ném khi <paramref name="values"/> là null.</exception>
+    /// <exception cref="RpcException">Propagated unchanged from Core when the sidecar is unavailable (-32603) or rejects a value (-32602). Đẩy ra nguyên vẹn từ Core khi sidecar không sẵn sàng (-32603) hoặc từ chối giá trị (-32602).</exception>
+    public async Task<OcrConfigSetResult> SetOcrConfigAsync(
+        IReadOnlyDictionary<string, JsonNode?> values, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
+        EnsureHandlersWired();
+
+        // DeepClone từng giá trị: node của caller (settings/UI) không bao giờ bị đổi parent,
+        // nên cùng map dùng lại được cho lần gọi sau.
+        var overrides = new JsonObject();
+        foreach ((string key, JsonNode? value) in values) overrides[key] = value?.DeepClone();
+
+        JsonNode? result = await _peer.CallAsync("ocr.config.set",
+            new JsonObject { ["params"] = overrides }, ct).ConfigureAwait(false);
+
+        return new OcrConfigSetResult(
+            ReadStringArray(result?["live"]),
+            ReadStringArray(result?["deferred"]),
+            result is JsonObject resultObj && ReadBool(resultObj, "reloadRequired"));
+    }
+
+    /// <summary>
+    /// Builds the <c>ocr.params</c> object for <c>core.start</c> from persisted overrides.
+    /// Returns <see langword="null"/> when there is nothing to send (no overrides, or every
+    /// value null), so callers omit the property entirely — Core then keeps the sidecar's
+    /// current configuration. Each value is deep-cloned before being attached.
+    /// Dựng object <c>ocr.params</c> cho <c>core.start</c> từ các ghi đè đã lưu. Trả
+    /// <see langword="null"/> khi không có gì để gửi (không ghi đè, hoặc mọi giá trị đều null),
+    /// để bên gọi bỏ hẳn thuộc tính — Core khi đó giữ cấu hình hiện tại của sidecar. Mỗi giá trị
+    /// được deep-clone trước khi gắn vào object.
+    /// </summary>
+    /// <param name="overrides">Persisted param key → JSON value map. Map khóa tham số → giá trị JSON đã lưu.</param>
+    /// <returns>The params object, or <see langword="null"/> when nothing should be sent. Object params, hoặc <see langword="null"/> khi không nên gửi gì.</returns>
+    private static JsonObject? BuildOcrParams(Dictionary<string, JsonNode?> overrides)
+    {
+        if (overrides.Count == 0) return null;
+        var o = new JsonObject();
+        foreach ((string key, JsonNode? value) in overrides)
+        {
+            if (value is not null) o[key] = value.DeepClone(); // tách parent trước khi attach
+        }
+        return o.Count == 0 ? null : o;
     }
 
     private async Task EnsureCoreStartedAsync(CancellationToken ct)
@@ -794,6 +933,34 @@ public sealed class PipelineController
             && value.TryGetValue<double>(out double parsed)
             ? parsed
             : fallback;
+
+    // Các trường tùy chọn của schema (placeholder, min/max/step): thiếu hoặc JSON null → null.
+    private static string? ReadNullableString(JsonObject o, string key)
+        => o[key] is JsonValue value && value.GetValueKind() == JsonValueKind.String
+            ? value.GetValue<string>()
+            : null;
+
+    private static double? ReadNullableDouble(JsonObject o, string key)
+        => o[key] is JsonValue value
+            && value.GetValueKind() == JsonValueKind.Number
+            && value.TryGetValue<double>(out double parsed)
+            ? parsed
+            : null;
+
+    // Mảng chuỗi (values của schema, live/deferred của set); thiếu hoặc không phải mảng → rỗng.
+    private static List<string> ReadStringArray(JsonNode? node)
+    {
+        var items = new List<string>();
+        if (node is not JsonArray array) return items;
+        foreach (JsonNode? item in array)
+        {
+            if (item is JsonValue value && value.GetValueKind() == JsonValueKind.String)
+            {
+                items.Add(value.GetValue<string>());
+            }
+        }
+        return items;
+    }
 
     // installed/inUse đến từ wire dưới dạng JsonElement (parse từ chuỗi JSON) hoặc bool dựng sẵn
     // trong test — TryGetValue<bool> đọc được cả hai backing, không cần vòng giải mã như ReadLong.

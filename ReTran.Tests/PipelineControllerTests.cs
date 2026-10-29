@@ -89,9 +89,14 @@ public class PipelineControllerTests : IDisposable
         JsonObject ocr = call.Params!["ocr"]!.AsObject();
         Assert.Equal("PP-OCRv6_small_det", ocr["det"]!.GetValue<string>());
         Assert.Equal("PP-OCRv6_small_rec", ocr["rec"]!.GetValue<string>());
+        // Không có ghi đè engine → "params" vắng hẳn (Core giữ cấu hình sidecar hiện tại).
+        Assert.Null(ocr["params"]);
 
-        Assert.Null(call.Params["ocrFps"]);
-        Assert.Null(call.Params["captureFps"]);
+        // Nhịp pipeline đi kèm mọi core.start; mặc định 3/10 khung mỗi giây.
+        Assert.Equal(3, call.Params["ocrFps"]!.GetValue<int>());
+        Assert.Equal(10, call.Params["captureFps"]!.GetValue<int>());
+        // Cỡ chữ thủ công đã bỏ khỏi wire (spec §9.2); field settings còn tới Task 9.
+        Assert.Null(call.Params["fontScale"]);
     }
 
     [Fact]
@@ -111,6 +116,34 @@ public class PipelineControllerTests : IDisposable
         JsonObject ocr = call.Params!["ocr"]!.AsObject();
         Assert.Equal("PP-OCRv6_tiny_det", ocr["det"]!.GetValue<string>());
         Assert.Equal("PP-OCRv6_tiny_rec", ocr["rec"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task StartAsync_SendsOcrParamsAndFps_AndSurvivesSecondStart()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        new AppSettingsService(_settingsPath).Save(new AppSettings("google", "auto", "vi", null,
+            OcrEngine: new Dictionary<string, JsonNode?> { ["text_det_thresh"] = 0.35 },
+            OcrFps: 5, CaptureFps: 12));
+        PipelineController controller = CreateController(peer, new OverlayState());
+        var source = new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null);
+
+        await controller.StartAsync(source, CancellationToken.None);
+
+        JsonObject sent = Assert.Single(peer.Calls).Params!.AsObject();
+        Assert.Equal(0.35, sent["ocr"]!["params"]!["text_det_thresh"]!.GetValue<double>());
+        Assert.Equal(5, sent["ocrFps"]!.GetValue<int>());
+        Assert.Equal(12, sent["captureFps"]!.GetValue<int>());
+        Assert.Null(sent["fontScale"]);            // cỡ chữ thủ công đã bỏ (sau Task 9 vẫn đúng)
+
+        await controller.StopAsync(CancellationToken.None);
+        // Lần hai: settings đọc lại từ file (node JsonNode mới) — không được ném node-parent,
+        // và map ghi đè vẫn nguyên giá trị.
+        await controller.StartAsync(source, CancellationToken.None);
+        Assert.Equal(2, peer.Calls.Count(call => call.Method == "core.start"));
+        // "Calls[1]" là core.stop; lần start thứ hai là call cuối cùng mang method core.start.
+        JsonObject resent = peer.Calls.Last(call => call.Method == "core.start").Params!.AsObject();
+        Assert.Equal(0.35, resent["ocr"]!["params"]!["text_det_thresh"]!.GetValue<double>());
     }
 
     [Fact]
@@ -606,6 +639,150 @@ public class PipelineControllerTests : IDisposable
 
         Assert.False(applied);
         Assert.Equal(callsBefore, peer.Calls.Count); // no ocr.models.set went out mid-session
+    }
+
+    [Fact]
+    public async Task OcrConfigSchema_MapsCamelCaseWireShape_ToleratingMissingOptionals()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        peer.Reply = method => method == "ocr.config.schema"
+            ? new JsonObject
+            {
+                ["params"] = new JsonArray(
+                    new JsonObject
+                    {
+                        ["key"] = "text_det_thresh", ["group"] = "det", ["type"] = "float",
+                        ["default"] = 0.3, ["reloadRequired"] = false,
+                        ["values"] = null, ["min"] = 0.0, ["max"] = 1.0,
+                        ["step"] = 0.05, ["placeholder"] = "0.0 - 1.0",
+                    },
+                    new JsonObject
+                    {
+                        ["key"] = "engine", ["group"] = "device", ["type"] = "enum",
+                        ["default"] = null, ["reloadRequired"] = true,
+                        ["values"] = new JsonArray("paddle", "onnxruntime"),
+                    },
+                    new JsonObject
+                    {
+                        // Các trường tùy chọn thiếu hẳn → rỗng/null, không ném.
+                        ["key"] = "mkldnn_cache_capacity", ["group"] = "device", ["type"] = "int",
+                        ["default"] = 10, ["reloadRequired"] = true,
+                    }),
+            }
+            : null;
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        IReadOnlyList<OcrParamSpec> schema = await controller.GetOcrConfigSchemaAsync(CancellationToken.None);
+
+        (string Method, JsonNode? Params) call = Assert.Single(peer.Calls);
+        Assert.Equal("ocr.config.schema", call.Method);
+        Assert.Null(call.Params);
+
+        Assert.Equal(3, schema.Count);
+        OcrParamSpec det = schema[0];
+        Assert.Equal("text_det_thresh", det.Key);
+        Assert.Equal("det", det.Group);
+        Assert.Equal("float", det.Type);
+        Assert.Equal(0.3, det.Default!.GetValue<double>());
+        Assert.False(det.ReloadRequired);
+        Assert.Empty(det.Values);
+        Assert.Equal(0.0, det.Min);
+        Assert.Equal(1.0, det.Max);
+        Assert.Equal(0.05, det.Step);
+        Assert.Equal("0.0 - 1.0", det.Placeholder);
+
+        OcrParamSpec engine = schema[1];
+        Assert.Null(engine.Default);
+        Assert.True(engine.ReloadRequired);
+        Assert.Equal(["paddle", "onnxruntime"], engine.Values);
+        Assert.Null(engine.Min);
+        Assert.Null(engine.Max);
+        Assert.Null(engine.Step);
+        Assert.Null(engine.Placeholder);
+
+        OcrParamSpec minimal = schema[2];
+        Assert.Equal(10, minimal.Default!.GetValue<int>());
+        Assert.Empty(minimal.Values);
+        Assert.Null(minimal.Min);
+        Assert.Null(minimal.Max);
+        Assert.Null(minimal.Step);
+        Assert.Null(minimal.Placeholder);
+    }
+
+    [Fact]
+    public async Task OcrConfigSchema_PropagatesRpcError()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        peer.Reply = _ => throw new RpcException(
+            -32603, "sidecar not available (python/venv missing or spawn failed).");
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        RpcException ex = await Assert.ThrowsAsync<RpcException>(
+            () => controller.GetOcrConfigSchemaAsync(CancellationToken.None));
+
+        Assert.Equal(-32603, ex.Code);
+        Assert.Equal("sidecar not available (python/venv missing or spawn failed).", ex.Message);
+    }
+
+    [Fact]
+    public async Task SetOcrConfig_SendsClonedValuesTwice_AndParsesResult()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        peer.Reply = method => method == "ocr.config.set"
+            ? new JsonObject
+            {
+                ["live"] = new JsonArray("text_det_thresh"),
+                ["deferred"] = new JsonArray("cpu_threads"),
+                ["reloadRequired"] = true,
+            }
+            : null;
+        PipelineController controller = CreateController(peer, new OverlayState());
+        var values = new Dictionary<string, JsonNode?>
+        {
+            ["text_det_thresh"] = 0.35,
+            ["cpu_threads"] = 4,
+        };
+
+        OcrConfigSetResult first = await controller.SetOcrConfigAsync(values, CancellationToken.None);
+        // Lần hai với CÙNG dictionary: nếu controller gắn thẳng node của caller vào params,
+        // lần hai sẽ ném "The node already has a parent" — clone ở biên wire là bắt buộc.
+        OcrConfigSetResult second = await controller.SetOcrConfigAsync(values, CancellationToken.None);
+
+        Assert.Equal(["text_det_thresh"], first.Live);
+        Assert.Equal(["cpu_threads"], first.Deferred);
+        Assert.True(first.ReloadRequired);
+        Assert.Equal(["text_det_thresh"], second.Live);
+
+        Assert.Equal(2, peer.Calls.Count);
+        foreach ((string method, JsonNode? @params) in peer.Calls)
+        {
+            Assert.Equal("ocr.config.set", method);
+            JsonObject sent = @params!.AsObject();
+            JsonObject sentParams = sent["params"]!.AsObject();
+            Assert.Equal(0.35, sentParams["text_det_thresh"]!.GetValue<double>());
+            Assert.Equal(4, sentParams["cpu_threads"]!.GetValue<int>());
+            Assert.Null(sent["deferReload"]); // Core tự ép theo IsRunning — App không gửi
+        }
+        // Node của caller vẫn không có parent: settings dùng lại được ở lần set sau.
+        Assert.Null(values["text_det_thresh"]!.Parent);
+        Assert.Null(values["cpu_threads"]!.Parent);
+    }
+
+    [Fact]
+    public async Task SetOcrConfig_EmptyMap_SendsEmptyParamsObject()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        OcrConfigSetResult result = await controller.SetOcrConfigAsync(
+            new Dictionary<string, JsonNode?>(), CancellationToken.None);
+
+        JsonObject sent = Assert.Single(peer.Calls).Params!.AsObject();
+        Assert.Empty(sent["params"]!.AsObject()); // {} = khôi phục mọi mặc định (C12)
+        Assert.Null(sent["deferReload"]);
+        Assert.Empty(result.Live);
+        Assert.Empty(result.Deferred);
+        Assert.False(result.ReloadRequired);
     }
 
     [Fact]

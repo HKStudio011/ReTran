@@ -33,6 +33,9 @@ public class AppSettingsServiceTests : IDisposable
         Assert.Null(settings.ApiKey);
         Assert.Equal("PP-OCRv6_small_det", settings.OcrDet);
         Assert.Equal("PP-OCRv6_small_rec", settings.OcrRec);
+        Assert.Null(settings.OcrEngine);
+        Assert.Equal(3, settings.OcrFps);
+        Assert.Equal(10, settings.CaptureFps);
     }
 
     [Fact]
@@ -92,5 +95,46 @@ public class AppSettingsServiceTests : IDisposable
         service.Save(saved);
 
         Assert.Equal(saved, service.Load());
+    }
+
+    [Fact]
+    public void OcrEngine_RoundTrips_AndUnknownKeysSurviveLoad()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"retran-settings-{Guid.NewGuid():N}.json");
+        try
+        {
+            File.WriteAllText(path, """
+                {"provider":"google","src":"auto","dst":"vi",
+                 "ocrEngine":{"text_det_thresh":0.35,"bogus":{"x":1}},"ocrFps":5,"captureFps":12}
+                """);
+            var svc = new AppSettingsService(path);
+            AppSettings loaded = svc.Load();
+            Assert.Equal(0.35, loaded.OcrEngine!["text_det_thresh"]!.GetValue<double>());
+            Assert.NotNull(loaded.OcrEngine!["bogus"]);   // App giữ nguyên; Core lọc khi start
+            Assert.Equal(5, loaded.OcrFps);
+            Assert.Equal(12, loaded.CaptureFps);
+            svc.Save(loaded);
+            AppSettings again = svc.Load();
+            Assert.Equal(0.35, again.OcrEngine!["text_det_thresh"]!.GetValue<double>());
+            Assert.NotNull(again.OcrEngine!["bogus"]);    // key lạ cũng sống qua được save/load
+            Assert.Equal(5, again.OcrFps);
+            Assert.Equal(12, again.CaptureFps);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void OcrEngine_Absent_MeansDefaults()
+    {
+        // File cũ không có ocrEngine/ocrFps/captureFps -> null / 3 / 10.
+        Directory.CreateDirectory(_dir); // Save() would create it; a hand-written file needs the dir first.
+        File.WriteAllText(_path, """{"provider":"google","src":"auto","dst":"vi"}""");
+        var service = new AppSettingsService(_path);
+
+        AppSettings settings = service.Load();
+
+        Assert.Null(settings.OcrEngine);
+        Assert.Equal(3, settings.OcrFps);
+        Assert.Equal(10, settings.CaptureFps);
     }
 }

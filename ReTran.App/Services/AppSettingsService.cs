@@ -1,14 +1,15 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace ReTran_App.Services;
 
 /// <summary>
 /// Translation settings persisted in <c>settings.json</c>: provider, language pair and an
-/// optional API key for providers that need one, plus game-overlay display options and the
-/// OCR model pair requested on start.
+/// optional API key for providers that need one, plus game-overlay display options, the OCR
+/// model pair and engine parameter overrides requested on start, and the pipeline rhythm.
 /// Cài đặt dịch thuật lưu trong <c>settings.json</c>: nhà cung cấp, cặp ngôn ngữ và API key tùy
-/// chọn cho các nhà cung cấp cần key, kèm tùy chọn hiển thị overlay trên game và cặp model OCR
-/// yêu cầu khi start.
+/// chọn cho các nhà cung cấp cần key, kèm tùy chọn hiển thị overlay trên game, cặp model OCR,
+/// các tham số engine ghi đè yêu cầu khi start, và nhịp pipeline.
 /// </summary>
 /// <param name="Provider">Provider name, e.g. <c>google</c>. Tên nhà cung cấp, ví dụ <c>google</c>.</param>
 /// <param name="Src">Source language code, or <c>auto</c>. Mã ngôn ngữ nguồn, hoặc <c>auto</c>.</param>
@@ -20,6 +21,16 @@ namespace ReTran_App.Services;
 /// <param name="OverlayFontScale">Font size multiplier for overlay text (0.85, 1.0 or 1.25). Hệ số cỡ chữ overlay (0.85, 1.0 hoặc 1.25).</param>
 /// <param name="OcrDet">OCR detection model name sent to Core on <c>core.start</c>. Tên model det OCR gửi cho Core khi <c>core.start</c>.</param>
 /// <param name="OcrRec">OCR recognition model name sent to Core on <c>core.start</c>. Tên model rec OCR gửi cho Core khi <c>core.start</c>.</param>
+/// <param name="OcrEngine">
+/// OCR engine parameter overrides keyed by PaddleOCR keyword, forwarded verbatim on
+/// <c>core.start</c>; Core drops keys outside the sidecar schema with a warning.
+/// <see langword="null"/> means no overrides — the sidecar keeps its current configuration.
+/// Các tham số engine OCR ghi đè, khóa theo từ khóa PaddleOCR, gửi nguyên trạng trong
+/// <c>core.start</c>; Core bỏ các khóa ngoài schema sidecar kèm cảnh báo.
+/// <see langword="null"/> nghĩa là không ghi đè — sidecar giữ nguyên cấu hình hiện tại.
+/// </param>
+/// <param name="OcrFps">OCR rhythm in frames per second (1..60) sent on <c>core.start</c>. Nhịp OCR (khung/giây, 1..60) gửi khi <c>core.start</c>.</param>
+/// <param name="CaptureFps">Capture rhythm in frames per second (1..60) sent on <c>core.start</c>. Nhịp capture (khung/giây, 1..60) gửi khi <c>core.start</c>.</param>
 public sealed record AppSettings(
     string Provider, string Src, string Dst, string? ApiKey,
     bool OverlayOnGame = false,
@@ -27,7 +38,10 @@ public sealed record AppSettings(
     string OverlayCorner = "bl",
     double OverlayFontScale = 1.0,
     string OcrDet = "PP-OCRv6_small_det",
-    string OcrRec = "PP-OCRv6_small_rec")
+    string OcrRec = "PP-OCRv6_small_rec",
+    Dictionary<string, JsonNode?>? OcrEngine = null,
+    int OcrFps = 3,
+    int CaptureFps = 10)
 {
     /// <summary>
     /// Factory default: Google Translate, auto source, Vietnamese target, no API key.
