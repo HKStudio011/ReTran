@@ -290,12 +290,10 @@ public sealed class PipelineController
     }
 
     /// <summary>
-    /// Sends <c>core.set_font_scale</c> so the preview annotation uses the new size
-    /// immediately, without restarting the session. The setting is also persisted by the overlay
-    /// service and sent again in the next <c>core.start</c>.
-    /// Gửi <c>core.set_font_scale</c> để phần ghi chú preview dùng cỡ mới ngay, không cần
-    /// khởi động lại phiên. Cài đặt cũng được overlay service lưu lại và gửi kèm <c>core.start</c>
-    /// lần sau.
+    /// Sends <c>core.set_font_scale</c> so the current session's preview annotation uses the new
+    /// size immediately, without restarting the session.
+    /// Gửi <c>core.set_font_scale</c> để phần ghi chú preview của phiên hiện tại dùng cỡ mới
+    /// ngay, không cần khởi động lại phiên.
     /// </summary>
     /// <param name="fontScale">Font multiplier in (0, 4]. Hệ số cỡ chữ trong (0, 4].</param>
     /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
@@ -606,7 +604,7 @@ public sealed class PipelineController
     /// </summary>
     /// <param name="overrides">Persisted param key → JSON value map. Map khóa tham số → giá trị JSON đã lưu.</param>
     /// <returns>The params object, or <see langword="null"/> when nothing should be sent. Object params, hoặc <see langword="null"/> khi không nên gửi gì.</returns>
-    private static JsonObject? BuildOcrParams(Dictionary<string, JsonNode?> overrides)
+    internal static JsonObject? BuildOcrParams(Dictionary<string, JsonNode?> overrides)
     {
         if (overrides.Count == 0) return null;
         var o = new JsonObject();

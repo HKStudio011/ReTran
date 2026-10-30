@@ -137,13 +137,41 @@ public class PipelineControllerTests : IDisposable
         Assert.Null(sent["fontScale"]);            // cỡ chữ thủ công đã bỏ (sau Task 9 vẫn đúng)
 
         await controller.StopAsync(CancellationToken.None);
-        // Lần hai: settings đọc lại từ file (node JsonNode mới) — không được ném node-parent,
-        // và map ghi đè vẫn nguyên giá trị.
+        // Kiểm tra tích hợp start → stop → start: mỗi lần Load() đọc lại file nên node là node
+        // mới — chuỗi lệnh phải đi trọn và map ghi đè vẫn gửi nguyên giá trị.
+        // Bảo đảm "cùng node dùng lại không ném node-parent" nằm ở test
+        // BuildOcrParams_TwiceWithSameDictionary_ClonesAndKeepsCallerNodesUnparented bên dưới.
         await controller.StartAsync(source, CancellationToken.None);
         Assert.Equal(2, peer.Calls.Count(call => call.Method == "core.start"));
         // "Calls[1]" là core.stop; lần start thứ hai là call cuối cùng mang method core.start.
         JsonObject resent = peer.Calls.Last(call => call.Method == "core.start").Params!.AsObject();
         Assert.Equal(0.35, resent["ocr"]!["params"]!["text_det_thresh"]!.GetValue<double>());
+    }
+
+    [Fact]
+    public void BuildOcrParams_TwiceWithSameDictionary_ClonesAndKeepsCallerNodesUnparented()
+    {
+        var overrides = new Dictionary<string, JsonNode?>
+        {
+            ["text_det_thresh"] = 0.35,
+            ["cpu_threads"] = 4,
+        };
+
+        JsonObject? first = PipelineController.BuildOcrParams(overrides);
+        // Lần hai với CÙNG dictionary: nếu BuildOcrParams gắn thẳng node của caller vào params,
+        // lần hai sẽ ném "The node already has a parent" — đây là bảo đảm node-parent của core.start.
+        JsonObject? second = PipelineController.BuildOcrParams(overrides);
+
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        Assert.Equal(0.35, first!["text_det_thresh"]!.GetValue<double>());
+        Assert.Equal(4, first["cpu_threads"]!.GetValue<int>());
+        Assert.Equal(0.35, second!["text_det_thresh"]!.GetValue<double>());
+        Assert.Equal(4, second["cpu_threads"]!.GetValue<int>());
+        // Node của caller chưa từng bị đổi parent → settings dùng lại được cho lần start sau.
+        Assert.Null(overrides["text_det_thresh"]!.Parent);
+        Assert.Null(overrides["cpu_threads"]!.Parent);
+        Assert.NotSame(overrides["text_det_thresh"], first["text_det_thresh"]);
     }
 
     [Fact]
