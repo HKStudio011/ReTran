@@ -724,21 +724,29 @@
                 break;
             }
             case "json":
-                if (!OcrConfigValidation.TryParseJsonObject(_ocrText.GetValueOrDefault(spec.Key, string.Empty),
-                        out JsonObject? obj, out string? jsonError))
+            {
+                // Ô trống = không set (default null hiển thị trống — ví dụ engine_config).
+                string text = _ocrText.GetValueOrDefault(spec.Key, string.Empty);
+                if (string.IsNullOrWhiteSpace(text)) return null;
+                if (!OcrConfigValidation.TryParseJsonObject(text, out JsonObject? obj, out string? jsonError))
                 {
                     return jsonError;
                 }
                 value = obj;
                 break;
+            }
             case "shape":
-                if (!OcrConfigValidation.TryParseShape(_ocrText.GetValueOrDefault(spec.Key, string.Empty),
-                        out JsonArray? shape, out string? shapeError))
+            {
+                // Ô trống = không set (default null hiển thị trống — ví dụ text_det_input_shape).
+                string text = _ocrText.GetValueOrDefault(spec.Key, string.Empty);
+                if (string.IsNullOrWhiteSpace(text)) return null;
+                if (!OcrConfigValidation.TryParseShape(text, out JsonArray? shape, out string? shapeError))
                 {
                     return shapeError;
                 }
                 value = shape;
                 break;
+            }
             default:
                 return "type";
         }
