@@ -1,3 +1,6 @@
+@using System.Globalization
+@using System.Text.Json
+@using System.Text.Json.Nodes
 @using ReTran_App.Core
 @using ReTran_App.Services
 @using ReTran_App.Services.Update
@@ -133,6 +136,94 @@
             </tbody>
         </table>
     }
+
+    @* Tham số máy OCR: render động từ schema sidecar (spec §8) — nhãn/hint/tip i18n theo key. *@
+    @if (_ocrSchema is null)
+    {
+        <p class="rt-hint" style="margin-top: 12px;">@(_ocrSchemaFailed ? L["deck.ocr.params.loadFailed"] : L["deck.ocr.loading"])</p>
+        @if (_ocrSchemaFailed)
+        {
+            <button type="button" class="rt-btn rt-mini" style="margin-top: 6px;" disabled="@_ocrParamsBusy" @onclick="ReloadOcrSchemaAsync">@(L["deck.ocr.refresh"])</button>
+        }
+    }
+    else
+    {
+        <h4 class="rt-hint" style="margin: 12px 0 6px;">@(L["deck.ocr.params.title"])</h4>
+        @foreach (IGrouping<string, OcrParamSpec> group in _ocrSchema.GroupBy(p => p.Group))
+        {
+            <details open="@(group.Key is not ("device" or "models"))"
+                     style="border: 1px solid var(--rt-line); border-radius: var(--rt-r2); padding: 8px 10px; margin-bottom: 8px;">
+                <summary style="cursor: pointer; font-size: 11.5px; color: var(--rt-dim); letter-spacing: .02em;">@(L["ocr.group." + group.Key])</summary>
+                <div style="margin-top: 10px;">
+                    @foreach (OcrParamSpec p in group)
+                    {
+                        string label = L["ocr.param." + p.Key + ".label"];
+                        <div class="rt-srow" title="@(L["ocr.param." + p.Key + ".tip"])">
+                            <span>@label</span>
+                            @if (p.Type == "bool")
+                            {
+                                <input type="checkbox" @bind="_ocrBool[p.Key]" aria-label="@label" />
+                            }
+                            else if (p.Type == "enum")
+                            {
+                                <div class="rt-select">
+                                    <select @bind="_ocrText[p.Key]" aria-label="@label">
+                                        @if (p.Default is null)
+                                        {
+                                            <option value="">@(L["settings.opt.auto"])</option>
+                                        }
+                                        @foreach (string option in p.Values)
+                                        {
+                                            <option value="@option">@option</option>
+                                        }
+                                    </select>
+                                    <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+                                </div>
+                            }
+                            else if (p.Type is "int" or "float")
+                            {
+                                <input type="number" class="rt-input rt-mono"
+                                       min="@FormatBound(p.Min)" max="@FormatBound(p.Max)" step="@FormatBound(p.Step)"
+                                       placeholder="@OcrPlaceholder(p)" @bind="_ocrText[p.Key]" aria-label="@label" />
+                            }
+                            else
+                            {
+                                <input type="text" class="rt-input" placeholder="@OcrPlaceholder(p)"
+                                       @bind="_ocrText[p.Key]" aria-label="@label" />
+                            }
+                            <p class="rt-hint">@(L["ocr.param." + p.Key + ".hint"])</p>
+                        </div>
+                    }
+                </div>
+            </details>
+        }
+        @* Nhịp OCR: 2 tham số pipeline (không thuộc schema sidecar), chỉ áp dụng ở core.start kế tiếp. *@
+        <details open="true"
+                 style="border: 1px solid var(--rt-line); border-radius: var(--rt-r2); padding: 8px 10px; margin-bottom: 8px;">
+            <summary style="cursor: pointer; font-size: 11.5px; color: var(--rt-dim); letter-spacing: .02em;">@(L["ocr.group.rhythm"])</summary>
+            <div style="margin-top: 10px;">
+                <div class="rt-srow">
+                    <span>@(L["deck.ocr.rhythm.ocrFps"])</span>
+                    <input type="number" class="rt-input rt-mono" min="1" max="60" step="1"
+                           aria-label="@(L["deck.ocr.rhythm.ocrFps"])" @bind="_ocrFpsText" />
+                </div>
+                <div class="rt-srow">
+                    <span>@(L["deck.ocr.rhythm.captureFps"])</span>
+                    <input type="number" class="rt-input rt-mono" min="1" max="60" step="1"
+                           aria-label="@(L["deck.ocr.rhythm.captureFps"])" @bind="_captureFpsText" />
+                </div>
+                <p class="rt-hint">@(L["deck.ocr.rhythm.note"])</p>
+            </div>
+        </details>
+        <div class="rt-field-row" style="flex-wrap: wrap; gap: 10px; margin-top: 10px;">
+            <button type="button" class="rt-btn rt-btn-primary rt-mini" disabled="@_ocrParamsBusy" @onclick="SaveOcrParamsAsync">@(L["deck.ocr.params.save"])</button>
+            <button type="button" class="rt-btn rt-mini" disabled="@_ocrParamsBusy" @onclick="RestoreOcrParamsAsync">@(L["deck.ocr.params.restore"])</button>
+            @if (_ocrStatusText.Length > 0)
+            {
+                <span class="rt-hint" style="@(_ocrStatusError ? "color: var(--rt-danger)" : "")">@_ocrStatusText</span>
+            }
+        </div>
+    }
 </section>
 
 <section class="rt-sect">
@@ -222,6 +313,19 @@
     private string _ocrDetPick = "PP-OCRv6_small_det";
     private string _ocrRecPick = "PP-OCRv6_small_rec";
 
+    // Tham số máy OCR: schema nạp từ Core (null = đang tải hoặc lỗi); control text/bool theo key.
+    private IReadOnlyList<OcrParamSpec>? _ocrSchema;
+    private bool _ocrSchemaFailed;
+    private bool _ocrParamsBusy;
+    private readonly Dictionary<string, string> _ocrText = new();
+    private readonly Dictionary<string, bool> _ocrBool = new();
+    // Key user đã đặt trong settings.json — nguồn cho control; {} = mọi giá trị về mặc định (C5).
+    private Dictionary<string, JsonNode?> _ocrValues = new();
+    private string _ocrFpsText = "3";
+    private string _captureFpsText = "10";
+    private string _ocrStatusText = string.Empty;
+    private bool _ocrStatusError;
+
     private string StatusText => _statusKind switch
     {
         "saved" => L["settings.status.saved"],
@@ -247,6 +351,7 @@
         L.Changed += OnStateChanged;
         Js.OnWebViewReady += OnStateChanged;
         _ = LoadOcrModelsAsync(); // nạp catalog model từ Core (fire-and-forget như Home)
+        _ = LoadOcrSchemaAsync(); // nạp schema tham số engine từ Core (fire-and-forget)
         base.OnInitialized();
     }
 
@@ -442,6 +547,246 @@
             _ocrBusy = false;
             StateHasChanged();
         }
+    }
+
+    // Nạp schema tham số engine từ Core; lỗi → thông báo + nút Làm mới, không làm chết trang.
+    private async Task LoadOcrSchemaAsync()
+    {
+        try
+        {
+            IReadOnlyList<OcrParamSpec> schema = await Pipeline.GetOcrConfigSchemaAsync(CancellationToken.None);
+            _ocrSchema = schema;
+            _ocrSchemaFailed = false;
+            ApplySettingsToOcrState();
+        }
+        catch (Exception)
+        {
+            // Core/sidecar chưa sẵn sàng — giữ schema cũ (nếu có), bấm Làm mới thử lại.
+            _ocrSchemaFailed = true;
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ReloadOcrSchemaAsync()
+    {
+        if (_ocrParamsBusy) return;
+        _ocrParamsBusy = true;
+        try
+        {
+            await LoadOcrSchemaAsync();
+        }
+        finally
+        {
+            _ocrParamsBusy = false;
+            StateHasChanged();
+        }
+    }
+
+    // Giá trị đã lưu trong settings.json (C9: nguồn duy nhất cho giá trị đang dùng) → control.
+    private void ApplySettingsToOcrState()
+    {
+        AppSettings settings = SettingsStore.Load();
+        _ocrValues = new Dictionary<string, JsonNode?>(settings.OcrEngine ?? new Dictionary<string, JsonNode?>());
+        ApplyOcrValuesToControls();
+        _ocrFpsText = settings.OcrFps.ToString(CultureInfo.InvariantCulture);
+        _captureFpsText = settings.CaptureFps.ToString(CultureInfo.InvariantCulture);
+        SetOcrStatus(string.Empty, isError: false);
+    }
+
+    // Đổ _ocrValues + default schema vào control — không đọc lại file (Restore dùng chung).
+    private void ApplyOcrValuesToControls()
+    {
+        if (_ocrSchema is null) return;
+        _ocrText.Clear();
+        _ocrBool.Clear();
+        foreach (OcrParamSpec spec in _ocrSchema)
+        {
+            JsonNode? value = _ocrValues.TryGetValue(spec.Key, out JsonNode? stored) && stored is not null
+                ? stored
+                : spec.Default;
+            if (spec.Type == "bool")
+            {
+                _ocrBool[spec.Key] = ReadBoolNode(value) ?? false;
+            }
+            else
+            {
+                _ocrText[spec.Key] = FormatOcrValue(spec, value);
+            }
+        }
+    }
+
+    // Lưu cả khối: validate → ocr.config.set → chỉ ghi settings.json khi set thành công (C14).
+    private async Task SaveOcrParamsAsync()
+    {
+        if (_ocrParamsBusy || _ocrSchema is null) return;
+        _ocrParamsBusy = true;
+        try
+        {
+            var map = new Dictionary<string, JsonNode?>();
+            foreach (OcrParamSpec spec in _ocrSchema)
+            {
+                string? error = BuildOcrWireValue(spec, out JsonNode? value);
+                if (error is not null)
+                {
+                    SetOcrStatus(L.Fmt("deck.ocr.params.invalid", L["ocr.param." + spec.Key + ".label"],
+                        L["ocr.param.error." + error]), isError: true);
+                    return;
+                }
+                // Key vắng = mặc định (replace, C12): bỏ null/giá trị trùng default để không ghim (C5).
+                if (!IsOcrOverride(spec, value)) continue;
+                map[spec.Key] = value;
+            }
+            if (!TryParseOcrFps(_ocrFpsText, out int ocrFps))
+            {
+                SetOcrStatus(L.Fmt("deck.ocr.params.invalid", L["deck.ocr.rhythm.ocrFps"],
+                    L["ocr.param.error.range"]), isError: true);
+                return;
+            }
+            if (!TryParseOcrFps(_captureFpsText, out int captureFps))
+            {
+                SetOcrStatus(L.Fmt("deck.ocr.params.invalid", L["deck.ocr.rhythm.captureFps"],
+                    L["ocr.param.error.range"]), isError: true);
+                return;
+            }
+
+            OcrConfigSetResult result = await Pipeline.SetOcrConfigAsync(map, CancellationToken.None);
+            SettingsStore.Save(SettingsStore.Load() with
+            {
+                OcrEngine = map,
+                OcrFps = ocrFps,
+                CaptureFps = captureFps,
+            });
+            _ocrValues = new Dictionary<string, JsonNode?>(map);
+            SetOcrStatus(L[result.Deferred.Count > 0 ? "deck.ocr.params.deferred" : "deck.ocr.params.applied"],
+                isError: false);
+            Toast.Show(_ocrStatusText);
+        }
+        catch (Exception)
+        {
+            // Set lỗi (sidecar từ chối/không sẵn sàng) → giữ nguyên file để lần Start sau không
+            // dính giá trị bị từ chối (C14).
+            SetOcrStatus(L["deck.ocr.params.saveFailed"], isError: true);
+        }
+        finally
+        {
+            _ocrParamsBusy = false;
+            StateHasChanged();
+        }
+    }
+
+    // Khôi phục mặc định: control về default schema rồi lưu như thường — map rỗng = sidecar reset (C12).
+    private async Task RestoreOcrParamsAsync()
+    {
+        if (_ocrParamsBusy) return;
+        _ocrValues.Clear();
+        ApplyOcrValuesToControls();
+        await SaveOcrParamsAsync();
+    }
+
+    // Dựng giá trị wire từ control của một dòng; trả mã lỗi (ocr.param.error.*) khi ô nhập sai,
+    // null khi dựng được — value null nghĩa là "không set" (key vắng = mặc định).
+    private string? BuildOcrWireValue(OcrParamSpec spec, out JsonNode? value)
+    {
+        value = null;
+        switch (spec.Type)
+        {
+            case "bool":
+                value = JsonValue.Create(_ocrBool.GetValueOrDefault(spec.Key));
+                break;
+            case "enum":
+            case "string":
+            {
+                string text = _ocrText.GetValueOrDefault(spec.Key, string.Empty);
+                if (string.IsNullOrWhiteSpace(text)) return null;
+                value = JsonValue.Create(text);
+                break;
+            }
+            case "int":
+            {
+                string text = _ocrText.GetValueOrDefault(spec.Key, string.Empty);
+                if (string.IsNullOrWhiteSpace(text)) return null;
+                if (!int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out int number))
+                {
+                    return "type";
+                }
+                value = JsonValue.Create(number);
+                break;
+            }
+            case "float":
+            {
+                string text = _ocrText.GetValueOrDefault(spec.Key, string.Empty);
+                if (string.IsNullOrWhiteSpace(text)) return null;
+                if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double number))
+                {
+                    return "type";
+                }
+                value = JsonValue.Create(number);
+                break;
+            }
+            case "json":
+                if (!OcrConfigValidation.TryParseJsonObject(_ocrText.GetValueOrDefault(spec.Key, string.Empty),
+                        out JsonObject? obj, out string? jsonError))
+                {
+                    return jsonError;
+                }
+                value = obj;
+                break;
+            case "shape":
+                if (!OcrConfigValidation.TryParseShape(_ocrText.GetValueOrDefault(spec.Key, string.Empty),
+                        out JsonArray? shape, out string? shapeError))
+                {
+                    return shapeError;
+                }
+                value = shape;
+                break;
+            default:
+                return "type";
+        }
+        return value is null ? null : OcrConfigValidation.Validate(spec, value);
+    }
+
+    // Có gửi key lên wire không: null (không set) và giá trị trùng default schema bị bỏ (C5);
+    // riêng bool default null (enable_hpi) + bỏ tick cũng bị bỏ vì null = engine tự quyết.
+    private static bool IsOcrOverride(OcrParamSpec spec, JsonNode? value)
+    {
+        if (value is null || JsonNode.DeepEquals(value, spec.Default)) return false;
+        return spec.Type != "bool" || spec.Default is not null || value.GetValueKind() != JsonValueKind.False;
+    }
+
+    private void SetOcrStatus(string text, bool isError)
+    {
+        _ocrStatusText = text;
+        _ocrStatusError = isError;
+    }
+
+    private static bool TryParseOcrFps(string text, out int value) =>
+        int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out value)
+        && value is >= 1 and <= 60;
+
+    private static bool? ReadBoolNode(JsonNode? node) =>
+        node is JsonValue value && value.GetValueKind() is JsonValueKind.True or JsonValueKind.False
+            && value.TryGetValue(out bool flag)
+                ? flag
+                : null;
+
+    private static string? FormatBound(double? value) => value?.ToString(CultureInfo.InvariantCulture);
+
+    private static string OcrPlaceholder(OcrParamSpec spec) =>
+        spec.Placeholder ?? OcrConfigValidation.FormatDefault(spec) ?? string.Empty;
+
+    // Hiển thị giá trị JSON trong ô chữ: shape → N,C,H,W, chuỗi → trần, còn lại → JSON gọn.
+    private static string FormatOcrValue(OcrParamSpec spec, JsonNode? value)
+    {
+        if (value is null) return string.Empty;
+        if (spec.Type == "shape" && value is JsonArray array)
+        {
+            return string.Join(",", array.Select(e => e?.ToJsonString() ?? string.Empty));
+        }
+        if (value is JsonValue json && json.GetValueKind() == JsonValueKind.String)
+        {
+            return json.GetValue<string>();
+        }
+        return value.ToJsonString();
     }
 
     private async Task SetThemeAsync(string theme)
