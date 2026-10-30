@@ -125,7 +125,7 @@ public class OverlayWindowServiceTests : IDisposable
         Assert.Equal((0, 0, 1280, 720), Assert.Single(_host.Shows));
         (IReadOnlyList<DrawBox> Boxes, double Scale) draw = Assert.Single(_host.Draws);
         DrawBox box = Assert.Single(draw.Boxes);
-        Assert.Equal(new DrawBox(640, 360, 256, 72, "B", false), box);
+        Assert.Equal(new DrawBox(640, 360, 256, 72, "B"), box);
     }
 
     [Fact]
@@ -210,23 +210,6 @@ public class OverlayWindowServiceTests : IDisposable
         _peer.RaiseExited(0);
 
         Assert.True(_host.HideCalls > hidesBefore);
-    }
-
-    [Fact]
-    public async Task ApplyOptions_PersistsAndAppliesMode()
-    {
-        OverlayWindowService service = CreateService();
-        service.SetEnabled(true);
-        _tracker.Rect = (0, 0, 1280, 720);
-        await StartPipelineAsync();
-        service.TickAnchor();
-
-        service.ApplyOptions(mode: "panel");
-
-        Assert.Contains("\"overlayMode\": \"panel\"", File.ReadAllText(_settingsPath));
-        _overlay.Publish(Frame((0.5, 0.5, 0.2, 0.1, "A", "B")));
-        (IReadOnlyList<DrawBox> Boxes, double Scale) draw = Assert.Single(_host.Draws);
-        Assert.All(draw.Boxes, b => Assert.True(b.IsPanelLine));
     }
 
     private sealed class FakeHost : IOverlayHost

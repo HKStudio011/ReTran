@@ -16,8 +16,6 @@ namespace ReTran_App.Services;
 /// <param name="Dst">Target language code. Mã ngôn ngữ đích.</param>
 /// <param name="ApiKey">API key for providers that require one; <see langword="null"/> otherwise. API key cho nhà cung cấp yêu cầu; ngược lại <see langword="null"/>.</param>
 /// <param name="OverlayOnGame">Whether the local overlay window over the capture source is enabled. Có bật cửa sổ overlay local đè lên nguồn capture hay không.</param>
-/// <param name="OverlayMode">Overlay display mode: <c>"subtitle"</c> (over original text) or <c>"panel"</c> (corner list). Chế độ hiển thị overlay: <c>"subtitle"</c> hoặc <c>"panel"</c>.</param>
-/// <param name="OverlayCorner">Panel corner when mode is <c>"panel"</c>: <c>"tl"</c>, <c>"tr"</c>, <c>"bl"</c> or <c>"br"</c>. Góc bảng khi chế độ <c>"panel"</c>: <c>"tl"</c>, <c>"tr"</c>, <c>"bl"</c> hoặc <c>"br"</c>.</param>
 /// <param name="OverlayFontScale">Font size multiplier for overlay text (0.85, 1.0 or 1.25). Hệ số cỡ chữ overlay (0.85, 1.0 hoặc 1.25).</param>
 /// <param name="OcrDet">OCR detection model name sent to Core on <c>core.start</c>. Tên model det OCR gửi cho Core khi <c>core.start</c>.</param>
 /// <param name="OcrRec">OCR recognition model name sent to Core on <c>core.start</c>. Tên model rec OCR gửi cho Core khi <c>core.start</c>.</param>
@@ -34,8 +32,6 @@ namespace ReTran_App.Services;
 public sealed record AppSettings(
     string Provider, string Src, string Dst, string? ApiKey,
     bool OverlayOnGame = false,
-    string OverlayMode = "subtitle",
-    string OverlayCorner = "bl",
     double OverlayFontScale = 1.0,
     string OcrDet = "PP-OCRv6_small_det",
     string OcrRec = "PP-OCRv6_small_rec",

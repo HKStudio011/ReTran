@@ -201,33 +201,6 @@
                     <p class="rt-sec-sub">@(L["deck.overlay.sub"])</p>
 
                     <div class="rt-field">
-                        <span class="rt-lbl">@(L["deck.overlay.mode"])</span>
-                        <div class="rt-select">
-                            <select @bind="_overlayMode" @bind:after="ApplyOverlayMode" aria-label="@(L["deck.overlay.mode"])">
-                                <option value="subtitle">@(L["overlay.mode.subtitle"])</option>
-                                <option value="panel">@(L["overlay.mode.panel"])</option>
-                            </select>
-                            <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
-                        </div>
-                    </div>
-
-                    @if (_overlayMode == "panel")
-                    {
-                        <div class="rt-field">
-                            <span class="rt-lbl">@(L["overlay.corner.label"])</span>
-                            <div class="rt-select">
-                                <select @bind="_overlayCorner" @bind:after="ApplyOverlayCorner" aria-label="@(L["overlay.corner.label"])">
-                                    <option value="tl">@(L["overlay.corner.tl"])</option>
-                                    <option value="tr">@(L["overlay.corner.tr"])</option>
-                                    <option value="bl">@(L["overlay.corner.bl"])</option>
-                                    <option value="br">@(L["overlay.corner.br"])</option>
-                                </select>
-                                <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
-                            </div>
-                        </div>
-                    }
-
-                    <div class="rt-field">
                         <span class="rt-lbl">@(L["deck.overlay.font"])</span>
                         <div class="rt-seg" role="group" aria-label="@(L["deck.overlay.font"])">
                             <button type="button" aria-pressed="@Pressed(_overlayFontScale == 0.85)" @onclick='() => SetOverlayFont(0.85)'>@(L["overlay.font.small"])</button>
@@ -278,8 +251,6 @@
     private bool _showOcrNotice;                // first-run: chưa có model OCR nào cài
     private bool _overlayOn;
     private bool _overlayFeedFailed;          // feed OBS không bind được cổng nào — card báo lỗi, không hiện URL chết
-    private string _overlayMode = "subtitle";   // "subtitle" | "panel"
-    private string _overlayCorner = "bl";       // "tl" | "tr" | "bl" | "br"
     private double _overlayFontScale = 1.0;
     private bool _busy;
 
@@ -410,8 +381,6 @@
         _provider = current.Provider;
         // File ghi tay có thể chứa dst ngoài danh sách — thêm vào để select không bị trống.
         if (Array.IndexOf(_dstOptions, _quickDst) < 0) _dstOptions = [_quickDst, .. DefaultDstOptions];
-        _overlayMode = current.OverlayMode;
-        _overlayCorner = current.OverlayCorner;
         _overlayFontScale = current.OverlayFontScale;
     }
 
@@ -634,10 +603,6 @@
         _overlayOn = !_overlayOn;
         OverlaySvc.SetEnabled(_overlayOn);
     }
-
-    private void ApplyOverlayMode() => OverlaySvc.ApplyOptions(mode: _overlayMode);
-
-    private void ApplyOverlayCorner() => OverlaySvc.ApplyOptions(corner: _overlayCorner);
 
     private async Task SetOverlayFont(double scale)
     {

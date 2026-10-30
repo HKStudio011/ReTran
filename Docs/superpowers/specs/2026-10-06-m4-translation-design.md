@@ -1,3 +1,5 @@
+> **Ghi chú (superseded):** Phần panel mode (bảng dịch ở góc) và cỡ chữ thủ công của spec này đã bị thay thế bởi spec `2026-10-26-ocr-engine-settings-overlay-simplify-design.md` §9 — overlay chỉ còn subtitle, cỡ chữ tự scale theo box.
+
 # Spec: M4 — Translation (cache lookup + dịch + UI cài đặt)
 
 - **Ngày:** 2026-10-06

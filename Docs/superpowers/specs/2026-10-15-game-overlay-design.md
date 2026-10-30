@@ -1,3 +1,5 @@
+> **Ghi chú (superseded):** Panel mode (bảng dịch ở góc) và cỡ chữ thủ công của spec này đã bị thay thế bởi spec `2026-10-26-ocr-engine-settings-overlay-simplify-design.md` §9 — overlay chỉ còn subtitle, cỡ chữ tự scale theo box.
+
 # Spec: Game Overlay — cửa sổ overlay local đè lên game (always-on-top, click-through)
 
 - **Ngày:** 2026-10-15
@@ -79,9 +81,9 @@ ReTran.App/MauiProgram.cs                    # DI: IOverlayHost → Win32Overlay
 
 - `CreateWindowEx(WS_POPUP | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)` — click-through (không bắt chuột, không tranh focus), luôn trên cùng, không hiện taskbar/Alt-Tab.
 - Render: bitmap 32-bit BGRA (per-pixel alpha) đúng kích thước client → `UpdateLayeredWindow`. Kỹ thuật chuẩn cho overlay trong suốt; window tự nó không draw gì khác.
-- GDI+ vẽ theo danh sách vùng của `OverlayLayout`:
-  - **subtitle:** mỗi box — rounded rect nền `rgba(0,0,0,0.45)`, viền 3 px `#22c55e` (đồng nhất với overlay OBS hiện có), chữ trắng word-wrap trong width box; cỡ font tỷ lệ theo chiều cao khung hình × FontScale.
-  - **panel:** cột các dòng dịch docked vào góc đã chọn; mỗi dòng một rounded rect như trên; tối đa ~10 dòng; bỏ dòng rỗng và trùng liên tiếp.
+- GDI+ vẽ theo danh sách vùng của `OverlayLayout`, theo đúng style mockup `Docs/mockups/retran-ui-v2.html`:
+  - **subtitle:** mỗi box — tick teal `#4FD8C4` ở 4 góc (nhánh ~7 px, nét ~1,6 px) + pill tối `rgba(5,12,14,.86)` bo góc 3 px phủ kín lòng box (inset 4 px trái/trên/dưới, sát mép phải), viền `rgba(239,234,217,.16)`, chữ `#F3EEDD`. Cỡ chữ = `clamp(0.5 × boxH, 12, 40) × FontScale`, thu nhỏ dần (sàn 9 px) đến khi chữ wrap ≤ 2 dòng và vừa chiều cao box; chỉ ellipsis khi box quá nhỏ. Tick/pill scale theo bề rộng viewport so với mockup 1280.
+  - **panel:** cột các dòng dịch docked vào góc đã chọn; mỗi dòng một pill tối inset 2 px, không tick, một dòng + ellipsis; tối đa ~10 dòng; bỏ dòng rỗng và trùng liên tiếp.
 - `IOverlayHost` là seam cho test (fake host ghi lại lệnh); `Win32OverlayHost` là implementation thật — P/Invoke không unit-test, chỉ acceptance tay.
 
 ## 6. OverlayLayout (pure function)

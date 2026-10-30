@@ -26,7 +26,7 @@ public sealed class OverlayWindowService : IDisposable
     private readonly object _gate = new();
 
     private Timer? _timer;
-    private OverlayViewOptions _options;
+    private double _fontScale;
     private (int X, int Y, int Width, int Height)? _anchorRect;
     private DateTime _lastDrawUtc = DateTime.MinValue;
     private bool _enabled;
@@ -66,7 +66,7 @@ public sealed class OverlayWindowService : IDisposable
         _settings = settings;
         _log = log;
         _redrawInterval = redrawInterval ?? DefaultRedrawInterval;
-        _options = ToOptions(_settings.Load());
+        _fontScale = LoadFontScale(_settings.Load());
 
         _overlay.Changed += OnFrameChanged;
         _pipeline.PipelineStateChanged += OnPipelineStateChanged;
@@ -112,46 +112,24 @@ public sealed class OverlayWindowService : IDisposable
     }
 
     /// <summary>
-    /// Applies display options (mode, corner, font scale) and persists them; invalid values
-    /// keep the previous option and log a warning. Áp dụng tùy chọn hiển thị (chế độ, góc, hệ
-    /// số cỡ chữ) và lưu chúng; giá trị không hợp lệ giữ option cũ và ghi log warning.
+    /// Applies the overlay font scale and persists it; an invalid value keeps the previous scale
+    /// and logs a warning. Áp dụng hệ số cỡ chữ overlay và lưu lại; giá trị không hợp lệ giữ hệ số
+    /// cũ và ghi log warning.
     /// </summary>
-    /// <param name="mode"><c>"subtitle"</c> or <c>"panel"</c>; <see langword="null"/> keeps the current mode. <c>"subtitle"</c> hoặc <c>"panel"</c>; <see langword="null"/> giữ chế độ hiện tại.</param>
-    /// <param name="corner"><c>"tl"</c>, <c>"tr"</c>, <c>"bl"</c> or <c>"br"</c>; <see langword="null"/> keeps the current corner. <c>"tl"</c>, <c>"tr"</c>, <c>"bl"</c> hoặc <c>"br"</c>; <see langword="null"/> giữ góc hiện tại.</param>
     /// <param name="fontScale">Font multiplier in (0, 4]; <see langword="null"/> keeps the current scale. Hệ số cỡ chữ trong (0, 4]; <see langword="null"/> giữ hệ số hiện tại.</param>
-    public void ApplyOptions(string? mode = null, string? corner = null, double? fontScale = null)
+    public void ApplyOptions(double? fontScale = null)
     {
         lock (_gate)
         {
             if (_disposed) return;
 
-            OverlayMode newMode = _options.Mode;
-            OverlayCorner newCorner = _options.Corner;
-            double newScale = _options.FontScale;
-
-            if (mode is not null)
-            {
-                if (TryParseMode(mode, out OverlayMode parsed)) newMode = parsed;
-                else _log.LogWarning("Ignoring invalid overlay mode {Mode}.", mode);
-            }
-            if (corner is not null)
-            {
-                if (TryParseCorner(corner, out OverlayCorner parsed)) newCorner = parsed;
-                else _log.LogWarning("Ignoring invalid overlay corner {Corner}.", corner);
-            }
             if (fontScale is not null)
             {
-                if (double.IsFinite(fontScale.Value) && fontScale.Value is > 0 and <= 4) newScale = fontScale.Value;
+                if (double.IsFinite(fontScale.Value) && fontScale.Value is > 0 and <= 4) _fontScale = fontScale.Value;
                 else _log.LogWarning("Ignoring invalid overlay font scale {FontScale}.", fontScale);
             }
 
-            _options = new OverlayViewOptions(newMode, newCorner, newScale);
-            Persist(s => s with
-            {
-                OverlayMode = ModeToString(_options.Mode),
-                OverlayCorner = CornerToString(_options.Corner),
-                OverlayFontScale = _options.FontScale,
-            });
+            Persist(s => s with { OverlayFontScale = _fontScale });
         }
     }
 
@@ -216,9 +194,9 @@ public sealed class OverlayWindowService : IDisposable
             if (frame is null) return;
 
             (int X, int Y, int Width, int Height) anchor = _anchorRect.Value;
-            IReadOnlyList<DrawBox> boxes = OverlayLayout.Render(frame, _options, anchor.Width, anchor.Height);
+            IReadOnlyList<DrawBox> boxes = OverlayLayout.Render(frame, anchor.Width, anchor.Height);
             _lastDrawUtc = now;
-            _host.Draw(boxes, _options.FontScale);
+            _host.Draw(boxes, _fontScale);
         }
     }
 
@@ -244,40 +222,6 @@ public sealed class OverlayWindowService : IDisposable
         }
     }
 
-    private static OverlayViewOptions ToOptions(AppSettings s) => new(
-        TryParseMode(s.OverlayMode, out OverlayMode mode) ? mode : OverlayMode.Subtitle,
-        TryParseCorner(s.OverlayCorner, out OverlayCorner corner) ? corner : OverlayCorner.BottomLeft,
-        double.IsFinite(s.OverlayFontScale) && s.OverlayFontScale is > 0 and <= 4 ? s.OverlayFontScale : 1.0);
-
-    private static bool TryParseMode(string value, out OverlayMode mode)
-    {
-        switch (value.Trim().ToLowerInvariant())
-        {
-            case "subtitle": mode = OverlayMode.Subtitle; return true;
-            case "panel": mode = OverlayMode.Panel; return true;
-            default: mode = default; return false;
-        }
-    }
-
-    private static bool TryParseCorner(string value, out OverlayCorner corner)
-    {
-        switch (value.Trim().ToLowerInvariant())
-        {
-            case "tl": corner = OverlayCorner.TopLeft; return true;
-            case "tr": corner = OverlayCorner.TopRight; return true;
-            case "bl": corner = OverlayCorner.BottomLeft; return true;
-            case "br": corner = OverlayCorner.BottomRight; return true;
-            default: corner = default; return false;
-        }
-    }
-
-    private static string ModeToString(OverlayMode mode) => mode == OverlayMode.Panel ? "panel" : "subtitle";
-
-    private static string CornerToString(OverlayCorner corner) => corner switch
-    {
-        OverlayCorner.TopLeft => "tl",
-        OverlayCorner.TopRight => "tr",
-        OverlayCorner.BottomRight => "br",
-        _ => "bl",
-    };
+    private static double LoadFontScale(AppSettings s) =>
+        double.IsFinite(s.OverlayFontScale) && s.OverlayFontScale is > 0 and <= 4 ? s.OverlayFontScale : 1.0;
 }

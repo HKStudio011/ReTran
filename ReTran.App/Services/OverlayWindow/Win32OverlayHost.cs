@@ -210,37 +210,84 @@ public sealed class Win32OverlayHost : IOverlayHost
                 g.SmoothingMode = SD.Drawing2D.SmoothingMode.AntiAlias;
                 g.TextRenderingHint = SD.Text.TextRenderingHint.AntiAlias;
                 g.Clear(SD.Color.Transparent);
-
-                float fontSize = Math.Clamp(width * 0.024f, 14f, 32f) * (float)fontScale;
-                using var font = new SD.Font("Segoe UI", fontSize, SD.FontStyle.Bold, SD.GraphicsUnit.Pixel);
-                using var fill = new SD.SolidBrush(SD.Color.FromArgb(115, 0, 0, 0));
-                using var border = new SD.Pen(SD.Color.FromArgb(255, 34, 197, 94), 3f);
-                using var textBrush = new SD.SolidBrush(SD.Color.White);
-
-                foreach (DrawBox box in boxes)
-                {
-                    var rectF = new SD.RectangleF((float)box.X, (float)box.Y, (float)box.W, (float)box.H);
-                    if (rectF.Width <= 0 || rectF.Height <= 0) continue;
-
-                    using SD.Drawing2D.GraphicsPath path = GetRoundedRect(rectF, 6f);
-                    g.FillPath(fill, path);
-                    g.DrawPath(border, path);
-
-                    SD.RectangleF textRect = SD.RectangleF.Inflate(rectF, -8f, -4f);
-                    if (textRect.Width <= 0 || textRect.Height <= 0) continue;
-
-                    using var fmt = (SD.StringFormat)SD.StringFormat.GenericTypographic.Clone();
-                    fmt.LineAlignment = SD.StringAlignment.Center;
-                    if (box.IsPanelLine)
-                    {
-                        fmt.Trimming = SD.StringTrimming.EllipsisCharacter;
-                        fmt.FormatFlags |= SD.StringFormatFlags.NoWrap;
-                    }
-                    g.DrawString(box.Text, font, textBrush, textRect, fmt);
-                }
+                DrawBoxes(g, boxes, fontScale, width, height);
             }
 
             PushBitmap(bitmap, width, height);
+        }
+    }
+
+    /// <summary>
+    /// Draws the overlay boxes onto an existing graphics surface: teal corner ticks on each
+    /// source box plus a dark rounded pill inside it holding the translation (up to two wrapped
+    /// lines, font size derived from the box height and shrunk until it fits). Exposed internally
+    /// so tests can pixel-check the real drawing path.
+    /// Vẽ các box overlay lên surface đã có: tick teal 4 góc trên box gốc kèm pill bo góc tối
+    /// bên trong chứa bản dịch (tối đa hai dòng wrap, cỡ chữ suy ra từ chiều cao box và thu nhỏ
+    /// đến khi vừa). Mở nội bộ để test kiểm tra pixel của đúng đường vẽ thật.
+    /// </summary>
+    /// <param name="g">Target graphics surface. Surface đồ hoạ đích.</param>
+    /// <param name="boxes">Boxes in viewport pixel coordinates. Các box theo toạ độ pixel viewport.</param>
+    /// <param name="fontScale">User font multiplier. Hệ số cỡ chữ người dùng.</param>
+    /// <param name="viewportWidth">Viewport width in pixels. Chiều rộng viewport (pixel).</param>
+    /// <param name="viewportHeight">Viewport height in pixels. Chiều cao viewport (pixel).</param>
+    internal static void DrawBoxes(SD.Graphics g, IReadOnlyList<DrawBox> boxes, double fontScale,
+        int viewportWidth, int viewportHeight)
+    {
+        float ui = BoxAnnotationStyle.DecorationScale(viewportWidth);
+        using var tickPen = new SD.Pen(BoxAnnotationStyle.TickColor, MathF.Max(1f, 1.6f * ui))
+        {
+            StartCap = SD.Drawing2D.LineCap.Square,
+            EndCap = SD.Drawing2D.LineCap.Square,
+        };
+        using var pillBrush = new SD.SolidBrush(BoxAnnotationStyle.PillFill);
+        using var pillPen = new SD.Pen(BoxAnnotationStyle.PillBorder, MathF.Max(1f, ui));
+        using var textBrush = new SD.SolidBrush(BoxAnnotationStyle.TextColor);
+        using var format = BoxAnnotationStyle.CreateTextFormat();
+        using var pillPath = new SD.Drawing2D.GraphicsPath();
+
+        foreach (DrawBox box in boxes)
+        {
+            var rect = new SD.RectangleF((float)box.X, (float)box.Y, (float)box.W, (float)box.H);
+            if (rect.Width < 1f || rect.Height < 1f) continue;
+
+            BoxAnnotationStyle.DrawTicks(g, tickPen, rect, MathF.Max(3f, 7f * ui));
+
+            string text = box.Text;
+            if (string.IsNullOrWhiteSpace(text)) continue;
+
+            // Pill follows the mockup (4 px inset left/top/bottom, flush right).
+            // Pill theo mockup (inset 4 px trái/trên/dưới, sát mép phải).
+            SD.RectangleF inner = BoxAnnotationStyle.InnerRect(rect);
+            float innerW = inner.Width, innerH = inner.Height;
+            if (innerW < 2f || innerH < 2f) continue;
+
+            BoxAnnotationStyle.TextFit fit = BoxAnnotationStyle.Fit(
+                g, text, innerW, innerH, rect.Height, fontScale, format, maxLines: 2,
+                shrink: true,
+                maxFontSize: BoxAnnotationStyle.MaxFontSize * ui);
+            SD.SizeF block = fit.Block;
+            if (!fit.Fits)
+            {
+                text = BoxAnnotationStyle.TruncateToFit(g, text, fit.Size, innerW, innerH, format, maxLines: 2);
+                block = BoxAnnotationStyle.MeasureBlock(g, text, fit.Size, innerW, format);
+            }
+
+            float padX = BoxAnnotationStyle.PadX(fit.Size);
+            float padY = BoxAnnotationStyle.PadY(fit.Size);
+            float pillW = innerW;
+            float pillH = MathF.Max(innerH, block.Height + 2f * padY); // tiny-box fallback may overflow
+            float pillX = Math.Clamp(inner.X, 0f, MathF.Max(0f, viewportWidth - pillW));
+            float pillY = Math.Clamp(inner.Y, 0f, MathF.Max(0f, viewportHeight - pillH));
+
+            BoxAnnotationStyle.BuildRoundedRect(pillPath, new SD.RectangleF(pillX, pillY, pillW, pillH), 3f * ui);
+            g.FillPath(pillBrush, pillPath);
+            g.DrawPath(pillPen, pillPath);
+            g.DrawString(text, BoxAnnotationStyle.GetFont(fit.Size), textBrush,
+                new SD.RectangleF(pillX + padX, pillY + padY,
+                    MathF.Max(1f, pillW - 2f * padX + 1f),
+                    MathF.Max(1f, pillH - 2f * padY + 1f)),
+                format);
         }
     }
 
@@ -280,25 +327,6 @@ public sealed class Win32OverlayHost : IOverlayHost
             if (memDc != 0) NativeMethods.DeleteDC(memDc);
             NativeMethods.ReleaseDC(IntPtr.Zero, screenDc);
         }
-    }
-
-    private static SD.Drawing2D.GraphicsPath GetRoundedRect(SD.RectangleF rect, float radius)
-    {
-        float d = Math.Min(radius, Math.Min(rect.Width, rect.Height) / 2) * 2;
-        var path = new SD.Drawing2D.GraphicsPath();
-        if (d <= 0)
-        {
-            path.AddRectangle(rect);
-            path.CloseFigure();
-            return path;
-        }
-
-        path.AddArc(rect.X, rect.Y, d, d, 180, 90);
-        path.AddArc(rect.Right - d, rect.Y, d, d, 270, 90);
-        path.AddArc(rect.Right - d, rect.Bottom - d, d, d, 0, 90);
-        path.AddArc(rect.X, rect.Bottom - d, d, d, 90, 90);
-        path.CloseFigure();
-        return path;
     }
 
     // Layered windows paint via UpdateLayeredWindow: never erase the background.
