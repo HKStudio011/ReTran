@@ -20,6 +20,7 @@ public class OverlayWindowServiceTests : IDisposable
     private FakeCorePeer _peer = null!;
     private FakeHost _host = null!;
     private FakeTracker _tracker = null!;
+    private FakeForegroundWatcher _foreground = null!;
     private PipelineController _pipeline = null!;
 
     public OverlayWindowServiceTests()
@@ -61,8 +62,9 @@ public class OverlayWindowServiceTests : IDisposable
             NullLogger<PipelineController>.Instance);
         _host = new FakeHost();
         _tracker = new FakeTracker();
+        _foreground = new FakeForegroundWatcher();
         _serviceInstance = new OverlayWindowService(
-            _overlay, _pipeline, _host, _tracker,
+            _overlay, _pipeline, _host, _tracker, _foreground,
             new AppSettingsService(_settingsPath),
             NullLogger<OverlayWindowService>.Instance,
             redrawInterval);
@@ -71,6 +73,9 @@ public class OverlayWindowServiceTests : IDisposable
 
     private async Task StartPipelineAsync() =>
         await _pipeline.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None);
+
+    private async Task StartWindowPipelineAsync() =>
+        await _pipeline.StartAsync(new SourceSelection(true, 0, "0x1234"), CancellationToken.None);
 
     static OverlayFrame Frame(params (double X, double Y, double W, double H, string Text, string Translated)[] boxes) =>
         new(1920, 1080, DateTime.UtcNow, boxes.Select(b => new OverlayBox(b.X, b.Y, b.W, b.H, b.Text, b.Translated)).ToList());
@@ -88,7 +93,7 @@ public class OverlayWindowServiceTests : IDisposable
     }
 
     [Fact]
-    public void SetEnabled_False_DisposesHostAndPersists()
+    public void SetEnabled_False_HidesHostWithoutDisposingIt()
     {
         OverlayWindowService service = CreateService();
         service.SetEnabled(true);
@@ -96,8 +101,98 @@ public class OverlayWindowServiceTests : IDisposable
         service.SetEnabled(false);
 
         Assert.False(service.IsEnabled);
-        Assert.Equal(1, _host.DisposeCalls);
+        Assert.True(_host.HideCalls >= 1);
+        Assert.Equal(0, _host.DisposeCalls);
         Assert.Contains("\"overlayOnGame\": false", File.ReadAllText(_settingsPath));
+    }
+
+    [Fact]
+    public async Task EnableDisableEnable_ShowsOverlayAgain()
+    {
+        OverlayWindowService service = CreateService();
+        _tracker.Rect = (0, 0, 1280, 720);
+        await StartPipelineAsync();
+
+        service.SetEnabled(true);
+        service.TickAnchor();
+        service.SetEnabled(false);
+        service.SetEnabled(true);
+        service.TickAnchor();
+
+        Assert.Equal(2, _host.Shows.Count);
+    }
+
+    [Fact]
+    public async Task TickAnchor_WindowSourceNotForeground_Hides()
+    {
+        OverlayWindowService service = CreateService();
+        _tracker.Rect = (100, 100, 1280, 720);
+        _tracker.Foreground = false;
+        await StartWindowPipelineAsync();
+
+        service.SetEnabled(true);
+        service.TickAnchor();
+
+        Assert.True(_host.HideCalls >= 1);
+        Assert.Empty(_host.Shows);
+    }
+
+    [Fact]
+    public async Task TickAnchor_WindowRegainsForeground_ShowsAgain()
+    {
+        OverlayWindowService service = CreateService();
+        _tracker.Rect = (100, 100, 1280, 720);
+        _tracker.Foreground = false;
+        await StartWindowPipelineAsync();
+        service.SetEnabled(true);
+        service.TickAnchor();
+
+        _tracker.Foreground = true;
+        service.TickAnchor();
+
+        Assert.True(_host.HideCalls >= 1);
+        Assert.Equal((100, 100, 1280, 720), Assert.Single(_host.Shows));
+    }
+
+    [Fact]
+    public async Task TickAnchor_ScreenSource_ShowsWhenTrackerAllows()
+    {
+        OverlayWindowService service = CreateService();
+        _tracker.Rect = (0, 0, 1920, 1080);
+        _tracker.Foreground = false;
+        await StartPipelineAsync();
+
+        service.SetEnabled(true);
+        service.TickAnchor();
+
+        Assert.Equal((0, 0, 1920, 1080), Assert.Single(_host.Shows));
+    }
+
+    [Fact]
+    public async Task ForegroundWatcher_Raise_HidesWithoutWaitingForPoll()
+    {
+        OverlayWindowService service = CreateService();
+        _tracker.Rect = (100, 100, 1280, 720);
+        await StartWindowPipelineAsync();
+        service.SetEnabled(true);
+        service.TickAnchor();
+
+        _tracker.Foreground = false;
+        _foreground.Raise(new nint(0x1234));
+
+        Assert.True(_host.HideCalls >= 1);
+    }
+
+    [Fact]
+    public void Dispose_DisposesHostAndWatcher()
+    {
+        OverlayWindowService service = CreateService();
+        service.SetEnabled(true);
+
+        service.Dispose();
+
+        Assert.Equal(1, _host.DisposeCalls);
+        Assert.True(_foreground.Disposed);
     }
 
     [Fact]
@@ -237,8 +332,29 @@ public class OverlayWindowServiceTests : IDisposable
     private sealed class FakeTracker : IAnchorTracker
     {
         public (int X, int Y, int Width, int Height)? Rect;
+        public bool Foreground = true;
 
         public (int X, int Y, int Width, int Height)? GetAnchorRect(SourceSelection source) => Rect;
+
+        public bool IsSourceForeground(SourceSelection source, nint? foregroundWindow = null) =>
+            !source.UseWindow || Foreground;
+    }
+
+    private sealed class FakeForegroundWatcher : IForegroundWatcher
+    {
+        private Action<nint>? _callback;
+
+        public bool Disposed { get; private set; }
+
+        public void Start(Action<nint> onForegroundChanged) => _callback = onForegroundChanged;
+
+        public void Raise(nint hwnd) => _callback?.Invoke(hwnd);
+
+        public void Dispose()
+        {
+            Disposed = true;
+            _callback = null;
+        }
     }
 
     private sealed class FakeCorePeer : ICorePeer

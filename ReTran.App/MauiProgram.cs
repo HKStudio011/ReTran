@@ -37,6 +37,7 @@ namespace ReTran_App
             // Overlay game local: cửa sổ layered Win32 + tracker neo theo cửa sổ/monitor.
             builder.Services.AddSingleton<IOverlayHost, Win32OverlayHost>();
             builder.Services.AddSingleton<IAnchorTracker, Win32AnchorTracker>();
+            builder.Services.AddSingleton<IForegroundWatcher, Win32ForegroundWatcher>();
             builder.Services.AddSingleton<OverlayWindowService>();
 
             string dbPath = TranslationCache.DefaultDbPath;

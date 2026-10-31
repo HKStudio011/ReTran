@@ -28,6 +28,51 @@ public sealed class Win32AnchorTracker : IAnchorTracker
         return GetMonitorRect(source.Monitor);
     }
 
+    /// <inheritdoc/>
+    public bool IsSourceForeground(SourceSelection source, nint? foregroundWindow = null)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        if (!OperatingSystem.IsWindows()) return false;
+
+        nint foreground = foregroundWindow is { } reported && reported != 0
+            ? reported
+            : NativeMethods.GetForegroundWindow();
+
+        // A monitor overlay keeps translating the screen while other apps are focused; only the
+        // controller itself, focused on the same monitor, hides it.
+        // Overlay toàn màn hình vẫn dịch màn hình khi app khác focus; chỉ khi chính cửa sổ điều
+        // khiển được focus trên cùng monitor thì mới ẩn.
+        if (!source.UseWindow) return IsMonitorOverlayVisible(source.Monitor, foreground);
+
+        if (foreground == 0) return false;
+        if (!TryParseHwnd(source.HwndHex, out nint hwnd) || !NativeMethods.IsWindow(hwnd)) return false;
+        if (foreground == hwnd) return true;
+
+        // Same app: a dialog or secondary top-level window of the source keeps the overlay up.
+        NativeMethods.GetWindowThreadProcessId(foreground, out uint foregroundPid);
+        NativeMethods.GetWindowThreadProcessId(hwnd, out uint sourcePid);
+        if (foregroundPid != 0 && foregroundPid == sourcePid) return true;
+
+        // Another app focused on another monitor does not cover the overlay: keep it visible.
+        nint sourceMonitor = NativeMethods.MonitorFromWindow(hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
+        nint foregroundMonitor = NativeMethods.MonitorFromWindow(foreground, NativeMethods.MONITOR_DEFAULTTONEAREST);
+        return sourceMonitor != 0 && foregroundMonitor != 0 && sourceMonitor != foregroundMonitor;
+    }
+
+    private static bool IsMonitorOverlayVisible(int monitorIndex, nint foreground)
+    {
+        if (foreground == 0) return true;
+
+        NativeMethods.GetWindowThreadProcessId(foreground, out uint foregroundPid);
+        if (foregroundPid != (uint)Environment.ProcessId) return true;
+
+        // The ReTran controller is focused: hide unless it sits on another monitor than the overlay.
+        // Cửa sổ ReTran đang focus: ẩn trừ khi nó nằm ở monitor khác với overlay.
+        nint overlayMonitor = GetMonitorHandle(monitorIndex);
+        nint foregroundMonitor = NativeMethods.MonitorFromWindow(foreground, NativeMethods.MONITOR_DEFAULTTONEAREST);
+        return overlayMonitor == 0 || foregroundMonitor == 0 || overlayMonitor != foregroundMonitor;
+    }
+
     private static (int X, int Y, int Width, int Height)? GetWindowRect(string? hwndHex)
     {
         if (!TryParseHwnd(hwndHex, out nint hwnd)) return null;
@@ -41,13 +86,28 @@ public sealed class Win32AnchorTracker : IAnchorTracker
 
     private static (int X, int Y, int Width, int Height)? GetMonitorRect(int index)
     {
-        var monitors = new List<(int X, int Y, int Width, int Height)>();
+        List<(nint Handle, int X, int Y, int Width, int Height)> monitors = EnumerateMonitors();
+        return index >= 0 && index < monitors.Count
+            ? (monitors[index].X, monitors[index].Y, monitors[index].Width, monitors[index].Height)
+            : null;
+    }
+
+    private static nint GetMonitorHandle(int index)
+    {
+        List<(nint Handle, int X, int Y, int Width, int Height)> monitors = EnumerateMonitors();
+        return index >= 0 && index < monitors.Count ? monitors[index].Handle : 0;
+    }
+
+    private static List<(nint Handle, int X, int Y, int Width, int Height)> EnumerateMonitors()
+    {
+        var monitors = new List<(nint Handle, int X, int Y, int Width, int Height)>();
         NativeMethods.MonitorEnumProc callback = (nint hMonitor, nint hdc, ref NativeMethods.RECT rect, nint data) =>
         {
             var info = new NativeMethods.MONITORINFO { cbSize = Marshal.SizeOf<NativeMethods.MONITORINFO>() };
             if (NativeMethods.GetMonitorInfo(hMonitor, ref info))
             {
                 monitors.Add((
+                    hMonitor,
                     info.rcMonitor.Left,
                     info.rcMonitor.Top,
                     info.rcMonitor.Right - info.rcMonitor.Left,
@@ -59,7 +119,7 @@ public sealed class Win32AnchorTracker : IAnchorTracker
         NativeMethods.EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, callback, IntPtr.Zero);
         GC.KeepAlive(callback);
 
-        return index >= 0 && index < monitors.Count ? monitors[index] : null;
+        return monitors;
     }
 
     private static bool TryParseHwnd(string? hex, out nint hwnd)
@@ -91,6 +151,7 @@ public sealed class Win32AnchorTracker : IAnchorTracker
     private static class NativeMethods
     {
         internal const int MONITORINFOF_PRIMARY = 1;
+        internal const uint MONITOR_DEFAULTTONEAREST = 0x0000_0002;
 
         [StructLayout(LayoutKind.Sequential)]
         internal struct RECT
@@ -115,6 +176,15 @@ public sealed class Win32AnchorTracker : IAnchorTracker
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool IsWindow(nint hWnd);
+
+        [DllImport("user32.dll")]
+        internal static extern nint GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        internal static extern uint GetWindowThreadProcessId(nint hWnd, out uint processId);
+
+        [DllImport("user32.dll")]
+        internal static extern nint MonitorFromWindow(nint hWnd, uint flags);
 
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
