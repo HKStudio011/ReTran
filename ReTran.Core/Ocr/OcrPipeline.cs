@@ -12,6 +12,7 @@ public sealed class OcrPipeline
 {
     private readonly ISidecarRpc _rpc;
     private readonly OcrDiff _diff;
+    private readonly bool _mergeLines;
 
     /// <summary>
     /// Per-call timeout including first-time model load (spec: 30s).
@@ -19,13 +20,27 @@ public sealed class OcrPipeline
     /// </summary>
     public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(30);
 
-    /// <summary>Creates a pipeline over an RPC channel and a session diff tracker. Tạo pipeline trên kênh RPC và bộ diff theo phiên.</summary>
-    public OcrPipeline(ISidecarRpc rpc, OcrDiff diff)
+    /// <summary>
+    /// Creates a pipeline over an RPC channel and a session diff tracker. When <paramref name="mergeLines"/> is set,
+    /// the sidecar's spots are grouped into blocks (<see cref="LineGrouper"/>) before the new-text diff, so the reply's
+    /// <c>spots</c> and <c>new_texts</c> follow merged text blocks instead of individual lines.
+    /// Tạo pipeline trên kênh RPC và bộ diff theo phiên. Khi bật <paramref name="mergeLines"/>, spots từ sidecar được
+    /// gộp thành khối (<see cref="LineGrouper"/>) trước khi tính diff, nên <c>spots</c> và <c>new_texts</c> trong phản hồi
+    /// theo text block đã gộp thay vì từng dòng riêng.
+    /// </summary>
+    /// <param name="rpc">JSON-RPC channel to the sidecar. Kênh JSON-RPC tới sidecar.</param>
+    /// <param name="diff">Session-scoped new-text tracker. Bộ theo dõi text mới theo phiên.</param>
+    /// <param name="mergeLines">
+    /// When true, group OCR lines into blocks before diffing (merged spots carry "paragraph": true).
+    /// Khi true, gộp các dòng OCR thành khối trước khi diff (spot gộp mang "paragraph": true).
+    /// </param>
+    public OcrPipeline(ISidecarRpc rpc, OcrDiff diff, bool mergeLines = false)
     {
         ArgumentNullException.ThrowIfNull(rpc);
         ArgumentNullException.ThrowIfNull(diff);
         _rpc = rpc;
         _diff = diff;
+        _mergeLines = mergeLines;
     }
 
     /// <summary>
@@ -101,8 +116,12 @@ public sealed class OcrPipeline
         if (result is not JsonObject obj || obj["spots"] is not JsonArray spotsArr)
             throw new InvalidOperationException("sidecar returned no 'spots' array.");
 
+        // Grouping happens before the diff so a changed line re-translates its whole block, not just itself.
+        JsonArray effectiveSpots = _mergeLines ? LineGrouper.Group(spotsArr) : spotsArr;
+        obj["spots"] = effectiveSpots;
+
         var texts = new List<string>();
-        foreach (var s in spotsArr)
+        foreach (var s in effectiveSpots)
             if (s is JsonObject so && so["text"] is JsonValue tv && tv.TryGetValue<string>(out var t))
                 texts.Add(t);
 

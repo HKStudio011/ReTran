@@ -40,6 +40,24 @@ public class OcrPipelineTests
         return new JsonObject { ["spots"] = spots, ["elapsed_ms"] = 12 };
     }
 
+    private static JsonObject SpotAt(double x, double y, double w, double h, string text) =>
+        new()
+        {
+            ["box"] = new JsonArray(
+                new JsonArray(x, y), new JsonArray(x + w, y),
+                new JsonArray(x + w, y + h), new JsonArray(x, y + h)),
+            ["text"] = text,
+            ["score"] = 0.9,
+        };
+
+    private static JsonObject TwoLineResult() => new()
+    {
+        ["spots"] = new JsonArray(
+            SpotAt(100, 100, 300, 24, "HELLO"),
+            SpotAt(100, 136, 300, 24, "WORLD")),
+        ["elapsed_ms"] = 5,
+    };
+
     [Fact]
     public async Task SpotAsync_PassesImageB64_AndAppendsNewTexts()
     {
@@ -86,5 +104,56 @@ public class OcrPipelineTests
         var fake = new FakeSidecarRpc { NextResult = new JsonObject() };
         var pipeline = new OcrPipeline(fake, new OcrDiff());
         await Assert.ThrowsAsync<InvalidOperationException>(() => pipeline.SpotAsync("x", TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task SpotAsync_MergeOn_SpotsMerged_AndNewTextsAreBlocks()
+    {
+        var fake = new FakeSidecarRpc { NextResult = TwoLineResult() };
+        var pipeline = new OcrPipeline(fake, new OcrDiff(), mergeLines: true);
+        var result = await pipeline.SpotAsync("BASE64PNG", TestContext.Current.CancellationToken);
+
+        var spots = result["spots"]!.AsArray();
+        Assert.Single(spots);
+        var block = (JsonObject)spots[0]!;
+        Assert.Equal("HELLO WORLD", (string?)block["text"]);
+        Assert.True(block.TryGetPropertyValue("paragraph", out var para) && (bool)para!);
+        Assert.Equal(["HELLO WORLD"], result["new_texts"]!.AsArray().Select(n => n!.GetValue<string>()));
+    }
+
+    [Fact]
+    public async Task SpotAsync_MergeOn_SecondFrameChangedLine_RetranslatesWholeBlock()
+    {
+        var fake = new FakeSidecarRpc { NextResult = TwoLineResult() };
+        var pipeline = new OcrPipeline(fake, new OcrDiff(), mergeLines: true);
+        await pipeline.SpotAsync("BASE64PNG", TestContext.Current.CancellationToken);
+
+        // Frame 2: line 2 changed to "EARTH" -> the block text changes as a whole.
+        fake.NextResult = new JsonObject
+        {
+            ["spots"] = new JsonArray(
+                SpotAt(100, 100, 300, 24, "HELLO"),
+                SpotAt(100, 136, 300, 24, "EARTH")),
+            ["elapsed_ms"] = 5,
+        };
+        var second = await pipeline.SpotAsync("BASE64PNG", TestContext.Current.CancellationToken);
+
+        // Exactly the new block text — never the individual lines (Review Focus #4).
+        Assert.Equal(["HELLO EARTH"], second["new_texts"]!.AsArray().Select(n => n!.GetValue<string>()));
+    }
+
+    [Fact]
+    public async Task SpotAsync_MergeOff_Default_OutputUnchanged()
+    {
+        var fake = new FakeSidecarRpc { NextResult = TwoLineResult() };
+        var pipeline = new OcrPipeline(fake, new OcrDiff());
+        var result = await pipeline.SpotAsync("BASE64PNG", TestContext.Current.CancellationToken);
+
+        // Regression M3: without mergeLines the reply keeps the original spots untouched.
+        var spots = result["spots"]!.AsArray();
+        Assert.Equal(2, spots.Count);
+        foreach (var s in spots)
+            Assert.False(((JsonObject)s!).TryGetPropertyValue("paragraph", out _));
+        Assert.Equal(["HELLO", "WORLD"], result["new_texts"]!.AsArray().Select(n => n!.GetValue<string>()));
     }
 }
