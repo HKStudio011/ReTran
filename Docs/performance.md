@@ -832,3 +832,88 @@ uv run --project ReTran.OCR python Tools/Perf/ocrbench/bench.py --data Tools/Per
 # CSV per-frame (image, elapsed_ms, spot_count — cột texts đã bỏ vì quyền riêng tư, xem ghi chú 7)
 # Log run đầy đủ có text (local, không commit): Tools/Perf/ocrbench/data/bench_*.log
 ```
+
+---
+
+## OCR engine settings v2 — mặc định mới + chi phí reload (2026-11-01)
+
+### Bối cảnh đo
+
+- **Máy/stack:** như §OCR model A/B (`paddleocr 3.7.0` + `paddlepaddle-gpu 3.4.0` CUDA build + `paddlex 3.7.2`).
+  Nền máy lúc đo **bận hơn** đợt 25/10: ComfyUI giữ ~1,5 GB VRAM, CPU toàn máy ~66 % — số tuyệt đối
+  vì vậy cao hơn; so sánh hợp lệ là **A/B/A cùng kiểu process** trên cùng bộ 24 PNG.
+- **Annotate:** `Tools/Perf/annotbench` — gọi thẳng `FrameAnnotator.Annotate` (Debug), frame synthetic
+  1920×1080, 20 reps/N.
+- **OCR:** `Tools/Perf/ocrbench/bench.py` — đúng handler sản xuất qua đường base64, warm-up 1 lượt bỏ qua.
+- **A/B engine cũ ↔ mới:** "cũ" = `PaddleOCR` chỉ nhận 2 tên model + 3 cờ orientation `false` và
+  `predict()` không kwarg (đúng engine trước Task 5); "mới" = defaults của `OcrConfig` (Task 5).
+  Chạy old → new → old, mỗi lượt một process riêng.
+
+### Số liệu
+
+Annotate (ngân sách ≤ 40 ms/khung @ ~60 box):
+
+| Snapshot | avg | p50 | min | JPEG |
+| --- | --- | --- | --- | --- |
+| `null` (không vẽ box) | 14,70 ms | 14,72 | 12,07 | 263,2 KB |
+| 0 box | 12,45 ms | 12,30 | 10,49 | 263,2 KB |
+| **63 box** | **19,39 ms** | 16,85 | 15,42 | 261,8 KB |
+| 150 box | 23,48 ms | 23,26 | 19,75 | 255,8 KB |
+| 300 box | 32,99 ms | 32,29 | 30,15 | 247,7 KB |
+
+OCR (24 khung, median `elapsed_ms`; tổng spots = **1 397** ở cả ba lượt, cùng nội dung):
+
+| Lượt | Warm-up (bỏ qua) | min | median | mean | max |
+| --- | --- | --- | --- | --- | --- |
+| cũ #1 | 13,4 s | 387 | **439,5 ms** | 441,2 | 547 |
+| **mới (defaults Task 5)** | 18,3 s | 440 | **482,0 ms** | 513,2 | 745 |
+| cũ #2 | 14,0 s | 443 | **481,0 ms** | 486,6 | 571 |
+
+- **A/B/A parity:** 439,5 → 482,0 → 481,0 ms; lượt "mới" nằm đúng giữa hai lượt cũ
+  (chênh 0,2–9,7 %, trong nhiễu của máy đang bận) ⇒ **không regression** do đổi default/đường config.
+- **VRAM:** delta `nvidia-smi memory.used` quanh lượt mới **+877 MiB** (< 1 GB).
+- **Budget:** annotate **PASS** (19,4 ms @63 box); VRAM **PASS**; OCR 482 ms ⇒ ~2,1 fps
+  **dưới budget ~3 fps trong lượt đo này**, nhưng engine cũ trên cùng máy/cùng khung cũng 439–481 ms
+  — ảnh hưởng của tải nền, không phải thay đổi settings. CSV: `Tools/Perf/ocrbench/bench_default_new_20261101.csv`.
+
+### oneDNN + `device=cpu` (bug Paddle#77340)
+
+- Đo thật: `device=cpu` + `enable_mkldnn=true` ⇒ sidecar chết ngay inference đầu:
+  `NotImplementedError: (Unimplemented) ConvertPirAttribute2RuntimeAttribute not support
+  [pir::ArrayAttribute<pir::DoubleAttribute>] (…onednn_instruction.cc:118)`.
+  Engine cũ (trước Task 5) crash y hệt ⇒ lỗi **có từ trước**, không phải regression của settings surface.
+- `enable_mkldnn=false` + `device=cpu` chạy được ⇒ **default đổi thành `false`** (user duyệt 2026-11-01).
+  PaddleX tự tắt mkldnn khi chạy GPU nên đường GPU không đổi.
+- E2E `core.start` với `device:"cpu"` + default mới: schema trả `enable_mkldnn.default = false`,
+  sidecar sống, 2 khung đầu có **57 / 80 box** sau **33,2 s** (gồm nạp model CPU lần đầu).
+
+### Chi phí đổi tham số reload khi idle
+
+- Tham số nhóm R (constructor) đổi lúc pipeline **dừng** ⇒ `ocr.config.set` reset predictor;
+  lần `spot()` kế tiếp phải nạp lại model. Đo trong 3 run bench: warm-up (nạp model + init GPU +
+  inference đầu) **13,4–18,3 s** — thấp hơn ước tính ~27 s trong spec (upper bound bảo thủ).
+- Trong luồng bình thường user không thấy: warmup của `core.start` đã trả chi phí này trước khi
+  pipeline chạy. Chỉ lộ ra nếu đổi tham số R khi idle rồi gọi `ocr.spot` trực tiếp (script/CLI).
+
+### Tải model ngoài catalog khi bật orientation/unwarping (ngoại lệ có chủ đích)
+
+- Cache ReTran (`%LOCALAPPDATA%\ReTran\models`) chỉ có 4 model det/rec; bật lần đầu
+  `use_doc_orientation_classify` / `use_doc_unwarping` / `use_textline_orientation` kéo theo
+  PaddleX tải `PP-LCNet_x1_0_doc_ori`, `PP-LCNet_x1_0_textline_ori`, `UVDoc` — **không** nằm trong
+  catalog model của app.
+- Trong lúc tải, mỗi `spot()` có timeout 30 s; sidecar bận tải nên timeout liên tiếp và preview đứng
+  vài phút. Đây là ngoại lệ tạm thời **có chủ đích** (không phải regression budget), đã ghi trong
+  tooltip UI.
+
+### Lệnh reproduce
+
+```powershell
+# annotate (Debug, code thật)
+dotnet run -c Debug --project Tools/Perf/annotbench
+# OCR với defaults mới (warm-up tự bỏ qua; CSV có texts — nhớ bỏ cột trước khi commit)
+uv run --project ReTran.OCR python Tools/Perf/ocrbench/bench.py --data Tools/Perf/ocrbench/data `
+  --det PP-OCRv6_small_det --rec PP-OCRv6_small_rec --label default_new `
+  --csv "$env:TEMP\bench_default_new_20261101.csv"
+# Lượt "cũ" tái lập bằng PaddleOCR(2 tên model + 3 cờ false) và predict() không kwarg (cùng bộ frame).
+# CPU + oneDNN: core.start với ocr.params = {"device":"cpu"}; schema phải trả enable_mkldnn.default = false.
+```
