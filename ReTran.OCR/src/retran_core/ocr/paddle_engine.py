@@ -130,11 +130,9 @@ class PaddleOcrEngine:
             # off — game/UI text does not need the doc preprocessor, and the
             # disabled pipelines are the M2 latency gate
             # (Docs/performance.md M2 baseline) — but a user override from
-            # the config merged below can turn them back on. The paddlepaddle
-            # 3.3.x oneDNN/PIR crash (PaddlePaddle/Paddle#77340) is gone on
-            # the paddleocr 3.7 / paddlepaddle 3.4 stack, so the engine no
-            # longer forces enable_mkldnn=False: the config default (enabled)
-            # matches paddleocr's own default.
+            # the config merged below can turn them back on. oneDNN stays off
+            # by default: the paddlepaddle 3.4 PIR/oneDNN CPU path crashes
+            # (Paddle#77340), and GPU ignores the flag anyway.
             kwargs: dict[str, Any] = {
                 "text_detection_model_name": self.det_model,
                 "text_recognition_model_name": self.rec_model,

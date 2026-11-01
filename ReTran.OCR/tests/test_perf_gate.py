@@ -52,7 +52,7 @@ def test_spot_uses_pinned_models(monkeypatch):
     assert "lang" not in kwargs
 
 
-def test_engine_disables_doc_pipelines_and_keeps_mkldnn_enabled(monkeypatch):
+def test_engine_disables_doc_pipelines_and_mkldnn(monkeypatch):
     fake = types.ModuleType("paddleocr")
     fake.PaddleOCR = RecordingPaddleOCR
     monkeypatch.setitem(sys.modules, "paddleocr", fake)
@@ -61,11 +61,10 @@ def test_engine_disables_doc_pipelines_and_keeps_mkldnn_enabled(monkeypatch):
     spots = engine.spot(np.zeros((40, 80, 3), dtype=np.uint8))
 
     kwargs = RecordingPaddleOCR.last_kwargs
-    # The paddleocr 3.7 / paddlepaddle 3.4 stack runs without the oneDNN
-    # workaround (PaddlePaddle/Paddle#77340), so the engine no longer
-    # disables mkldnn: it passes the config default (enabled) through
-    # explicitly, which matches paddleocr's own default.
-    assert kwargs["enable_mkldnn"] is True
+    # The paddlepaddle 3.4 PIR/oneDNN CPU path crashes with
+    # "ConvertPirAttribute2RuntimeAttribute not support" (Paddle#77340), so
+    # the ReTran default is off and reaches PaddleOCR explicitly. GPU ignores it.
+    assert kwargs["enable_mkldnn"] is False
     assert kwargs["use_doc_orientation_classify"] is False
     assert kwargs["use_doc_unwarping"] is False
     assert kwargs["use_textline_orientation"] is False

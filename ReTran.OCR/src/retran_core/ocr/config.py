@@ -85,7 +85,13 @@ PARAMS: tuple[ParamSpec, ...] = (
     ParamSpec("use_tensorrt", "device", "bool", False, True),
     ParamSpec("enable_hpi", "device", "bool", None, True),
     ParamSpec("enable_cinn", "device", "bool", False, True),
-    ParamSpec("enable_mkldnn", "device", "bool", True, True),
+    # Off by default: the paddlepaddle 3.4 PIR/oneDNN CPU path crashes with
+    # "ConvertPirAttribute2RuntimeAttribute not support" (Paddle#77340), and
+    # PaddleX picks run_mode=mkldnn for CPU when this is on. GPU ignores it.
+    # Tắt mặc định: đường CPU PIR/oneDNN của paddlepaddle 3.4 crash
+    # "ConvertPirAttribute2RuntimeAttribute not support" (Paddle#77340), và
+    # PaddleX chọn run_mode=mkldnn cho CPU khi bật. GPU không bị ảnh hưởng.
+    ParamSpec("enable_mkldnn", "device", "bool", False, True),
     ParamSpec("mkldnn_cache_capacity", "device", "int", 10, True, min=0, max=512),
     ParamSpec("cpu_threads", "device", "int", 10, True, min=1, max=64),
     ParamSpec("engine_config", "device", "json", None, True),

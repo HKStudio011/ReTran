@@ -43,7 +43,7 @@ def test_retran_defaults_are_pinned():
     assert by_key["text_det_unclip_ratio"] == 1.5
     assert by_key["text_rec_score_thresh"] == 0.0
     assert by_key["text_recognition_batch_size"] == 6
-    assert by_key["enable_mkldnn"] is True
+    assert by_key["enable_mkldnn"] is False
     assert by_key["cpu_threads"] == 10
 
 
