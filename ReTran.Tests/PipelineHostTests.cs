@@ -80,14 +80,8 @@ public class PipelineHostTests
         public int Width { get; set; } = 2;
         public int Height { get; set; } = 2;
 
-        /// <summary>Last font multiplier the annotation loop passed; NaN until the first call. Hệ số cỡ chữ cuối vòng ghi chú truyền; NaN trước lần gọi đầu.</summary>
-        public double LastFontScale { get; private set; } = double.NaN;
-
-        public AnnotatedFrame Annotate(Frame frame, AnnotSnapshot? snapshot, double fontScale = 1.0)
-        {
-            LastFontScale = fontScale;
-            return new(Result, Width, Height);
-        }
+        public AnnotatedFrame Annotate(Frame frame, AnnotSnapshot? snapshot) =>
+            new(Result, Width, Height);
     }
 
     /// <summary>
@@ -172,8 +166,7 @@ public class PipelineHostTests
         string? hwnd = null,
         string provider = "google",
         string src = "auto",
-        string dst = "vi",
-        double fontScale = 1.0)
+        string dst = "vi")
     {
         var source = new JsonObject { ["kind"] = kind };
         if (hwnd is not null) source["hwnd"] = hwnd;
@@ -184,7 +177,6 @@ public class PipelineHostTests
             ["translate"] = new JsonObject { ["provider"] = provider, ["src"] = src, ["dst"] = dst },
             ["ocrFps"] = 10,
             ["captureFps"] = 10,
-            ["fontScale"] = fontScale,
         };
     }
 
@@ -632,78 +624,6 @@ public class PipelineHostTests
             () => host.StartAsync(parameters, CancellationToken.None));
         Assert.Equal(RpcErrorCodes.InvalidParams, ex.Code);
         Assert.Contains("captureFps", ex.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task Start_FontScaleZero_InvalidParams()
-    {
-        await using var host = CreateHost(
-            new FakeSidecarRpc(), RegistryWith(new CountingTranslator()), new JsonRpcServer());
-
-        var parameters = StartParams();
-        parameters["fontScale"] = 0;
-        var ex = await Assert.ThrowsAsync<RpcMethodException>(
-            () => host.StartAsync(parameters, CancellationToken.None));
-        Assert.Equal(RpcErrorCodes.InvalidParams, ex.Code);
-        Assert.Contains("fontScale", ex.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task Start_PassesFontScaleToAnnotator()
-    {
-        await using var peer = new Peer();
-        var annotator = new FakeAnnotator();
-        await using var host = CreateHost(
-            new FakeSidecarRpc { NextResult = SpotResult() },
-            RegistryWith(new CountingTranslator()), peer.Server,
-            annotator: annotator, previewMapName: UniquePreviewMapName("fontscale-start"));
-
-        await host.StartAsync(StartParams(fontScale: 1.25), CancellationToken.None);
-
-        await WaitUntilAsync(() => Math.Abs(annotator.LastFontScale - 1.25) < 1e-9,
-            "annotator font scale 1.25");
-    }
-
-    [Fact]
-    public async Task SetFontScale_AppliesToRunningSession()
-    {
-        await using var peer = new Peer();
-        var sources = new List<FakeCaptureSource>();
-        var annotator = new FakeAnnotator();
-        await using var host = CreateHost(
-            new FakeSidecarRpc { NextResult = SpotResult() },
-            RegistryWith(new CountingTranslator()), peer.Server, sources,
-            annotator: annotator, previewMapName: UniquePreviewMapName("fontscale-live"));
-
-        await host.StartAsync(StartParams(), CancellationToken.None);
-        await WaitUntilAsync(() => Math.Abs(annotator.LastFontScale - 1.0) < 1e-9,
-            "annotator initial font scale");
-
-        JsonNode? echoed = await host.SetFontScaleAsync(
-            new JsonObject { ["fontScale"] = 0.85 }, CancellationToken.None);
-        Assert.Equal(0.85, echoed!["fontScale"]!.GetValue<double>(), 3);
-
-        // Keep frames flowing so the annotation loop ticks with the new value.
-        // Giữ frame chảy để vòng ghi chú tick với giá trị mới.
-        for (int i = 0; i < 40 && Math.Abs(annotator.LastFontScale - 0.85) > 1e-9; i++)
-        {
-            sources[^1].Raise(TinyFrame());
-            await Task.Delay(50);
-        }
-
-        Assert.Equal(0.85, annotator.LastFontScale, 3);
-    }
-
-    [Fact]
-    public async Task SetFontScale_RejectsOutOfRange()
-    {
-        await using var host = CreateHost(
-            new FakeSidecarRpc(), RegistryWith(new CountingTranslator()), new JsonRpcServer());
-
-        var ex = await Assert.ThrowsAsync<RpcMethodException>(
-            () => host.SetFontScaleAsync(new JsonObject { ["fontScale"] = 4.5 }, CancellationToken.None));
-        Assert.Equal(RpcErrorCodes.InvalidParams, ex.Code);
-        Assert.Contains("fontScale", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

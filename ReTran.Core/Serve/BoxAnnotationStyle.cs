@@ -106,16 +106,14 @@ internal static class BoxAnnotationStyle
         MathF.Max(1f, box.Height - 2f * Inset));
 
     /// <summary>
-    /// Base font size for a box: half the box height, clamped to 12..40 px and multiplied by the
-    /// user's font scale. Cỡ chữ cơ sở cho một box: nửa chiều cao box, kẹp 12..40 px rồi nhân hệ
-    /// số cỡ chữ của người dùng.
+    /// Base font size for a box: half the box height, clamped to 12..40 px.
+    /// Cỡ chữ cơ sở cho một box: nửa chiều cao box, kẹp 12..40 px.
     /// </summary>
     /// <param name="boxHeight">Box height in pixels. Chiều cao box (pixel).</param>
-    /// <param name="fontScale">User font multiplier (0.85/1.0/1.25). Hệ số cỡ chữ người dùng.</param>
     /// <param name="maxFontSize">Upper clamp in pixels; callers scale it with the viewport. Trần theo pixel; nơi gọi tự scale theo viewport.</param>
-    public static int BaseFontSize(float boxHeight, double fontScale, float maxFontSize = MaxFontSize)
+    public static int BaseFontSize(float boxHeight, float maxFontSize = MaxFontSize)
     {
-        float size = FontHeightRatio * boxHeight * (float)fontScale;
+        float size = FontHeightRatio * boxHeight;
         return (int)MathF.Round(Math.Clamp(size, 12f, maxFontSize));
     }
 
@@ -131,17 +129,16 @@ internal static class BoxAnnotationStyle
     /// <param name="innerWidth">Usable width inside the box. Chiều rộng dùng được trong box.</param>
     /// <param name="innerHeight">Usable height inside the box. Chiều cao dùng được trong box.</param>
     /// <param name="boxHeight">Full box height (drives the base size). Chiều cao đầy đủ của box (quyết định cỡ cơ sở).</param>
-    /// <param name="fontScale">User font multiplier. Hệ số cỡ chữ người dùng.</param>
     /// <param name="format">Format shared with drawing. Format dùng chung với lúc vẽ.</param>
     /// <param name="maxLines">Maximum wrapped lines (1 for panel rows, 2 for subtitles). Số dòng wrap tối đa (1 cho dòng bảng, 2 cho phụ đề).</param>
     /// <param name="shrink">Whether to shrink below the base size; <see langword="false"/> keeps the base and lets the caller ellipsize. Có thu nhỏ dưới cỡ cơ sở không; <see langword="false"/> giữ cỡ cơ sở để người gọi cắt ellipsis.</param>
     /// <param name="maxFontSize">Upper clamp in pixels; callers scale it with the viewport. Trần theo pixel; nơi gọi tự scale theo viewport.</param>
     /// <returns>The best size, its measured block and whether it fits. Cỡ tốt nhất, khối đã đo và có vừa không.</returns>
     public static TextFit Fit(Graphics g, string text, float innerWidth, float innerHeight,
-        float boxHeight, double fontScale, StringFormat format, int maxLines, bool shrink = true,
+        float boxHeight, StringFormat format, int maxLines, bool shrink = true,
         float maxFontSize = MaxFontSize)
     {
-        int high = BaseFontSize(boxHeight, fontScale, maxFontSize);
+        int high = BaseFontSize(boxHeight, maxFontSize);
         TextFit atHigh = Measure(g, text, high, innerWidth, innerHeight, format, maxLines);
         if (atHigh.Fits || !shrink) return atHigh;
 

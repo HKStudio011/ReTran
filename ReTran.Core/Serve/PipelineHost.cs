@@ -45,14 +45,6 @@ public sealed class PipelineHost : IAsyncDisposable
     private readonly int _annotatorFps;
 
     /// <summary>
-    /// User font multiplier applied by the annotator (1.0 default); updated live by
-    /// <see cref="SetFontScaleAsync"/> and read once per annotation tick.
-    /// Hệ số cỡ chữ người dùng mà annotator áp dụng (mặc định 1.0); cập nhật trực tiếp bởi
-    /// <see cref="SetFontScaleAsync"/> và đọc mỗi tick ghi chú.
-    /// </summary>
-    private double _annotationFontScale = 1.0;
-
-    /// <summary>
     /// Shared-memory name of the preview channel; <see langword="null"/> means
     /// <see cref="PreviewProtocol.MapName"/>. Tên shared memory của channel preview;
     /// <see langword="null"/> nghĩa là <see cref="PreviewProtocol.MapName"/>.
@@ -124,7 +116,7 @@ public sealed class PipelineHost : IAsyncDisposable
     /// </summary>
     /// <param name="@params">
     /// <c>{source:{kind:"screen",monitor}|"window",hwnd}, translate:{provider,src,dst},
-    /// ocr?:{det,rec,params}, ocrFps?, captureFps?, fontScale?}</c> — missing fps values fall
+    /// ocr?:{det,rec,params}, ocrFps?, captureFps?}</c> — missing fps values fall
     /// back to <see cref="CoreConfig"/> defaults; a missing <c>ocr</c> keeps the sidecar's
     /// current pair and engine config (no <c>ocr.models.*</c>/<c>ocr.config.set</c> call).
     /// Tham số theo hợp đồng spec §3.1 — fps thiếu thì lấy default từ
@@ -225,10 +217,6 @@ public sealed class PipelineHost : IAsyncDisposable
 
             var session = new Session(source, snapshot, trackAnnotatedFrames: _annotator is not null);
             _session = session;
-            // Applied before either loop starts so the first annotated frame already uses the
-            // App's font setting. Áp trước khi cả hai loop chạy để khung ghi chú đầu tiên đã
-            // dùng đúng cỡ chữ của App.
-            Volatile.Write(ref _annotationFontScale, spec.FontScale);
 
             // Subscribe the annotation handler BEFORE the OcrLoop starts (Task.Run below) so it
             // always runs first on FrameArrived and copies the frame into a pooled buffer before
@@ -367,34 +355,6 @@ public sealed class PipelineHost : IAsyncDisposable
             }
         }
         return new JsonObject { ["running"] = false };
-    }
-
-    /// <summary>
-    /// Updates the user font multiplier used for annotated frames (<c>core.set_font_scale</c>).
-    /// It applies to the running session immediately (read on the next annotation tick) and to
-    /// later sessions started without an explicit <c>fontScale</c>.
-    /// Cập nhật hệ số cỡ chữ dùng cho khung ghi chú (<c>core.set_font_scale</c>). Áp dụng ngay
-    /// cho phiên đang chạy (đọc ở tick ghi chú kế tiếp) và cho các phiên sau khởi động mà không
-    /// truyền <c>fontScale</c> tường minh.
-    /// </summary>
-    /// <param name="params">Object <c>{"fontScale": number}</c> in (0, 4]. Object <c>{"fontScale": number}</c> trong (0, 4].</param>
-    /// <param name="ct">Unused — the update is synchronous. Không dùng — cập nhật đồng bộ.</param>
-    /// <returns><c>{"fontScale": number}</c> echoing the accepted value. Giá trị đã nhận, phản hồi lại.</returns>
-    /// <exception cref="RpcMethodException">Thrown with -32602 when the params are invalid. Ném -32602 khi tham số sai.</exception>
-    public Task<JsonNode?> SetFontScaleAsync(JsonNode? @params, CancellationToken ct)
-    {
-        if (@params is not JsonObject p
-            || p["fontScale"] is not JsonValue value
-            || !value.TryGetValue<double>(out double fontScale)
-            || !double.IsFinite(fontScale)
-            || fontScale is <= 0 or > 4)
-        {
-            throw new RpcMethodException(RpcErrorCodes.InvalidParams,
-                "'fontScale' must be a number in (0, 4].");
-        }
-
-        Volatile.Write(ref _annotationFontScale, fontScale);
-        return Task.FromResult<JsonNode?>(new JsonObject { ["fontScale"] = fontScale });
     }
 
     /// <summary>
@@ -677,20 +637,6 @@ public sealed class PipelineHost : IAsyncDisposable
             throw new RpcMethodException(RpcErrorCodes.InvalidParams, "'captureFps' must be an integer 1..60.");
         }
 
-        // User font multiplier for annotated frames (preview). The App
-        // persists 0.85/1.0/1.25; (0, 4] guards against degenerate values.
-        // Hệ số cỡ chữ cho khung ghi chú (preview). App lưu 0.85/1.0/1.25;
-        // khoảng (0, 4] chặn giá trị vô lý.
-        double fontScale = 1.0;
-        if (p["fontScale"] is JsonValue fontValue
-            && (!fontValue.TryGetValue<double>(out fontScale)
-                || !double.IsFinite(fontScale)
-                || fontScale is <= 0 or > 4))
-        {
-            throw new RpcMethodException(RpcErrorCodes.InvalidParams,
-                "'fontScale' must be a number in (0, 4].");
-        }
-
         // Optional OCR model pair (ocr: {det, rec}) and engine params (ocr.params). Absent ->
         // the sidecar keeps its current pair and config, and core.start makes no
         // ocr.models.*/ocr.config.set call; present -> both names must be non-empty strings
@@ -723,7 +669,7 @@ public sealed class PipelineHost : IAsyncDisposable
         }
 
         return new StartSpec(useWindow, monitor, hwnd, provider, src, dst, translator, ocrFps,
-            captureFps, fontScale, detModel, recModel, ocrParams);
+            captureFps, detModel, recModel, ocrParams);
     }
 
     /// <summary>
@@ -887,7 +833,7 @@ public sealed class PipelineHost : IAsyncDisposable
                 try
                 {
                     AnnotatedFrame annotated = annotator.Annotate(
-                        frame, session.Snapshot.TryGet(), Volatile.Read(ref _annotationFontScale));
+                        frame, session.Snapshot.TryGet());
                     if (!TryPublishPreview(session, annotated)) continue;
                     await _server.NotifyAsync("frame.annotated", new JsonObject
                     {
@@ -1087,7 +1033,6 @@ public sealed class PipelineHost : IAsyncDisposable
         ITranslator Translator,
         int OcrFps,
         int CaptureFps,
-        double FontScale,
         string? DetModel,
         string? RecModel,
         JsonObject? OcrParams)

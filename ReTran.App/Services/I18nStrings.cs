@@ -89,10 +89,6 @@ public static class I18nStrings
         ["update.error.install"] = "lỗi khởi chạy trình cài đặt",
         ["overlay.title"] = "Overlay trên game",
         ["overlay.toggle"] = "Hiện overlay lên nguồn đang capture",
-        ["overlay.font.label"] = "Cỡ chữ",
-        ["overlay.font.small"] = "Nhỏ",
-        ["overlay.font.medium"] = "Trung bình",
-        ["overlay.font.large"] = "Lớn",
         ["overlay.note.fullscreen"] = "Game exclusive fullscreen không thể hiện overlay — chạy borderless windowed để dùng tính năng này.",
 
         // Signal-deck UI (v2)
@@ -130,7 +126,6 @@ public static class I18nStrings
         ["deck.overlay.title"] = "Lớp phủ trên game",
         ["deck.overlay.sub"] = "Hiện trên nguồn đang chụp",
         ["deck.overlay.toggleAria"] = "Bật lớp phủ",
-        ["deck.overlay.font"] = "Cỡ chữ",
         ["deck.overlay.obs.title"] = "Overlay cho OBS",
         ["deck.overlay.obs.copy"] = "Copy URL",
         ["deck.overlay.obs.copied"] = "Đã copy URL overlay.",
@@ -386,10 +381,6 @@ public static class I18nStrings
         ["update.error.install"] = "installer launch error",
         ["overlay.title"] = "Game overlay",
         ["overlay.toggle"] = "Show overlay over active source",
-        ["overlay.font.label"] = "Font size",
-        ["overlay.font.small"] = "Small",
-        ["overlay.font.medium"] = "Medium",
-        ["overlay.font.large"] = "Large",
         ["overlay.note.fullscreen"] = "Exclusive-fullscreen games cannot show the overlay — run borderless windowed to use this feature.",
 
         // Signal-deck UI (v2)
@@ -427,7 +418,6 @@ public static class I18nStrings
         ["deck.overlay.title"] = "Game overlay",
         ["deck.overlay.sub"] = "Show over the captured source",
         ["deck.overlay.toggleAria"] = "Enable overlay",
-        ["deck.overlay.font"] = "Text size",
         ["deck.overlay.obs.title"] = "Overlay for OBS",
         ["deck.overlay.obs.copy"] = "Copy URL",
         ["deck.overlay.obs.copied"] = "Overlay URL copied.",

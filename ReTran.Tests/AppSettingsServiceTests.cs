@@ -64,17 +64,16 @@ public class AppSettingsServiceTests : IDisposable
 
         Assert.Equal("google", settings.Provider);
         Assert.False(settings.OverlayOnGame);
-        Assert.Equal(1.0, settings.OverlayFontScale);
         // File cũ không có cặp model OCR → nhận cặp mặc định small.
         Assert.Equal("PP-OCRv6_small_det", settings.OcrDet);
         Assert.Equal("PP-OCRv6_small_rec", settings.OcrRec);
     }
 
     [Fact]
-    public void LegacyFile_WithRemovedPanelKeys_StillLoads()
+    public void LegacyFile_WithRemovedPanelAndFontKeys_StillLoads()
     {
-        // File do bản cũ ghi có overlayMode/overlayCorner (đã bỏ) — khóa lạ bị bỏ qua,
-        // file cũ vẫn đọc được.
+        // File do bản cũ ghi có overlayMode/overlayCorner/overlayFontScale (đã bỏ) — khóa lạ
+        // bị bỏ qua, file cũ vẫn đọc được.
         Directory.CreateDirectory(_dir); // Save() would create it; a hand-written file needs the dir first.
         File.WriteAllText(_path, """{"provider":"google","src":"auto","dst":"vi","overlayMode":"panel","overlayCorner":"tr","overlayFontScale":1.25}""");
         var service = new AppSettingsService(_path);
@@ -82,7 +81,7 @@ public class AppSettingsServiceTests : IDisposable
         AppSettings settings = service.Load();
 
         Assert.Equal("google", settings.Provider);
-        Assert.Equal(1.25, settings.OverlayFontScale);
+        Assert.Equal("vi", settings.Dst);
     }
 
     [Fact]
@@ -103,7 +102,7 @@ public class AppSettingsServiceTests : IDisposable
     {
         var service = new AppSettingsService(_path);
         var saved = new AppSettings("google", "auto", "vi", null,
-            OverlayOnGame: true, OverlayFontScale: 1.25);
+            OverlayOnGame: true);
 
         service.Save(saved);
 

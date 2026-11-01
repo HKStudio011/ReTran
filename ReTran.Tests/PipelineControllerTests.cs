@@ -95,8 +95,6 @@ public class PipelineControllerTests : IDisposable
         // Nhịp pipeline đi kèm mọi core.start; mặc định 3/10 khung mỗi giây.
         Assert.Equal(3, call.Params["ocrFps"]!.GetValue<int>());
         Assert.Equal(10, call.Params["captureFps"]!.GetValue<int>());
-        // Cỡ chữ thủ công đã bỏ khỏi wire (spec §9.2); field settings còn tới Task 9.
-        Assert.Null(call.Params["fontScale"]);
     }
 
     [Fact]
@@ -134,7 +132,6 @@ public class PipelineControllerTests : IDisposable
         Assert.Equal(0.35, sent["ocr"]!["params"]!["text_det_thresh"]!.GetValue<double>());
         Assert.Equal(5, sent["ocrFps"]!.GetValue<int>());
         Assert.Equal(12, sent["captureFps"]!.GetValue<int>());
-        Assert.Null(sent["fontScale"]);            // cỡ chữ thủ công đã bỏ (sau Task 9 vẫn đúng)
 
         await controller.StopAsync(CancellationToken.None);
         // Kiểm tra tích hợp start → stop → start: mỗi lần Load() đọc lại file nên node là node

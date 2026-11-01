@@ -39,6 +39,5 @@ public interface IOverlayHost : IDisposable
     /// Vẽ frame hiện tại; danh sách rỗng làm trống cửa sổ.
     /// </summary>
     /// <param name="boxes">Boxes in viewport pixel coordinates. Các hộp theo tọa độ pixel viewport.</param>
-    /// <param name="fontScale">Font size multiplier for overlay text. Hệ số cỡ chữ overlay.</param>
-    void Draw(IReadOnlyList<DrawBox> boxes, double fontScale);
+    void Draw(IReadOnlyList<DrawBox> boxes);
 }

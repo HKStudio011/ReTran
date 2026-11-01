@@ -200,15 +200,6 @@
                     </div>
                     <p class="rt-sec-sub">@(L["deck.overlay.sub"])</p>
 
-                    <div class="rt-field">
-                        <span class="rt-lbl">@(L["deck.overlay.font"])</span>
-                        <div class="rt-seg" role="group" aria-label="@(L["deck.overlay.font"])">
-                            <button type="button" aria-pressed="@Pressed(_overlayFontScale == 0.85)" @onclick='() => SetOverlayFont(0.85)'>@(L["overlay.font.small"])</button>
-                            <button type="button" aria-pressed="@Pressed(_overlayFontScale == 1.0)" @onclick='() => SetOverlayFont(1.0)'>@(L["overlay.font.medium"])</button>
-                            <button type="button" aria-pressed="@Pressed(_overlayFontScale == 1.25)" @onclick='() => SetOverlayFont(1.25)'>@(L["overlay.font.large"])</button>
-                        </div>
-                    </div>
-
                     <p class="rt-note">@(L["overlay.note.fullscreen"])</p>
                 </section>
 
@@ -251,7 +242,6 @@
     private bool _showOcrNotice;                // first-run: chưa có model OCR nào cài
     private bool _overlayOn;
     private bool _overlayFeedFailed;          // feed OBS không bind được cổng nào — card báo lỗi, không hiện URL chết
-    private double _overlayFontScale = 1.0;
     private bool _busy;
 
     private string? _previewSrc;
@@ -381,7 +371,6 @@
         _provider = current.Provider;
         // File ghi tay có thể chứa dst ngoài danh sách — thêm vào để select không bị trống.
         if (Array.IndexOf(_dstOptions, _quickDst) < 0) _dstOptions = [_quickDst, .. DefaultDstOptions];
-        _overlayFontScale = current.OverlayFontScale;
     }
 
     // Settings drawer lưu file trên cùng UI thread — Home đọc lại để nhãn provider/ngôn ngữ không cũ.
@@ -602,23 +591,6 @@
     {
         _overlayOn = !_overlayOn;
         OverlaySvc.SetEnabled(_overlayOn);
-    }
-
-    private async Task SetOverlayFont(double scale)
-    {
-        _overlayFontScale = scale;
-        OverlaySvc.ApplyOptions(fontScale: scale);
-        try
-        {
-            // Core renders the preview frame; tell it the new size right away.
-            // Core vẽ khung preview; báo cỡ mới ngay để không phải chờ phiên sau.
-            await Pipeline.SetAnnotationFontScaleAsync(scale, CancellationToken.None);
-        }
-        catch (Exception)
-        {
-            // Core cũ/không sẵn sàng không được phá UI; overlay vẫn đổi cỡ chữ.
-            // An old/unavailable Core must not break the UI; the overlay still resizes.
-        }
     }
 
     private async Task CopyOverlayUrlAsync()

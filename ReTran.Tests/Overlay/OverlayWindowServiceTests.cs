@@ -218,8 +218,8 @@ public class OverlayWindowServiceTests : IDisposable
         _overlay.Publish(Frame((0.5, 0.5, 0.2, 0.1, "A", "B")));
 
         Assert.Equal((0, 0, 1280, 720), Assert.Single(_host.Shows));
-        (IReadOnlyList<DrawBox> Boxes, double Scale) draw = Assert.Single(_host.Draws);
-        DrawBox box = Assert.Single(draw.Boxes);
+        IReadOnlyList<DrawBox> boxes = Assert.Single(_host.Draws);
+        DrawBox box = Assert.Single(boxes);
         Assert.Equal(new DrawBox(640, 360, 256, 72, "B"), box);
     }
 
@@ -288,8 +288,8 @@ public class OverlayWindowServiceTests : IDisposable
 
         _overlay.Publish(Frame());
 
-        (IReadOnlyList<DrawBox> Boxes, double Scale) draw = Assert.Single(_host.Draws);
-        Assert.Empty(draw.Boxes);
+        IReadOnlyList<DrawBox> boxes = Assert.Single(_host.Draws);
+        Assert.Empty(boxes);
     }
 
     [Fact]
@@ -312,7 +312,7 @@ public class OverlayWindowServiceTests : IDisposable
         public bool IsCreated { get; private set; }
         public int CreateCalls, HideCalls, DisposeCalls;
         public List<(int X, int Y, int W, int H)> Shows = new();
-        public List<(IReadOnlyList<DrawBox> Boxes, double Scale)> Draws = new();
+        public List<IReadOnlyList<DrawBox>> Draws = new();
 
         public void Create()
         {
@@ -324,7 +324,7 @@ public class OverlayWindowServiceTests : IDisposable
 
         public void Hide() => HideCalls++;
 
-        public void Draw(IReadOnlyList<DrawBox> boxes, double fontScale) => Draws.Add((boxes, fontScale));
+        public void Draw(IReadOnlyList<DrawBox> boxes) => Draws.Add(boxes);
 
         public void Dispose() => DisposeCalls++;
     }

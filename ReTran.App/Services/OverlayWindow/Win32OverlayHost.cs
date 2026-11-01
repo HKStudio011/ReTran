@@ -99,8 +99,7 @@ public sealed class Win32OverlayHost : IOverlayHost
     /// UpdateLayeredWindow; danh sách rỗng để cửa sổ trong suốt hoàn toàn.
     /// </summary>
     /// <param name="boxes">Boxes in viewport pixel coordinates. Các hộp theo tọa độ pixel viewport.</param>
-    /// <param name="fontScale">Font size multiplier for overlay text. Hệ số cỡ chữ overlay.</param>
-    public void Draw(IReadOnlyList<DrawBox> boxes, double fontScale) => Enqueue(() => DrawOnWorker(boxes, fontScale));
+    public void Draw(IReadOnlyList<DrawBox> boxes) => Enqueue(() => DrawOnWorker(boxes));
 
     /// <summary>
     /// Stops the message pump, destroys the native window and joins the worker thread
@@ -194,7 +193,7 @@ public sealed class Win32OverlayHost : IOverlayHost
         _created = _hwnd != 0;
     }
 
-    private void DrawOnWorker(IReadOnlyList<DrawBox> boxes, double fontScale)
+    private void DrawOnWorker(IReadOnlyList<DrawBox> boxes)
     {
         if (_hwnd == 0) return;
         if (!NativeMethods.GetClientRect(_hwnd, out NativeMethods.RECT rect)) return;
@@ -210,7 +209,7 @@ public sealed class Win32OverlayHost : IOverlayHost
                 g.SmoothingMode = SD.Drawing2D.SmoothingMode.AntiAlias;
                 g.TextRenderingHint = SD.Text.TextRenderingHint.AntiAlias;
                 g.Clear(SD.Color.Transparent);
-                DrawBoxes(g, boxes, fontScale, width, height);
+                DrawBoxes(g, boxes, width, height);
             }
 
             PushBitmap(bitmap, width, height);
@@ -228,10 +227,9 @@ public sealed class Win32OverlayHost : IOverlayHost
     /// </summary>
     /// <param name="g">Target graphics surface. Surface đồ hoạ đích.</param>
     /// <param name="boxes">Boxes in viewport pixel coordinates. Các box theo toạ độ pixel viewport.</param>
-    /// <param name="fontScale">User font multiplier. Hệ số cỡ chữ người dùng.</param>
     /// <param name="viewportWidth">Viewport width in pixels. Chiều rộng viewport (pixel).</param>
     /// <param name="viewportHeight">Viewport height in pixels. Chiều cao viewport (pixel).</param>
-    internal static void DrawBoxes(SD.Graphics g, IReadOnlyList<DrawBox> boxes, double fontScale,
+    internal static void DrawBoxes(SD.Graphics g, IReadOnlyList<DrawBox> boxes,
         int viewportWidth, int viewportHeight)
     {
         float ui = BoxAnnotationStyle.DecorationScale(viewportWidth);
@@ -263,7 +261,7 @@ public sealed class Win32OverlayHost : IOverlayHost
             if (innerW < 2f || innerH < 2f) continue;
 
             BoxAnnotationStyle.TextFit fit = BoxAnnotationStyle.Fit(
-                g, text, innerW, innerH, rect.Height, fontScale, format, maxLines: 2,
+                g, text, innerW, innerH, rect.Height, format, maxLines: 2,
                 shrink: true,
                 maxFontSize: BoxAnnotationStyle.MaxFontSize * ui);
             SD.SizeF block = fit.Block;

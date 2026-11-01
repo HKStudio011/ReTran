@@ -18,7 +18,7 @@ public class Win32OverlayHostRenderTests
         // đánh lừa bộ dò tick teal).
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
         g.Clear(Color.White);
-        Win32OverlayHost.DrawBoxes(g, boxes, 1.0, 1280, 720);
+        Win32OverlayHost.DrawBoxes(g, boxes, 1280, 720);
         return bitmap;
     }
 

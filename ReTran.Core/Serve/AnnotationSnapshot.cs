@@ -84,9 +84,6 @@ public interface IFrameAnnotator
     /// <param name="frame">Captured BGRA frame (caller keeps ownership; it is not copied).
     /// Khung BGRA đã chụp (người gọi giữ quyền sở hữu; khung không được sao chép).</param>
     /// <param name="snapshot">Text regions to draw, or <see langword="null"/> for a plain frame. Vùng text cần vẽ, hoặc <see langword="null"/> cho khung thường.</param>
-    /// <param name="fontScale">
-    /// User font multiplier (1.0 = base). Hệ số cỡ chữ người dùng (1.0 = cơ sở).
-    /// </param>
     /// <returns>The annotated frame (JPEG bytes + output size). Khung đã ghi chú (bytes JPEG + kích thước đầu ra).</returns>
-    AnnotatedFrame Annotate(Frame frame, AnnotSnapshot? snapshot, double fontScale = 1.0);
+    AnnotatedFrame Annotate(Frame frame, AnnotSnapshot? snapshot);
 }

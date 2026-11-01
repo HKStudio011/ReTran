@@ -27,7 +27,6 @@ public sealed class OverlayWindowService : IDisposable
     private readonly object _gate = new();
 
     private Timer? _timer;
-    private double _fontScale;
     private (int X, int Y, int Width, int Height)? _anchorRect;
     private DateTime _lastDrawUtc = DateTime.MinValue;
     private bool _enabled;
@@ -71,7 +70,6 @@ public sealed class OverlayWindowService : IDisposable
         _settings = settings;
         _log = log;
         _redrawInterval = redrawInterval ?? DefaultRedrawInterval;
-        _fontScale = LoadFontScale(_settings.Load());
 
         _overlay.Changed += OnFrameChanged;
         _pipeline.PipelineStateChanged += OnPipelineStateChanged;
@@ -115,33 +113,11 @@ public sealed class OverlayWindowService : IDisposable
                 _anchorRect = null;
                 // Clear the last drawn frame so re-showing cannot flash stale translations.
                 // Xoá frame vẽ cuối để lần hiện lại không nháy bản dịch cũ.
-                _host.Draw(Array.Empty<DrawBox>(), _fontScale);
+                _host.Draw(Array.Empty<DrawBox>());
                 _host.Hide();
             }
 
             Persist(s => s with { OverlayOnGame = target });
-        }
-    }
-
-    /// <summary>
-    /// Applies the overlay font scale and persists it; an invalid value keeps the previous scale
-    /// and logs a warning. Áp dụng hệ số cỡ chữ overlay và lưu lại; giá trị không hợp lệ giữ hệ số
-    /// cũ và ghi log warning.
-    /// </summary>
-    /// <param name="fontScale">Font multiplier in (0, 4]; <see langword="null"/> keeps the current scale. Hệ số cỡ chữ trong (0, 4]; <see langword="null"/> giữ hệ số hiện tại.</param>
-    public void ApplyOptions(double? fontScale = null)
-    {
-        lock (_gate)
-        {
-            if (_disposed) return;
-
-            if (fontScale is not null)
-            {
-                if (double.IsFinite(fontScale.Value) && fontScale.Value is > 0 and <= 4) _fontScale = fontScale.Value;
-                else _log.LogWarning("Ignoring invalid overlay font scale {FontScale}.", fontScale);
-            }
-
-            Persist(s => s with { OverlayFontScale = _fontScale });
         }
     }
 
@@ -227,7 +203,7 @@ public sealed class OverlayWindowService : IDisposable
             (int X, int Y, int Width, int Height) anchor = _anchorRect.Value;
             IReadOnlyList<DrawBox> boxes = OverlayLayout.Render(frame, anchor.Width, anchor.Height);
             _lastDrawUtc = now;
-            _host.Draw(boxes, _fontScale);
+            _host.Draw(boxes);
         }
     }
 
@@ -252,7 +228,4 @@ public sealed class OverlayWindowService : IDisposable
             _log.LogWarning(ex, "Could not persist overlay settings.");
         }
     }
-
-    private static double LoadFontScale(AppSettings s) =>
-        double.IsFinite(s.OverlayFontScale) && s.OverlayFontScale is > 0 and <= 4 ? s.OverlayFontScale : 1.0;
 }

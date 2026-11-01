@@ -29,7 +29,27 @@ public class FrameAnnotatorTests
         return new Bitmap(image);
     }
 
-    private static bool IsGreen(Color c) => c.G > 150 && c.R < 120 && c.B < 120;
+    /// <summary>Vertical extent of the dark pill inside a y-band (x 30..226). Khoảng dọc của pill tối trong dải y (x 30..226).</summary>
+    private static int PillHeight(Bitmap bitmap, int top, int bottom)
+    {
+        int min = int.MaxValue, max = -1;
+        for (int y = Math.Max(0, top); y <= Math.Min(bitmap.Height - 1, bottom); y++)
+        {
+            for (int x = 30; x <= Math.Min(226, bitmap.Width - 1); x++)
+            {
+                if (!IsDark(bitmap.GetPixel(x, y))) continue;
+                min = Math.Min(min, y);
+                max = Math.Max(max, y);
+            }
+        }
+        return max < 0 ? 0 : max - min + 1;
+    }
+
+    // JPEG 4:2:0 chroma subsampling washes the 1.6 px teal line toward grey, so match the
+    // green-blue bias rather than the exact #4FD8C4 value.
+    // JPEG 4:2:0 làm nét teal 1,6 px nhạt dần về xám, nên so độ lệch xanh lá/xanh dương thay vì
+    // đúng giá trị #4FD8C4.
+    private static bool IsTeal(Color c) => c.G > 140 && c.B > 110 && c.G > c.R + 12 && c.B > c.R + 4;
 
     private static bool IsDark(Color c) => c.R < DarkCap && c.G < DarkCap && c.B < DarkCap;
 
@@ -68,24 +88,31 @@ public class FrameAnnotatorTests
     }
 
     [Fact]
-    public void Annotate_WithSnapshot_DrawsGreenBox()
+    public void Annotate_WithSnapshot_DrawsTealCornerTicks()
     {
-        using Frame frame = SolidFrame(640, 360, 0, 0, 0);
-        var snapshot = new AnnotSnapshot(640, 360,
+        using Frame frame = SolidFrame(1280, 720, 0, 0, 0);
+        var snapshot = new AnnotSnapshot(1280, 720,
             [new AnnotBox(0.1, 0.1, 0.3, 0.1, "Hello", "Xin chào")]);
 
         byte[] jpeg = new FrameAnnotator().Annotate(frame, snapshot).Jpeg;
 
         using Bitmap decoded = Decode(jpeg);
-        int green = 0;
-        for (int y = 30; y < 80; y++)
-            for (int x = 58; x < 262; x++)
-                if (IsGreen(decoded.GetPixel(x, y))) green++;
-        Assert.True(green > 0, "expected green (#22C55E) pixels inside/around the box region");
+        // Source box is (128,72)-(512,144); ticks sit on its four corners (#4FD8C4, 1.6 px pen).
+        // Box gốc là (128,72)-(512,144); tick nằm ở bốn góc (màu #4FD8C4, pen 1,6 px).
+        (int X, int Y)[] corners = [(128, 72), (512, 72), (512, 144), (128, 144)];
+        int teal = 0;
+        foreach ((int cx, int cy) in corners)
+        {
+            for (int y = Math.Max(0, cy - 10); y <= Math.Min(719, cy + 10); y++)
+                for (int x = Math.Max(0, cx - 10); x <= Math.Min(1279, cx + 10); x++)
+                    if (IsTeal(decoded.GetPixel(x, y))) teal++;
+        }
+
+        Assert.True(teal > 10, $"expected teal (#4FD8C4) tick pixels near the box corners, got {teal}");
     }
 
     [Fact]
-    public void Annotate_DrawsPillBehindText()
+    public void Annotate_DrawsPillBehindTextInsideBox()
     {
         using Frame frame = SolidFrame(640, 360, 255, 255, 255); // white so only the pill is dark
         var snapshot = new AnnotSnapshot(640, 360,
@@ -94,40 +121,34 @@ public class FrameAnnotatorTests
         AnnotatedFrame annotated = new FrameAnnotator().Annotate(frame, snapshot);
         using Bitmap decoded = Decode(annotated.Jpeg);
 
-        // Box (64, 36, 192×36) → text drawn at ly = 74 with a 12.8 px font, so the pill sits
-        // roughly at x 62..124, y 73..92. A pill is a solid dark rectangle; the previous
-        // outline style drew thin ~1 px strokes, so a horizontal run of dark pixels ≥ 40
-        // distinguishes the fill from outlines.
-        // Box (64, 36, 192×36) → text vẽ tại ly = 74 với font 12,8 px, pill ≈ x 62..124,
-        // y 73..92. Pill là hình chữ nhật đặc; style viền cũ chỉ vẽ nét mảnh ~1 px, nên một
-        // chuỗi pixel tối liền ≥ 40 phân biệt được hình nền đặc với viền.
+        // The pill now sits INSIDE the source box (64,36)-(256,72), inset 4 px: roughly
+        // x 68..160, y 40..68 for the 18 px text. A solid dark run ≥ 30 distinguishes the
+        // pill fill from the removed rectangular outline.
+        // Pill giờ nằm TRONG box gốc (64,36)-(256,72), inset 4 px: khoảng x 68..160, y 40..68
+        // với chữ 18 px. Chuỗi tối liền ≥ 30 phân biệt nền pill với viền chữ nhật đã bỏ.
         int dark = 0, maxRun = 0;
-        int pxMin = 0, pxMax = 0, pyMin = 0, pyMax = 0;
-        bool hasPill = false;
-        for (int y = 73; y < 92; y++)
+        int pxMin = int.MaxValue, pxMax = 0, pyMin = int.MaxValue, pyMax = 0;
+        for (int y = 36; y <= 72; y++)
         {
             int run = 0;
-            for (int x = 60; x < 135; x++)
+            for (int x = 60; x <= 260; x++)
             {
-                Color c = decoded.GetPixel(x, y);
-                if (IsDark(c))
+                if (IsDark(decoded.GetPixel(x, y)))
                 {
                     dark++;
                     run++;
                     if (run > maxRun) maxRun = run;
-                    if (!hasPill) { pxMin = pxMax = x; pyMin = pyMax = y; hasPill = true; }
-                    else
-                    {
-                        pxMin = Math.Min(pxMin, x); pxMax = Math.Max(pxMax, x);
-                        pyMin = Math.Min(pyMin, y); pyMax = Math.Max(pyMax, y);
-                    }
+                    pxMin = Math.Min(pxMin, x); pxMax = Math.Max(pxMax, x);
+                    pyMin = Math.Min(pyMin, y); pyMax = Math.Max(pyMax, y);
                 }
                 else run = 0;
             }
         }
 
-        Assert.True(dark > 200, $"pill: expected >200 dark pixels in x 60..135/y 73..92, got {dark}");
-        Assert.True(maxRun >= 40, $"pill: expected a solid dark rectangle (run >= 40), got run {maxRun}");
+        Assert.True(dark > 300, $"pill: expected >300 dark pixels in the box interior, got {dark}");
+        Assert.True(maxRun >= 30, $"pill: expected a solid dark rectangle (run >= 30), got run {maxRun}");
+        Assert.InRange(pyMin, 36, 50);
+        Assert.InRange(pyMax, 55, 72);
 
         // White pixels strictly inside the pill bounding box can only be the text itself
         // (the pill fill is dark). Vùng trắng nằm trong pill chỉ có thể là chữ (nền pill là tối).
@@ -135,7 +156,31 @@ public class FrameAnnotatorTests
         for (int y = pyMin + 1; y < pyMax; y++)
             for (int x = pxMin + 1; x < pxMax; x++)
                 if (IsWhite(decoded.GetPixel(x, y))) textWhite++;
-        Assert.True(textWhite > 20, $"text: expected >20 white pixels inside the pill, got {textWhite}");
+        Assert.True(textWhite > 10, $"text: expected >10 white pixels inside the pill, got {textWhite}");
+    }
+
+    [Fact]
+    public void Annotate_PillHeightGrowsWithBoxHeight()
+    {
+        using Frame frame = SolidFrame(640, 360, 255, 255, 255);
+        var snapshot = new AnnotSnapshot(640, 360,
+        [
+            new AnnotBox(0.05, 0.10, 0.30, 0.083, "Chào", "Chào"),
+            new AnnotBox(0.05, 0.55, 0.30, 0.250, "Chào", "Chào"),
+        ]);
+
+        using Bitmap decoded = Decode(new FrameAnnotator().Annotate(frame, snapshot).Jpeg);
+
+        // Short box (30 px) vs tall box (90 px): the pill height must grow with the box instead
+        // of staying at one fixed size for every box.
+        // Box thấp (30 px) so với box cao (90 px): chiều cao pill phải tăng theo box thay vì
+        // giữ một cỡ cố định cho mọi box.
+        int shortPill = PillHeight(decoded, 30, 68);
+        int tallPill = PillHeight(decoded, 196, 290);
+
+        Assert.True(shortPill > 8, $"short box: expected a visible pill, got height {shortPill}");
+        Assert.True(tallPill > shortPill + 20,
+            $"tall box pill ({tallPill} px) should be at least 20 px taller than the short one ({shortPill} px)");
     }
 
     [Fact]

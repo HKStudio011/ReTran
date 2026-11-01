@@ -91,7 +91,6 @@ public static class Program
         server.Register("core.start", p => host.StartAsync(p, CancellationToken.None));
         server.Register("core.stop", p => host.StopAsync(p, CancellationToken.None));
         server.Register("core.list_sources", _ => host.ListSourcesAsync(CancellationToken.None));
-        server.Register("core.set_font_scale", p => host.SetFontScaleAsync(p, CancellationToken.None));
         // ocr.models.* proxies: the App talks model management to the sidecar through the
         // core, keeping a single JSON-RPC channel.
         // Proxy ocr.models.*: App nói chuyện quản lý model với sidecar qua core, giữ

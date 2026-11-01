@@ -290,23 +290,6 @@ public sealed class PipelineController
     }
 
     /// <summary>
-    /// Sends <c>core.set_font_scale</c> so the current session's preview annotation uses the new
-    /// size immediately, without restarting the session.
-    /// Gửi <c>core.set_font_scale</c> để phần ghi chú preview của phiên hiện tại dùng cỡ mới
-    /// ngay, không cần khởi động lại phiên.
-    /// </summary>
-    /// <param name="fontScale">Font multiplier in (0, 4]. Hệ số cỡ chữ trong (0, 4].</param>
-    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
-    /// <returns>A task that completes once Core accepts the value. Task hoàn tất khi Core nhận giá trị.</returns>
-    /// <exception cref="RpcException">Propagated from Core when the value is rejected. Đẩy ra từ Core khi giá trị bị từ chối.</exception>
-    public async Task SetAnnotationFontScaleAsync(double fontScale, CancellationToken ct)
-    {
-        await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
-        await _peer.CallAsync("core.set_font_scale",
-            new JsonObject { ["fontScale"] = fontScale }, ct).ConfigureAwait(false);
-    }
-
-    /// <summary>
     /// Ensures the core <b>process</b> is running (spawning it when needed — this starts the
     /// process only, never the pipeline: <c>core.start</c> is sent exclusively by
     /// <see cref="StartAsync"/> on the user's command), wires the Core→App handlers once, then

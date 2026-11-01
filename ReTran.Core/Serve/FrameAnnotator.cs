@@ -11,11 +11,11 @@ using Frame = ReTran.Core.Capture.Frame;
 /// GDI+ implementation of <see cref="IFrameAnnotator"/>: downscales (max 1280 wide, never
 /// upscale) by wrapping the captured BGRA buffer in place (pinned, no pixel copy), draws teal
 /// corner ticks around each source box plus a dark pill holding the translated text (font size
-/// scales with the box height and the user font multiplier), encodes JPEG quality 70.
+/// scales with the box height), encodes JPEG quality 70.
 /// Bản hiện GDI+ của <see cref="IFrameAnnotator"/>: thu nhỏ (tối đa 1280 rộng, không phóng to)
 /// bằng cách quấn buffer BGRA đã chụp tại chỗ (pin trong chỗ, không sao chép pixel), vẽ tick
 /// teal 4 góc quanh mỗi box gốc kèm nền pill tối chứa bản dịch (cỡ chữ scale theo chiều cao
-/// box và hệ số cỡ chữ người dùng), mã hoá JPEG quality 70.
+/// box), mã hoá JPEG quality 70.
 /// </summary>
 /// <remarks>
 /// Stateless and thread-safe — one instance may serve many sessions. Không trạng thái, an toàn
@@ -38,7 +38,7 @@ public sealed class FrameAnnotator : IFrameAnnotator
     /// hàm trả về: Bitmap nguồn đọc mảng pin trực tiếp cho tới khi ảnh thu nhỏ và JPEG hoàn
     /// tất. Byte của <paramref name="frame"/> không bao giờ bị sao chép.
     /// </remarks>
-    public AnnotatedFrame Annotate(Frame frame, AnnotSnapshot? snapshot, double fontScale = 1.0)
+    public AnnotatedFrame Annotate(Frame frame, AnnotSnapshot? snapshot)
     {
         ArgumentNullException.ThrowIfNull(frame);
 
@@ -62,7 +62,7 @@ public sealed class FrameAnnotator : IFrameAnnotator
                 g.DrawImage(source, 0, 0, outW, outH);
                 g.CompositingMode = CompositingMode.SourceOver;
                 if (snapshot is not null)
-                    DrawBoxes(g, snapshot, scale, outW, outH, fontScale);
+                    DrawBoxes(g, snapshot, scale, outW, outH);
             }
 
             using var stream = new MemoryStream();
@@ -83,7 +83,7 @@ public sealed class FrameAnnotator : IFrameAnnotator
     /// box và thu nhỏ dần đến khi vừa).
     /// </summary>
     private static void DrawBoxes(Graphics g, AnnotSnapshot snapshot, float scale, int outW,
-        int outH, double fontScale)
+        int outH)
     {
         float ui = BoxAnnotationStyle.DecorationScale(outW);
         using var tickPen = new Pen(BoxAnnotationStyle.TickColor, MathF.Max(1f, 1.6f * ui))
@@ -115,7 +115,7 @@ public sealed class FrameAnnotator : IFrameAnnotator
             if (innerW < 2f || innerH < 2f) continue;
 
             BoxAnnotationStyle.TextFit fit = BoxAnnotationStyle.Fit(
-                g, label, innerW, innerH, h, fontScale, format, maxLines: 2);
+                g, label, innerW, innerH, h, format, maxLines: 2);
             SizeF block = fit.Block;
             if (!fit.Fits)
             {
