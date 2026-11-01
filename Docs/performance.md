@@ -917,3 +917,11 @@ uv run --project ReTran.OCR python Tools/Perf/ocrbench/bench.py --data Tools/Per
 # Lượt "cũ" tái lập bằng PaddleOCR(2 tên model + 3 cờ false) và predict() không kwarg (cùng bộ frame).
 # CPU + oneDNN: core.start với ocr.params = {"device":"cpu"}; schema phải trả enable_mkldnn.default = false.
 ```
+
+### Chi phí LineGrouper — gộp nhiều dòng trước dịch (plan 2026-11-01)
+
+- `LineGrouper.Group` chạy **trong chu kỳ OCR có sẵn** của Core (`OcrPipeline`, giữa spot của sidecar và bước diff new-text) ⇒ **không thêm đường nóng** (không thread/loop mới); chỉ chạy khi `ocr.mergeLines: true`.
+- Độ phức tạp O(n log n) theo số dòng (sort thứ tự đọc + scan nhóm mở, số nhóm mở nhỏ — ở mật độ màn hình thật ~60 box/khung chi phí không đáng kể).
+- Đo unit test (`LineGrouperTests.ManyLinesTwoColumns_GroupsPerColumn_Fast`): **300 dòng** (2 cột × 150) **< 5 ms** — budget ghim trong test, có lượt warm-up trước để loại JIT.
+- Tác dụng tích cực: text nhiều dòng liền kề gộp thành 1 block ⇒ `new_texts` tính theo block thay vì theo dòng ⇒ khi màn hình ổn định, **translation requests giảm** (cùng cơ chế diff-based đã đo ở M4: nội dung không đổi ⇒ không request thêm).
+- Không chạy lại annotbench: đường annotate vẫn vẽ ≤ số box như trước (mỗi block gộp là 1 box thay vì N dòng thành viên), chi phí theo box giữ nguyên như bảng annotate phía trên.
