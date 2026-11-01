@@ -215,8 +215,13 @@
                 <p class="rt-hint">@(L["deck.ocr.rhythm.note"])</p>
             </div>
         </details>
-        <div class="rt-field-row" style="flex-wrap: wrap; gap: 10px; margin-top: 10px;">
-            <button type="button" class="rt-btn rt-btn-primary rt-mini" disabled="@_ocrParamsBusy" @onclick="SaveOcrParamsAsync">@(L["deck.ocr.params.save"])</button>
+        <div class="rt-srow">
+            <span>@(L["deck.ocr.mergeLines.label"])</span>
+            <input type="checkbox" @bind="_mergeLines" aria-label="@L["deck.ocr.mergeLines.label"]" />
+            <p class="rt-hint">@(L["deck.ocr.mergeLines.hint"])</p>
+        </div>
+        <div class="rt-field-row" style="flex-wrap: wrap; gap: 10px; margin-top: 10px; position: sticky; bottom: 0; z-index: 1; background: var(--rt-panel); padding: 8px 0; border-top: 1px solid var(--rt-line);">
+            <button type="button" class="rt-btn rt-btn-primary" disabled="@_ocrParamsBusy" @onclick="SaveOcrParamsAsync">@(L["deck.ocr.params.save"])</button>
             <button type="button" class="rt-btn rt-mini" disabled="@_ocrParamsBusy" @onclick="RestoreOcrParamsAsync">@(L["deck.ocr.params.restore"])</button>
             @if (_ocrStatusText.Length > 0)
             {
@@ -275,8 +280,9 @@
     </section>
 }
 
+<p class="rt-hint" style="margin: 14px 0 0;">@(L["settings.note.saveScope"])</p>
 <div class="rt-sheet-foot">
-    <button type="button" class="rt-btn rt-btn-primary" @onclick="Save">@(L["settings.btn.save"])</button>
+    <button type="button" class="rt-btn" @onclick="Save">@(L["settings.btn.save"])</button>
     @if (StatusText.Length > 0)
     {
         <span class="rt-hint" style="@(_statusKind == "saved" ? "" : "color: var(--rt-danger)")">@StatusText</span>
@@ -323,6 +329,7 @@
     private Dictionary<string, JsonNode?> _ocrValues = new();
     private string _ocrFpsText = "3";
     private string _captureFpsText = "10";
+    private bool _mergeLines = true; // Gộp nhiều dòng thành một khối trước khi dịch (áp dụng từ lần Start kế tiếp).
     private string _ocrStatusText = string.Empty;
     private bool _ocrStatusError;
 
@@ -344,6 +351,7 @@
         _model.ApiKey = current.ApiKey;
         _ocrDetPick = current.OcrDet;
         _ocrRecPick = current.OcrRec;
+        _mergeLines = current.OcrMergeLines;
         _appVersion = AppVersionFormatter.Format(Updates.CurrentVersion);
         // File ghi tay có thể chứa giá trị ngoài danh sách — thêm vào để select không bị trống.
         if (Array.IndexOf(_srcOptions, current.Src) < 0) _srcOptions = [current.Src, .. _srcOptions];
@@ -590,6 +598,7 @@
         ApplyOcrValuesToControls();
         _ocrFpsText = settings.OcrFps.ToString(CultureInfo.InvariantCulture);
         _captureFpsText = settings.CaptureFps.ToString(CultureInfo.InvariantCulture);
+        _mergeLines = settings.OcrMergeLines;
         SetOcrStatus(string.Empty, isError: false);
     }
 
@@ -655,6 +664,7 @@
                 OcrEngine = map,
                 OcrFps = ocrFps,
                 CaptureFps = captureFps,
+                OcrMergeLines = _mergeLines,
             });
             _ocrValues = new Dictionary<string, JsonNode?>(map);
             SetOcrStatus(L[result.Deferred.Count > 0 ? "deck.ocr.params.deferred" : "deck.ocr.params.applied"],
@@ -680,6 +690,7 @@
         if (_ocrParamsBusy) return;
         _ocrValues.Clear();
         ApplyOcrValuesToControls();
+        _mergeLines = AppSettings.Default.OcrMergeLines; // restore đưa cả cờ gộp dòng về mặc định.
         await SaveOcrParamsAsync();
     }
 

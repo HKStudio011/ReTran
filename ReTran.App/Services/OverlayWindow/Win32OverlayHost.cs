@@ -219,11 +219,11 @@ public sealed class Win32OverlayHost : IOverlayHost
     /// <summary>
     /// Draws the overlay boxes onto an existing graphics surface: teal corner ticks on each
     /// source box plus a dark rounded pill inside it holding the translation (up to two wrapped
-    /// lines, font size derived from the box height and shrunk until it fits). Exposed internally
-    /// so tests can pixel-check the real drawing path.
+    /// lines — four for merged paragraph blocks, font size derived from the box height and shrunk
+    /// until it fits). Exposed internally so tests can pixel-check the real drawing path.
     /// Vẽ các box overlay lên surface đã có: tick teal 4 góc trên box gốc kèm pill bo góc tối
-    /// bên trong chứa bản dịch (tối đa hai dòng wrap, cỡ chữ suy ra từ chiều cao box và thu nhỏ
-    /// đến khi vừa). Mở nội bộ để test kiểm tra pixel của đúng đường vẽ thật.
+    /// bên trong chứa bản dịch (tối đa hai dòng wrap — bốn dòng với khối đoạn văn gộp, cỡ chữ suy
+    /// ra từ chiều cao box và thu nhỏ đến khi vừa). Mở nội bộ để test kiểm tra pixel của đúng đường vẽ thật.
     /// </summary>
     /// <param name="g">Target graphics surface. Surface đồ hoạ đích.</param>
     /// <param name="boxes">Boxes in viewport pixel coordinates. Các box theo toạ độ pixel viewport.</param>
@@ -260,14 +260,16 @@ public sealed class Win32OverlayHost : IOverlayHost
             float innerW = inner.Width, innerH = inner.Height;
             if (innerW < 2f || innerH < 2f) continue;
 
+            // Khối gộp nhiều dòng (paragraph) cho phép tới 4 dòng wrap trong pill — khớp FrameAnnotator phía core.
+            int maxLines = box.IsParagraph ? 4 : 2;
             BoxAnnotationStyle.TextFit fit = BoxAnnotationStyle.Fit(
-                g, text, innerW, innerH, rect.Height, format, maxLines: 2,
+                g, text, innerW, innerH, rect.Height, format, maxLines: maxLines,
                 shrink: true,
                 maxFontSize: BoxAnnotationStyle.MaxFontSize * ui);
             SD.SizeF block = fit.Block;
             if (!fit.Fits)
             {
-                text = BoxAnnotationStyle.TruncateToFit(g, text, fit.Size, innerW, innerH, format, maxLines: 2);
+                text = BoxAnnotationStyle.TruncateToFit(g, text, fit.Size, innerW, innerH, format, maxLines: maxLines);
                 block = BoxAnnotationStyle.MeasureBlock(g, text, fit.Size, innerW, format);
             }
 

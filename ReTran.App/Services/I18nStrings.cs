@@ -64,9 +64,10 @@ public static class I18nStrings
         ["settings.provider.llm"] = "LLM (OpenAI-compatible)",
         ["settings.opt.auto"] = "Tự động (auto)",
         ["settings.opt.comingSoon"] = "sắp có",
-        ["settings.btn.save"] = "Lưu cài đặt",
-        ["settings.status.saved"] = "Đã lưu cài đặt.",
-        ["settings.status.saveFailed"] = "Lưu cài đặt thất bại.",
+        ["settings.btn.save"] = "Lưu dịch & ngôn ngữ",
+        ["settings.status.saved"] = "Đã lưu mục dịch & ngôn ngữ.",
+        ["settings.status.saveFailed"] = "Lưu thất bại.",
+        ["settings.note.saveScope"] = "Nút này chỉ lưu nhà cung cấp dịch và ngôn ngữ nguồn/đích. Model OCR và tham số OCR có nút lưu riêng ở mục OCR.",
         ["settings.note.srcNextStart"] = "Ngôn ngữ áp dụng cho lần start kế tiếp — không dịch lại giữa phiên đang chạy.",
         ["notfound.title"] = "Không tìm thấy",
         ["notfound.body"] = "Xin lỗi, nội dung bạn tìm không tồn tại.",
@@ -157,7 +158,7 @@ public static class I18nStrings
         ["deck.error.pickWindow"] = "Chọn một cửa sổ trước khi bắt đầu.",
 
         // OCR model manager (task 7)
-        ["deck.settings.section.ocr"] = "Model OCR",
+        ["deck.settings.section.ocr"] = "OCR (model & tham số)",
         ["deck.settings.ocr.det"] = "Model phát hiện chữ (det)",
         ["deck.settings.ocr.rec"] = "Model nhận dạng chữ (rec)",
         ["deck.ocr.savePair"] = "Lưu model",
@@ -187,7 +188,7 @@ public static class I18nStrings
 
         // OCR engine parameters (spec 2026-10-26 §6.1–6.5, §8)
         ["deck.ocr.params.title"] = "Tham số máy OCR",
-        ["deck.ocr.params.save"] = "Lưu tham số",
+        ["deck.ocr.params.save"] = "Lưu tham số OCR",
         ["deck.ocr.params.restore"] = "Khôi phục mặc định",
         ["deck.ocr.params.loadFailed"] = "Không lấy được schema tham số — bấm Làm mới để thử lại.",
         ["deck.ocr.params.invalid"] = "{0}: {1}",
@@ -197,6 +198,8 @@ public static class I18nStrings
         ["deck.ocr.rhythm.ocrFps"] = "Tốc độ OCR",
         ["deck.ocr.rhythm.captureFps"] = "Tốc độ capture",
         ["deck.ocr.rhythm.note"] = "Áp dụng ở lần Start kế tiếp",
+        ["deck.ocr.mergeLines.label"] = "Gộp nhiều dòng thành một khối",
+        ["deck.ocr.mergeLines.hint"] = "Các dòng gần nhau cùng cột được gộp thành 1 box trước khi dịch — áp dụng từ lần Start kế tiếp.",
 
         ["ocr.group.device"] = "Thiết bị & engine",
         ["ocr.group.models"] = "Nạp model",
@@ -356,9 +359,10 @@ public static class I18nStrings
         ["settings.provider.llm"] = "LLM (OpenAI-compatible)",
         ["settings.opt.auto"] = "Auto",
         ["settings.opt.comingSoon"] = "coming soon",
-        ["settings.btn.save"] = "Save settings",
-        ["settings.status.saved"] = "Settings saved.",
-        ["settings.status.saveFailed"] = "Failed to save settings.",
+        ["settings.btn.save"] = "Save translation & languages",
+        ["settings.status.saved"] = "Translation & language settings saved.",
+        ["settings.status.saveFailed"] = "Saving failed.",
+        ["settings.note.saveScope"] = "This button saves the translation provider and source/target languages only. OCR models and parameters have their own save buttons in the OCR section.",
         ["settings.note.srcNextStart"] = "Languages apply to the next start — no re-translation mid-session.",
         ["notfound.title"] = "Not Found",
         ["notfound.body"] = "Sorry, the content you are looking for does not exist.",
@@ -449,7 +453,7 @@ public static class I18nStrings
         ["deck.error.pickWindow"] = "Pick a window before starting.",
 
         // OCR model manager (task 7)
-        ["deck.settings.section.ocr"] = "OCR models",
+        ["deck.settings.section.ocr"] = "OCR (models & parameters)",
         ["deck.settings.ocr.det"] = "Detection model (det)",
         ["deck.settings.ocr.rec"] = "Recognition model (rec)",
         ["deck.ocr.savePair"] = "Save models",
@@ -479,7 +483,7 @@ public static class I18nStrings
 
         // OCR engine parameters (spec 2026-10-26 §6.1–6.5, §8)
         ["deck.ocr.params.title"] = "OCR engine parameters",
-        ["deck.ocr.params.save"] = "Save parameters",
+        ["deck.ocr.params.save"] = "Save OCR parameters",
         ["deck.ocr.params.restore"] = "Restore defaults",
         ["deck.ocr.params.loadFailed"] = "Could not load the parameter schema — press Refresh to retry.",
         ["deck.ocr.params.invalid"] = "{0}: {1}",
@@ -489,6 +493,8 @@ public static class I18nStrings
         ["deck.ocr.rhythm.ocrFps"] = "OCR rate",
         ["deck.ocr.rhythm.captureFps"] = "Capture rate",
         ["deck.ocr.rhythm.note"] = "Applies on the next Start",
+        ["deck.ocr.mergeLines.label"] = "Merge multi-line text into one block",
+        ["deck.ocr.mergeLines.hint"] = "Nearby lines in the same column are merged into a single box before translation — applies from the next start.",
 
         ["ocr.group.device"] = "Device & engine",
         ["ocr.group.models"] = "Model loading",

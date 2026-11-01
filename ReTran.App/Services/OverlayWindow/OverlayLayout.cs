@@ -11,7 +11,8 @@ namespace ReTran_App.Services.OverlayWindow;
 /// <param name="W">Width in pixels. Chiều rộng theo pixel.</param>
 /// <param name="H">Height in pixels. Chiều cao theo pixel.</param>
 /// <param name="Text">Text to draw (the translation). Văn bản cần vẽ (bản dịch).</param>
-public sealed record DrawBox(double X, double Y, double W, double H, string Text);
+/// <param name="IsParagraph">True when the box is a merged multi-line paragraph block. Đúng khi hộp là khối đoạn văn gộp nhiều dòng.</param>
+public sealed record DrawBox(double X, double Y, double W, double H, string Text, bool IsParagraph = false);
 
 /// <summary>
 /// Pure layout engine that turns an overlay frame into drawable boxes in viewport pixels.
@@ -48,7 +49,7 @@ public static class OverlayLayout
             double h = Math.Min(b.H * contentH, contentY + contentH - y);
             if (w <= 0 || h <= 0) continue;
 
-            result.Add(new DrawBox(x, y, w, h, b.Translated));
+            result.Add(new DrawBox(x, y, w, h, b.Translated, b.IsParagraph));
         }
         return result;
     }
