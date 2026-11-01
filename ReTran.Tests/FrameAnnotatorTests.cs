@@ -198,6 +198,23 @@ public class FrameAnnotatorTests
         Assert.Equal(640, decoded.Width);
     }
 
+    [Fact]
+    public void Annotate_ParagraphBox_RendersValidJpeg()
+    {
+        using Frame frame = SolidFrame(1920, 1080, 0, 0, 0);
+        // text ~60 ký tự; box cao ~3 dòng (144 px ở 720p sau scale) — pill maxLines 4 (spec 2026-11-01)
+        string text = "Đây là một đoạn văn bản dài được dịch và hiển thị trong khung ghi chú";
+        var snapshot = new AnnotSnapshot(1920, 1080,
+            [new AnnotBox(0.1, 0.1, 0.5, 0.2, text, text, IsParagraph: true)]);
+
+        AnnotatedFrame annotated = new FrameAnnotator().Annotate(frame, snapshot);
+
+        Assert.NotEmpty(annotated.Jpeg);
+        using Bitmap decoded = Decode(annotated.Jpeg);
+        Assert.Equal(1280, decoded.Width);  // 1920×1080 → 1280×720 (giữ tỉ lệ)
+        Assert.Equal(720, decoded.Height);
+    }
+
     /// <summary>
     /// Guards managed-allocation churn per annotate pass only. The removed `CopyPixels` cost
     /// lived in native GDI+ memory plus CPU time and is not observable through

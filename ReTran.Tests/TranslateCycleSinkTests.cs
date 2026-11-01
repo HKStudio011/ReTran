@@ -25,6 +25,24 @@ public class TranslateCycleSinkTests
         };
     }
 
+    private static JsonObject MergedBlockResult() // 1 spot: box [[100,50],[400,50],[400,250],[100,250]], text "HELLO WORLD", paragraph true, new_texts ["HELLO WORLD"]
+    {
+        var spots = new JsonArray();
+        spots.Add(new JsonObject
+        {
+            ["text"] = "HELLO WORLD",
+            ["box"] = JsonNode.Parse("[[100,50],[400,50],[400,250],[100,250]]"),
+            ["score"] = 0.9,
+            ["paragraph"] = true,
+        });
+        return new JsonObject
+        {
+            ["spots"] = spots,
+            ["new_texts"] = new JsonArray(new JsonNode[] { "HELLO WORLD" }),
+            ["elapsed_ms"] = 1,
+        };
+    }
+
     private sealed class StubTranslator : ITranslator
     {
         public string Name => "stub";
@@ -164,6 +182,44 @@ public class TranslateCycleSinkTests
         Assert.Equal(0.1, box.Y, 6); // 50/500
         Assert.Equal(0.2, box.W, 6); // (300-100)/1000
         Assert.Equal(0.2, box.H, 6); // (150-50)/500
+    }
+
+    [Fact]
+    public async Task Cycle_MergedSpot_SingleBoxWithParagraphFlag()
+    {
+        var n = new StubNotifier();
+        var snapshot = new AnnotationSnapshot();
+        var sink = Create(new StubTranslator(), new StubCache(), n, snapshot: snapshot);
+        await sink.OnCycleAsync(1, 1000, 500, MergedBlockResult(), CancellationToken.None);
+
+        // wire: đúng 1 box với cờ paragraph (spec 2026-11-01)
+        var box = Assert.Single(n.Single("frame.translated")!["boxes"]!.AsArray())!.AsObject();
+        Assert.Equal("HELLO WORLD", box["text"]!.GetValue<string>());
+        Assert.True(box["paragraph"]!.GetValue<bool>());
+
+        // snapshot: AnnotBox mang cùng cờ cho bộ ghi chú khung
+        AnnotSnapshot? latest = snapshot.TryGet();
+        Assert.NotNull(latest);
+        AnnotBox annot = Assert.Single(latest!.Boxes);
+        Assert.Equal("HELLO WORLD", annot.Text);
+        Assert.True(annot.IsParagraph);
+    }
+
+    [Fact]
+    public async Task Cycle_PlainSpot_BoxHasParagraphFalse()
+    {
+        var n = new StubNotifier();
+        var snapshot = new AnnotationSnapshot();
+        var sink = Create(new StubTranslator(), new StubCache(), n, snapshot: snapshot);
+        await sink.OnCycleAsync(1, 1000, 500, Result("HELLO"), CancellationToken.None);
+
+        // spot thường không có key paragraph -> wire false (App cũ bỏ qua field vẫn an toàn)
+        var box = Assert.Single(n.Single("frame.translated")!["boxes"]!.AsArray())!.AsObject();
+        Assert.False(box["paragraph"]!.GetValue<bool>());
+
+        AnnotSnapshot? latest = snapshot.TryGet();
+        Assert.NotNull(latest);
+        Assert.False(Assert.Single(latest!.Boxes).IsParagraph);
     }
 
     [Fact]

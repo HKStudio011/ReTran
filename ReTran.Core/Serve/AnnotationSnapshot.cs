@@ -12,7 +12,8 @@ using ReTran.Core.Capture;
 /// <param name="H">Height (0–1). Chiều cao (0–1).</param>
 /// <param name="Text">OCR text under the box. Text OCR dưới box.</param>
 /// <param name="Translated">Translation, or <see langword="null"/> while none exists. Bản dịch, hoặc <see langword="null"/> khi chưa có.</param>
-public sealed record AnnotBox(double X, double Y, double W, double H, string Text, string? Translated);
+/// <param name="IsParagraph">True when the box is a merged multi-line paragraph block (spec 2026-11-01). Đúng khi box là block đoạn văn gộp nhiều dòng (spec 2026-11-01).</param>
+public sealed record AnnotBox(double X, double Y, double W, double H, string Text, string? Translated, bool IsParagraph = false);
 
 /// <summary>
 /// Immutable set of text regions for one captured frame, with the frame size the coordinates

@@ -1,5 +1,6 @@
 namespace ReTran.Core.Serve;
 
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using ReTran.Core.Cli;
 using ReTran.Core.JsonRpc;
@@ -14,12 +15,16 @@ using ReTran.Core.Translate;
 /// <remarks>
 /// Box coordinates are normalized to 0–1 and every box carries an explicit <c>translated</c>
 /// field: <see langword="null"/> until a translation exists, then the cached or freshly
-/// translated text (spec §3.3). A text is queued at most once per session — once translated
-/// (session hit) or while its translation is in flight it is never scheduled again.
+/// translated text (spec §3.3). A box may be a merged multi-line paragraph block flagged
+/// <c>paragraph</c> on the wire and via <see cref="AnnotBox.IsParagraph"/> (spec 2026-11-01).
+/// A text is queued at most once per session — once translated (session hit) or while its
+/// translation is in flight it is never scheduled again.
 /// Toạ độ box được chuẩn hoá về 0–1 và mọi box đều có field <c>translated</c> tường minh:
 /// <see langword="null"/> khi chưa có bản dịch, sau đó là text đã dịch từ cache hoặc vừa dịch
-/// (spec §3.3). Mỗi text chỉ được xếp hàng tối đa một lần mỗi phiên — khi đã có bản dịch
-/// (trúng session) hoặc đang dịch dở thì không bao giờ bị xếp hàng lại.
+/// (spec §3.3). Box có thể là block đoạn văn gộp nhiều dòng, đánh dấu bằng cờ <c>paragraph</c>
+/// trên wire và qua <see cref="AnnotBox.IsParagraph"/> (spec 2026-11-01). Mỗi text chỉ được xếp
+/// hàng tối đa một lần mỗi phiên — khi đã có bản dịch (trúng session) hoặc đang dịch dở thì
+/// không bao giờ bị xếp hàng lại.
 /// </remarks>
 public sealed class TranslateCycleSink : ICycleSink
 {
@@ -111,8 +116,8 @@ public sealed class TranslateCycleSink : ICycleSink
     /// <param name="frameWidth">Captured frame width in pixels. Chiều rộng khung hình (pixel).</param>
     /// <param name="frameHeight">Captured frame height in pixels. Chiều cao khung hình (pixel).</param>
     /// <param name="spotResult">
-    /// Pipeline result: <c>{spots:[{box,text,score}], elapsed_ms, new_texts:[...]}</c>.
-    /// Kết quả pipeline: <c>{spots:[{box,text,score}], elapsed_ms, new_texts:[...]}</c>.
+    /// Pipeline result: <c>{spots:[{box,text,score,paragraph?}], elapsed_ms, new_texts:[...]}</c>.
+    /// Kết quả pipeline: <c>{spots:[{box,text,score,paragraph?}], elapsed_ms, new_texts:[...]}</c>.
     /// </param>
     /// <param name="ct">Cancellation token for the cycle. Token hủy của chu kỳ.</param>
     /// <returns>
@@ -138,6 +143,7 @@ public sealed class TranslateCycleSink : ICycleSink
                 string text = ReadText(spot["text"]);
                 var (x, y, w, h) = SpotGeometry.NormalizeQuad(
                     spot["box"] as JsonArray, frameWidth, frameHeight);
+                bool paragraph = spot["paragraph"] is JsonValue pv && pv.GetValueKind() == JsonValueKind.True;
                 string? translated;
                 lock (_sync) _session.TryGetValue(text, out translated);
                 boxes.Add(new JsonObject
@@ -149,8 +155,11 @@ public sealed class TranslateCycleSink : ICycleSink
                     ["text"] = text,
                     // Explicit null until a translation exists (spec §3.3). Tường minh null khi chưa có bản dịch (spec §3.3).
                     ["translated"] = translated,
+                    // Merged multi-line block flag; the App reads it to style paragraph boxes (spec 2026-11-01).
+                    // Cờ block gộp nhiều dòng; App đọc để hiển thị box đoạn văn (spec 2026-11-01).
+                    ["paragraph"] = paragraph,
                 });
-                annotBoxes.Add(new AnnotBox(x, y, w, h, text, translated));
+                annotBoxes.Add(new AnnotBox(x, y, w, h, text, translated, paragraph));
             }
         }
 

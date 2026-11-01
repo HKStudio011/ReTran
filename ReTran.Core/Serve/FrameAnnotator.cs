@@ -77,10 +77,11 @@ public sealed class FrameAnnotator : IFrameAnnotator
 
     /// <summary>
     /// Draws every box: teal corner ticks on the source box, then a dark rounded pill inside
-    /// the box holding the translation (up to two wrapped lines, font size derived from the box
-    /// height and shrunk until it fits). Vẽ mọi box: tick teal 4 góc trên box gốc, rồi pill bo
-    /// góc tối bên trong box chứa bản dịch (tối đa hai dòng wrap, cỡ chữ suy ra từ chiều cao
-    /// box và thu nhỏ dần đến khi vừa).
+    /// the box holding the translation (up to two wrapped lines — four for merged paragraph
+    /// blocks, spec 2026-11-01 — font size derived from the box height and shrunk until it fits).
+    /// Vẽ mọi box: tick teal 4 góc trên box gốc, rồi pill bo góc tối bên trong box chứa bản dịch
+    /// (tối đa hai dòng wrap — bốn dòng cho block đoạn văn gộp, spec 2026-11-01 — cỡ chữ suy ra
+    /// từ chiều cao box và thu nhỏ dần đến khi vừa).
     /// </summary>
     private static void DrawBoxes(Graphics g, AnnotSnapshot snapshot, float scale, int outW,
         int outH)
@@ -114,12 +115,16 @@ public sealed class FrameAnnotator : IFrameAnnotator
             float innerW = inner.Width, innerH = inner.Height;
             if (innerW < 2f || innerH < 2f) continue;
 
+            // Paragraph blocks wrap up to four lines; single-line boxes stay at two (spec 2026-11-01).
+            // Block đoạn văn wrap tối đa bốn dòng; box đơn giữ hai dòng (spec 2026-11-01).
+            int maxLines = box.IsParagraph ? 4 : 2;
+
             BoxAnnotationStyle.TextFit fit = BoxAnnotationStyle.Fit(
-                g, label, innerW, innerH, h, format, maxLines: 2);
+                g, label, innerW, innerH, h, format, maxLines);
             SizeF block = fit.Block;
             if (!fit.Fits)
             {
-                label = BoxAnnotationStyle.TruncateToFit(g, label, fit.Size, innerW, innerH, format, maxLines: 2);
+                label = BoxAnnotationStyle.TruncateToFit(g, label, fit.Size, innerW, innerH, format, maxLines);
                 block = BoxAnnotationStyle.MeasureBlock(g, label, fit.Size, innerW, format);
             }
 
