@@ -149,4 +149,30 @@ public class AppSettingsServiceTests : IDisposable
         Assert.Equal(3, settings.OcrFps);
         Assert.Equal(10, settings.CaptureFps);
     }
+
+    [Fact]
+    public void OcrMergeLines_RoundTrips()
+    {
+        var service = new AppSettingsService(_path);
+        var off = AppSettings.Default with { OcrMergeLines = false };
+
+        service.Save(off);
+        Assert.False(service.Load().OcrMergeLines);
+
+        service.Save(AppSettings.Default); // default is true
+        Assert.True(service.Load().OcrMergeLines);
+    }
+
+    [Fact]
+    public void OcrMergeLines_Absent_DefaultsTrue()
+    {
+        // File cũ không có ocrMergeLines -> mặc định true.
+        Directory.CreateDirectory(_dir); // Save() would create it; a hand-written file needs the dir first.
+        File.WriteAllText(_path, """{"provider":"google","src":"auto","dst":"vi"}""");
+        var service = new AppSettingsService(_path);
+
+        AppSettings settings = service.Load();
+
+        Assert.True(settings.OcrMergeLines);
+    }
 }

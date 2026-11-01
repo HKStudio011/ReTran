@@ -117,6 +117,32 @@ public class PipelineControllerTests : IDisposable
     }
 
     [Fact]
+    public async Task Start_SendsMergeLinesFromSettings()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        new AppSettingsService(_settingsPath).Save(new AppSettings("google", "auto", "vi", null));
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+
+        // mergeLines luôn đi kèm core.start; mặc định true (Core cũ bỏ qua key lạ).
+        JsonObject ocr = Assert.Single(peer.Calls).Params!["ocr"]!.AsObject();
+        Assert.True(ocr["mergeLines"]!.GetValue<bool>());
+
+        // OcrMergeLines = false → gửi false.
+        await controller.StopAsync(CancellationToken.None);
+        new AppSettingsService(_settingsPath).Save(AppSettings.Default with { OcrMergeLines = false });
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+
+        JsonObject ocrOff = peer.Calls.Last(call => call.Method == "core.start").Params!["ocr"]!.AsObject();
+        Assert.False(ocrOff["mergeLines"]!.GetValue<bool>());
+    }
+
+    [Fact]
     public async Task StartAsync_SendsOcrParamsAndFps_AndSurvivesSecondStart()
     {
         var peer = new FakeCorePeer { IsStarted = true };
@@ -224,6 +250,43 @@ public class PipelineControllerTests : IDisposable
         Assert.Equal("Xin chào", frame.Boxes[0].Translated);
         // translated:null keeps the source text so UI/OBS always have something to show.
         Assert.Equal("PENDING", frame.Boxes[1].Translated);
+    }
+
+    [Fact]
+    public async Task HandleFrameTranslated_ParagraphBox_FlagPropagates()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        var overlay = new OverlayState();
+        PipelineController controller = CreateController(peer, overlay);
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+
+        peer.RaiseNotification("frame.translated", new JsonObject
+        {
+            ["seq"] = 1,
+            ["w"] = 1920,
+            ["h"] = 1080,
+            ["boxes"] = new JsonArray(
+                new JsonObject
+                {
+                    ["x"] = 0.10, ["y"] = 0.20, ["w"] = 0.30, ["h"] = 0.10,
+                    ["text"] = "LINE ONE", ["translated"] = "Dòng một",
+                    ["paragraph"] = true,
+                },
+                new JsonObject
+                {
+                    ["x"] = 0.50, ["y"] = 0.60, ["w"] = 0.20, ["h"] = 0.10,
+                    ["text"] = "SINGLE", ["translated"] = "Đơn",
+                }),
+        });
+
+        OverlayFrame? frame = overlay.Latest;
+        Assert.NotNull(frame);
+        // Khối gộp nhiều dòng (Task 4) mang "paragraph":true → IsParagraph truyền xuống overlay.
+        Assert.True(frame!.Boxes[0].IsParagraph);
+        // Box không có key "paragraph" → false (Core cũ / dòng đơn).
+        Assert.False(frame.Boxes[1].IsParagraph);
     }
 
     [Fact]

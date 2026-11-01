@@ -236,6 +236,8 @@ public sealed class PipelineController
         // trị được DeepClone để tách khỏi node settings trước khi gắn vào params (tránh lỗi
         // "node already has a parent" khi node bị dùng lại ở lần start sau).
         var ocr = new JsonObject { ["det"] = settings.OcrDet, ["rec"] = settings.OcrRec };
+        // mergeLines luôn gửi — Core cũ bỏ qua key lạ.
+        ocr["mergeLines"] = settings.OcrMergeLines;
         JsonObject? ocrParams = BuildOcrParams(settings.OcrEngine ?? new Dictionary<string, JsonNode?>());
         if (ocrParams is not null) ocr["params"] = ocrParams;
 
@@ -791,13 +793,16 @@ public sealed class PipelineController
                 if (node is not JsonObject box) continue;
                 string text = ReadString(box, "text");
                 string translated = ReadString(box, "translated", text);
+                // Core gộp nhiều dòng thành một khối sẽ đánh dấu "paragraph":true; key vắng → false.
+                bool paragraph = box["paragraph"] is JsonValue pv && pv.GetValueKind() == JsonValueKind.True;
                 boxes.Add(new OverlayBox(
                     ReadDouble(box, "x"),
                     ReadDouble(box, "y"),
                     ReadDouble(box, "w"),
                     ReadDouble(box, "h"),
                     text,
-                    translated));
+                    translated,
+                    paragraph));
             }
         }
         _overlay.Publish(new OverlayFrame(

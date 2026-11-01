@@ -28,6 +28,7 @@ namespace ReTran_App.Services;
 /// </param>
 /// <param name="OcrFps">OCR rhythm in frames per second (1..60) sent on <c>core.start</c>. Nhịp OCR (khung/giây, 1..60) gửi khi <c>core.start</c>.</param>
 /// <param name="CaptureFps">Capture rhythm in frames per second (1..60) sent on <c>core.start</c>. Nhịp capture (khung/giây, 1..60) gửi khi <c>core.start</c>.</param>
+/// <param name="OcrMergeLines">Merge nearby OCR lines into one block before translation; sent on core.start as ocr.mergeLines. Gộp các dòng OCR gần nhau thành một khối trước khi dịch; gửi trong core.start dưới dạng ocr.mergeLines.</param>
 public sealed record AppSettings(
     string Provider, string Src, string Dst, string? ApiKey,
     bool OverlayOnGame = false,
@@ -35,7 +36,8 @@ public sealed record AppSettings(
     string OcrRec = "PP-OCRv6_small_rec",
     Dictionary<string, JsonNode?>? OcrEngine = null,
     int OcrFps = 3,
-    int CaptureFps = 10)
+    int CaptureFps = 10,
+    bool OcrMergeLines = true)
 {
     /// <summary>
     /// Factory default: Google Translate, auto source, Vietnamese target, no API key.

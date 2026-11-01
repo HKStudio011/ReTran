@@ -10,7 +10,8 @@ namespace ReTran_App.Core;
 /// <param name="H">Height as a fraction of frame height. / Chiều cao theo tỉ lệ chiều cao khung hình.</param>
 /// <param name="Text">Recognized source text. / Văn bản gốc được nhận dạng.</param>
 /// <param name="Translated">Translated text for display. / Văn bản dịch để hiển thị.</param>
-public sealed record OverlayBox(double X, double Y, double W, double H, string Text, string Translated);
+/// <param name="IsParagraph">True when the box is a merged multi-line block; false for a single line. Đúng khi hộp là khối nhiều dòng đã gộp; sai với một dòng đơn.</param>
+public sealed record OverlayBox(double X, double Y, double W, double H, string Text, string Translated, bool IsParagraph = false);
 
 /// <summary>
 /// One annotated frame: dimensions, capture timestamp and its text boxes.
