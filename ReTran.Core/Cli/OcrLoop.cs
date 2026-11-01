@@ -21,7 +21,8 @@ namespace ReTran.Core.Cli;
 /// Tần suất khung của capture source (>= 1). Chỉ nhịp capture — vòng ghi chú giữ nhịp riêng từ lúc
 /// serve start (<c>annotatorFps</c> của <c>PipelineHost</c>).
 /// </param>
-public sealed record OcrLoopOptions(bool UseWindow, int Monitor, nint Hwnd, int Fps, int MaxFrames, int CaptureFps = 10);
+/// <param name="MergeLines">Group multi-line OCR spots before translation (--merge-lines). Gom spot OCR đa dòng trước khi dịch (--merge-lines).</param>
+public sealed record OcrLoopOptions(bool UseWindow, int Monitor, nint Hwnd, int Fps, int MaxFrames, int CaptureFps = 10, bool MergeLines = false);
 
 /// <summary>
 /// Continuous OCR loop engine: capture buffer -> periodic tick -> pipeline -> cycle sink.
@@ -33,7 +34,7 @@ public static class OcrLoop
     /// Usage line for the <c>loop</c> subcommand. Dòng hướng dẫn dùng cho subcommand <c>loop</c>.
     /// </summary>
     public static string Usage =>
-        "usage: ReTran.Core ocr loop (--monitor N | --hwnd 0xHEX) [--fps 1..60] [--max-frames N]";
+        "usage: ReTran.Core ocr loop (--monitor N | --hwnd 0xHEX) [--fps 1..60] [--max-frames N] [--merge-lines]";
 
     /// <summary>
     /// Parses loop arguments; exactly one source flag is required.
@@ -54,6 +55,7 @@ public static class OcrLoop
         nint hwnd = 0;
         int fps = defaultFps is < 1 or > 60 ? 3 : defaultFps;
         int maxFrames = 0;
+        bool mergeLines = false;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -104,6 +106,9 @@ public static class OcrLoop
                         return null;
                     }
                     break;
+                case "--merge-lines":
+                    mergeLines = true;
+                    break;
                 default:
                     error = $"unknown argument '{args[i]}'.";
                     return null;
@@ -115,7 +120,7 @@ public static class OcrLoop
             error = "exactly one source required: --monitor N or --hwnd 0xHEX.";
             return null;
         }
-        return new OcrLoopOptions(hasWindow, monitor, hwnd, fps, maxFrames);
+        return new OcrLoopOptions(hasWindow, monitor, hwnd, fps, maxFrames, MergeLines: mergeLines);
     }
 
     /// <summary>

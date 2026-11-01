@@ -116,7 +116,7 @@ public sealed class PipelineHost : IAsyncDisposable
     /// </summary>
     /// <param name="@params">
     /// <c>{source:{kind:"screen",monitor}|"window",hwnd}, translate:{provider,src,dst},
-    /// ocr?:{det,rec,params}, ocrFps?, captureFps?}</c> — missing fps values fall
+    /// ocr?:{det,rec,params,mergeLines?}, ocrFps?, captureFps?}</c> — missing fps values fall
     /// back to <see cref="CoreConfig"/> defaults; a missing <c>ocr</c> keeps the sidecar's
     /// current pair and engine config (no <c>ocr.models.*</c>/<c>ocr.config.set</c> call).
     /// Tham số theo hợp đồng spec §3.1 — fps thiếu thì lấy default từ
@@ -210,7 +210,7 @@ public sealed class PipelineHost : IAsyncDisposable
             string context = spec.UseWindow
                 ? ContextKey.FromHwnd(spec.Hwnd)
                 : ContextKey.FromMonitor(spec.Monitor);
-            var pipeline = new OcrPipeline(rpc, new OcrDiff());
+            var pipeline = new OcrPipeline(rpc, new OcrDiff(), spec.MergeLines);
             var snapshot = new AnnotationSnapshot();
             var sink = new TranslateCycleSink(context, spec.Src, spec.Dst, spec.Translator,
                 new JsonRpcCacheChannel(_server), _server, _stderr, snapshot);
@@ -649,6 +649,7 @@ public sealed class PipelineHost : IAsyncDisposable
         string? detModel = null;
         string? recModel = null;
         JsonObject? ocrParams = null;
+        bool mergeLines = false;
         if (p.TryGetPropertyValue("ocr", out JsonNode? ocrNode))
         {
             if (ocrNode is not JsonObject ocr)
@@ -666,10 +667,20 @@ public sealed class PipelineHost : IAsyncDisposable
                     ?? throw new RpcMethodException(RpcErrorCodes.InvalidParams,
                         "'ocr.params' must be an object.");
             }
+            // mergeLines: absent or JSON null -> false (grouping stays off); any other
+            // non-boolean is a contract violation (-32602).
+            // mergeLines: thiếu hoặc JSON null -> false (không gom dòng); giá trị không phải
+            // boolean khác là vi phạm hợp đồng (-32602).
+            if (ocr.TryGetPropertyValue("mergeLines", out JsonNode? mergeNode) && mergeNode is not null)
+            {
+                if (mergeNode is not JsonValue mergeValue || !mergeValue.TryGetValue<bool>(out mergeLines))
+                    throw new RpcMethodException(RpcErrorCodes.InvalidParams,
+                        "'ocr.mergeLines' must be a boolean.");
+            }
         }
 
         return new StartSpec(useWindow, monitor, hwnd, provider, src, dst, translator, ocrFps,
-            captureFps, detModel, recModel, ocrParams);
+            captureFps, detModel, recModel, ocrParams, mergeLines);
     }
 
     /// <summary>
@@ -1023,6 +1034,10 @@ public sealed class PipelineHost : IAsyncDisposable
         obj[key] is JsonValue value && value.TryGetValue<string>(out string? text) ? text : null;
 
     /// <summary>Parsed and validated <c>core.start</c> params (spec §3.1). Tham số <c>core.start</c> đã parse và kiểm tra (spec §3.1).</summary>
+    /// <param name="MergeLines">
+    /// Group multi-line OCR spots before translation (<c>ocr.mergeLines</c>; absent/null = off).
+    /// Gom spot OCR đa dòng trước khi dịch (<c>ocr.mergeLines</c>; thiếu/null = tắt).
+    /// </param>
     private sealed record StartSpec(
         bool UseWindow,
         int Monitor,
@@ -1035,7 +1050,8 @@ public sealed class PipelineHost : IAsyncDisposable
         int CaptureFps,
         string? DetModel,
         string? RecModel,
-        JsonObject? OcrParams)
+        JsonObject? OcrParams,
+        bool MergeLines)
     {
         /// <summary>
         /// Builds the loop options; <see cref="StartSpec.CaptureFps"/> only cadences the capture

@@ -52,6 +52,48 @@ public class OcrLoopCliTests
     }
 
     [Fact]
+    public void TryParse_MergeLinesFlag_SetsOption()
+    {
+        var with = OcrLoop.TryParse(["--monitor", "0", "--merge-lines"], 3, out string? errWith);
+        Assert.Null(errWith);
+        Assert.NotNull(with);
+        Assert.True(with!.MergeLines);
+
+        var without = OcrLoop.TryParse(["--monitor", "0"], 3, out _);
+        Assert.NotNull(without);
+        Assert.False(without!.MergeLines); // default off
+    }
+
+    [Fact]
+    public void TryParseOneShot_MergeLinesFlag_SetsOption()
+    {
+        Assert.True(OcrCommands.TryParseOneShot(["a.png", "--merge-lines"], out string? input, out bool mergeLines, out string? error));
+        Assert.Null(error);
+        Assert.Equal("a.png", input);
+        Assert.True(mergeLines);
+
+        Assert.True(OcrCommands.TryParseOneShot(["a.png"], out input, out mergeLines, out _));
+        Assert.Equal("a.png", input);
+        Assert.False(mergeLines); // default off
+    }
+
+    [Fact]
+    public void TryParseOneShot_InvalidArgs_ReturnsError()
+    {
+        string[][] cases =
+        [
+            [],                        // no input
+            ["a.png", "b.png"],        // two positionals
+            ["--bogus"],               // unknown flag
+        ];
+        foreach (string[] args in cases)
+        {
+            Assert.False(OcrCommands.TryParseOneShot(args, out _, out _, out string? error));
+            Assert.False(string.IsNullOrEmpty(error), $"no error for: [{string.Join(' ', args)}]");
+        }
+    }
+
+    [Fact]
     public async Task OcrLoop_RealSidecar_FakeSource_EmitsTwoJsonLines()
     {
         // Infra gate: repo + venv + paddle warm-up — otherwise skip (never fail on environment).

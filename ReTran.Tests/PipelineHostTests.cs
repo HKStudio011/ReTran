@@ -796,6 +796,72 @@ public class PipelineHostTests
     }
 
     //
+    // core.start ocr.mergeLines — parse-level checks only; the runtime effect (grouping) is
+    // covered by Task 4/5.
+    // core.start ocr.mergeLines — chỉ kiểm tra ở tầng parse; hiệu ứng runtime (gom dòng) do
+    // Task 4/5 phủ.
+    //
+
+    [Fact]
+    public async Task Start_MergeLinesTrue_ParsesOk()
+    {
+        var sources = new List<FakeCaptureSource>();
+        var rpc = new FakeSidecarRpc { NextResult = SpotResult() };
+        rpc.ResultsByMethod["ocr.models.list"] = CatalogResult(("detA", true), ("recA", true));
+        await using var host = CreateHost(rpc, RegistryWith(new CountingTranslator()), new JsonRpcServer(), sources);
+
+        var parameters = StartParams();
+        parameters["ocr"] = new JsonObject { ["det"] = "detA", ["rec"] = "recA", ["mergeLines"] = true };
+        JsonNode? started = await host.StartAsync(parameters, CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task Start_MergeLinesAbsent_DefaultsFalse()
+    {
+        await using var host = CreateHost(new FakeSidecarRpc(), RegistryWith(new CountingTranslator()), new JsonRpcServer());
+
+        JsonNode? started = await host.StartAsync(StartParams(), CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task Start_MergeLinesNull_TreatedAsAbsent()
+    {
+        var sources = new List<FakeCaptureSource>();
+        var rpc = new FakeSidecarRpc { NextResult = SpotResult() };
+        rpc.ResultsByMethod["ocr.models.list"] = CatalogResult(("detA", true), ("recA", true));
+        await using var host = CreateHost(rpc, RegistryWith(new CountingTranslator()), new JsonRpcServer(), sources);
+
+        // JSON null = "keep the default (off)": no -32602.
+        // JSON null = "giữ mặc định (tắt)": không -32602.
+        var parameters = StartParams();
+        parameters["ocr"] = new JsonObject { ["det"] = "detA", ["rec"] = "recA", ["mergeLines"] = null };
+        JsonNode? started = await host.StartAsync(parameters, CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task Start_MergeLinesNonBool_InvalidParams()
+    {
+        await using var host = CreateHost(new FakeSidecarRpc(), RegistryWith(new CountingTranslator()), new JsonRpcServer());
+
+        var asString = StartParams();
+        asString["ocr"] = new JsonObject { ["det"] = "detA", ["rec"] = "recA", ["mergeLines"] = "yes" };
+        var ex1 = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(asString, CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InvalidParams, ex1.Code);
+        Assert.Contains("mergeLines", ex1.Message, StringComparison.Ordinal);
+
+        var asNumber = StartParams();
+        asNumber["ocr"] = new JsonObject { ["det"] = "detA", ["rec"] = "recA", ["mergeLines"] = 1 };
+        var ex2 = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(asNumber, CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InvalidParams, ex2.Code);
+        Assert.Contains("mergeLines", ex2.Message, StringComparison.Ordinal);
+    }
+
+    //
     // Warmup — one fire-and-forget tiny spot after core.start; never blocks, never crashes.
     // Warmup — một spot nhỏ fire-and-forget sau core.start; không chặn, không crash.
     //

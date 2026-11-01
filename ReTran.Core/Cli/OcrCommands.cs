@@ -30,14 +30,16 @@ public static class OcrCommands
         {
             return await RunLoopAsync(args[1..]);
         }
-        if (args.Length != 1)
+        if (!TryParseOneShot(args, out string? input, out bool mergeLines, out string? parseError))
         {
-            Console.Error.WriteLine("usage: ReTran.Core ocr <input.png>");
+            Console.Error.WriteLine("usage: ReTran.Core ocr <input.png> [--merge-lines]");
+            if (parseError is not null)
+                Console.Error.WriteLine(parseError);
             return 2;
         }
-        if (!File.Exists(args[0]))
+        if (!File.Exists(input))
         {
-            Console.Error.WriteLine($"input not found: {args[0]}");
+            Console.Error.WriteLine($"input not found: {input}");
             return 1;
         }
         string? repoRoot = OcrBootstrap.FindRepoRoot();
@@ -55,8 +57,8 @@ public static class OcrCommands
         try
         {
             await using var sp = await SidecarProcess.StartAsync(python, repoRoot, CancellationToken.None);
-            var pipeline = new OcrPipeline(sp, new OcrDiff());
-            string b64 = Convert.ToBase64String(await File.ReadAllBytesAsync(args[0]));
+            var pipeline = new OcrPipeline(sp, new OcrDiff(), mergeLines);
+            string b64 = Convert.ToBase64String(await File.ReadAllBytesAsync(input));
             JsonObject result = await pipeline.SpotAsync(b64);
             Console.Out.WriteLine(result.ToJsonString());
             return 0;
@@ -66,6 +68,55 @@ public static class OcrCommands
             Console.Error.WriteLine($"ocr failed: {ex.Message}");
             return 1;
         }
+    }
+
+    /// <summary>
+    /// Parses one-shot <c>ocr</c> arguments: exactly one input path plus the optional
+    /// <c>--merge-lines</c> flag (no value).
+    /// Phân tích đối số <c>ocr</c> một lần: đúng một đường dẫn đầu vào kèm cờ tùy chọn
+    /// <c>--merge-lines</c> (không có giá trị).
+    /// </summary>
+    /// <param name="args">Arguments after <c>ocr</c> (the <c>loop</c> form is handled by the caller). Đối số sau <c>ocr</c> (dạng <c>loop</c> do caller xử lý).</param>
+    /// <param name="input">The input path on success. Đường dẫn đầu vào khi hợp lệ.</param>
+    /// <param name="mergeLines">True when <c>--merge-lines</c> is present. True khi có <c>--merge-lines</c>.</param>
+    /// <param name="error">Null on success; otherwise the reason. Không null khi thành công; ngược lại là lý do.</param>
+    /// <returns>True when the arguments are valid. True khi đối số hợp lệ.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="args"/> is null. Ném khi <paramref name="args"/> là null.</exception>
+    internal static bool TryParseOneShot(string[] args, out string? input, out bool mergeLines, out string? error)
+    {
+        ArgumentNullException.ThrowIfNull(args);
+        input = null;
+        mergeLines = false;
+        error = null;
+
+        foreach (string arg in args)
+        {
+            if (arg == "--merge-lines")
+            {
+                mergeLines = true;
+            }
+            else if (arg.StartsWith("--", StringComparison.Ordinal))
+            {
+                error = $"unknown argument '{arg}'.";
+                return false;
+            }
+            else if (input is null)
+            {
+                input = arg;
+            }
+            else
+            {
+                error = $"unexpected argument '{arg}' (one input only).";
+                return false;
+            }
+        }
+
+        if (input is null)
+        {
+            error = "missing <input.png>.";
+            return false;
+        }
+        return true;
     }
 
     private static async Task<int> RunLoopAsync(string[] args)
@@ -114,7 +165,7 @@ public static class OcrCommands
                 return 1;
             }
             await using var sp = await SidecarProcess.StartAsync(python, repoRoot, cts.Token);
-            var pipeline = new OcrPipeline(sp, new OcrDiff());
+            var pipeline = new OcrPipeline(sp, new OcrDiff(), options.MergeLines);
             return await OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(Console.Out), Console.Error, cts.Token);
         }
         catch (OperationCanceledException) when (cts.IsCancellationRequested)
