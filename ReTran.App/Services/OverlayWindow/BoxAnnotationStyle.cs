@@ -129,7 +129,7 @@ internal static class BoxAnnotationStyle
     /// <param name="innerHeight">Usable height inside the box. Chiều cao dùng được trong box.</param>
     /// <param name="boxHeight">Full box height (drives the base size). Chiều cao đầy đủ của box (quyết định cỡ cơ sở).</param>
     /// <param name="format">Format shared with drawing. Format dùng chung với lúc vẽ.</param>
-    /// <param name="maxLines">Maximum wrapped lines. Số dòng wrap tối đa.</param>
+    /// <param name="maxLines">Maximum wrapped lines (callers pass 2 for a single line, 4 for a merged paragraph block). Số dòng wrap tối đa (nơi gọi truyền 2 cho một dòng đơn, 4 cho khối đoạn văn gộp).</param>
     /// <param name="shrink">Whether to shrink below the base size; <see langword="false"/> keeps the base and lets the caller ellipsize. Có thu nhỏ dưới cỡ cơ sở không; <see langword="false"/> giữ cỡ cơ sở để người gọi cắt ellipsis.</param>
     /// <param name="maxFontSize">Upper clamp in pixels; callers scale it with the viewport. Trần theo pixel; nơi gọi tự scale theo viewport.</param>
     /// <returns>The best size, its measured block and whether it fits. Cỡ tốt nhất, khối đã đo và có vừa không.</returns>

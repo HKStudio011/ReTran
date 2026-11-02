@@ -1059,7 +1059,7 @@ public sealed class PipelineHost : IAsyncDisposable
         /// Tạo tùy chọn loop; <see cref="StartSpec.CaptureFps"/> chỉ nhịp capture source — vòng ghi
         /// chú giữ <c>annotatorFps</c> từ lúc serve start.
         /// </summary>
-        public OcrLoopOptions ToOptions() => new(UseWindow, Monitor, Hwnd, OcrFps, 0, CaptureFps);
+        public OcrLoopOptions ToOptions() => new(UseWindow, Monitor, Hwnd, OcrFps, 0, CaptureFps, MergeLines);
     }
 
     /// <summary>Per-start state: source, loop token, background task, and once-flags. Trạng thái mỗi lần start: source, token loop, task nền và cờ once.</summary>

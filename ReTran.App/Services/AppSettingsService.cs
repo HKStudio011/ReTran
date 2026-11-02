@@ -6,10 +6,11 @@ namespace ReTran_App.Services;
 /// <summary>
 /// Translation settings persisted in <c>settings.json</c>: provider, language pair and an
 /// optional API key for providers that need one, plus game-overlay display options, the OCR
-/// model pair and engine parameter overrides requested on start, and the pipeline rhythm.
+/// model pair and engine parameter overrides requested on start, the pipeline rhythm, and the
+/// merge-lines toggle.
 /// Cài đặt dịch thuật lưu trong <c>settings.json</c>: nhà cung cấp, cặp ngôn ngữ và API key tùy
 /// chọn cho các nhà cung cấp cần key, kèm tùy chọn hiển thị overlay trên game, cặp model OCR,
-/// các tham số engine ghi đè yêu cầu khi start, và nhịp pipeline.
+/// các tham số engine ghi đè yêu cầu khi start, nhịp pipeline, và công tắc gộp dòng.
 /// </summary>
 /// <param name="Provider">Provider name, e.g. <c>google</c>. Tên nhà cung cấp, ví dụ <c>google</c>.</param>
 /// <param name="Src">Source language code, or <c>auto</c>. Mã ngôn ngữ nguồn, hoặc <c>auto</c>.</param>

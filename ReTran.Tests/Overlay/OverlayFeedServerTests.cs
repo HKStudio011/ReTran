@@ -223,7 +223,8 @@ public sealed class OverlayFeedServerTests
         await ReadNextDataLineAsync(reader); // initial snapshot / snapshot ban đầu
 
         state.Publish(new OverlayFrame(1920, 1080, DateTime.UtcNow,
-            [new OverlayBox(0.5, 0.25, 0.2, 0.1, "A", "B")]));
+            [new OverlayBox(0.5, 0.25, 0.2, 0.1, "A", "B"),
+             new OverlayBox(0.6, 0.3, 0.15, 0.05, "C", "D", IsParagraph: true)]));
 
         var payload = await ReadNextDataLineAsync(reader);
         using var doc = JsonDocument.Parse(payload);
@@ -235,6 +236,10 @@ public sealed class OverlayFeedServerTests
         Assert.Equal(0.1, box.GetProperty("h").GetDouble());
         Assert.Equal("A", box.GetProperty("text").GetString());
         Assert.Equal("B", box.GetProperty("translated").GetString());
+        Assert.False(box.GetProperty("paragraph").GetBoolean());
+        var para = doc.RootElement.GetProperty("boxes")[1];
+        Assert.Equal("D", para.GetProperty("translated").GetString());
+        Assert.True(para.GetProperty("paragraph").GetBoolean());
     }
 
     [Fact]

@@ -36,7 +36,7 @@ namespace ReTran_App.Services.OverlayFeed;
 /// <c>GET /events</c> answers with content type <c>text/event-stream</c>: it first queues a snapshot of the
 /// latest frame (empty <c>boxes</c> when nothing was published yet), then one <c>data:</c> event per
 /// <see cref="OverlayState.Changed"/> with payload
-/// <c>{"seq":n,"boxes":[{"x":..,"y":..,"w":..,"h":..,"text":"..","translated":".."}]}</c>
+/// <c>{"seq":n,"boxes":[{"x":..,"y":..,"w":..,"h":..,"text":"..","translated":"..","paragraph":false}]}</c>
 /// (lowercase keys, 0–1 normalized coordinates), plus <c>:ping</c> comment heartbeats every
 /// <c>heartbeat</c> (default 15 s) to keep the stream alive. There is no <c>translatedLang</c> field (spec C12).
 /// The snapshot is composed and registered while holding the same lock broadcasts copy the client list
@@ -536,6 +536,7 @@ public sealed class OverlayFeedServer : IAsyncDisposable
                     ["h"] = box.H,
                     ["text"] = box.Text,
                     ["translated"] = box.Translated,
+                    ["paragraph"] = box.IsParagraph,
                 });
             }
         }
