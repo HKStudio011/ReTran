@@ -4,13 +4,16 @@ using ReTran_App.Services.Update;
 
 public class TrayExitServiceTests
 {
+    // Hai fake dùng chung MỘT call list — thứ tự stop→quit (Review Focus #4) phải được khóa
+    // bằng chứng ghi đè thật, không phải bằng Concat hai list riêng (luôn ra đúng thứ tự mong đợi).
     private sealed class FakeStopper : IUpdateStopper
     {
-        public List<string> Calls { get; } = new();
+        private readonly List<string> _calls;
         public bool ThrowOnStop { get; set; }
+        public FakeStopper(List<string> calls) => _calls = calls;
         public Task StopServicesAsync(CancellationToken ct)
         {
-            Calls.Add("stop");
+            _calls.Add("stop");
             if (ThrowOnStop) throw new IOException("simulated");
             return Task.CompletedTask;
         }
@@ -18,27 +21,28 @@ public class TrayExitServiceTests
 
     private sealed class FakeShutdown : IAppShutdown
     {
-        public List<string> Calls { get; } = new();
-        public void Quit() => Calls.Add("quit");
+        private readonly List<string> _calls;
+        public FakeShutdown(List<string> calls) => _calls = calls;
+        public void Quit() => _calls.Add("quit");
     }
 
     [Fact]
     public async Task Exit_StopsServices_BeforeQuit()
     {
-        var stopper = new FakeStopper();
-        var shutdown = new FakeShutdown();
-        await new TrayExitService(stopper, shutdown, NullLogger<TrayExitService>.Instance).ExitAsync(CancellationToken.None);
+        var calls = new List<string>();
+        await new TrayExitService(new FakeStopper(calls), new FakeShutdown(calls),
+            NullLogger<TrayExitService>.Instance).ExitAsync(CancellationToken.None);
 
-        Assert.Equal(new[] { "stop", "quit" }, stopper.Calls.Concat(shutdown.Calls).ToArray());
+        Assert.Equal(new[] { "stop", "quit" }, calls.ToArray());
     }
 
     [Fact]
     public async Task Exit_StopFails_StillQuits()
     {
-        var stopper = new FakeStopper { ThrowOnStop = true };
-        var shutdown = new FakeShutdown();
-        await new TrayExitService(stopper, shutdown, NullLogger<TrayExitService>.Instance).ExitAsync(CancellationToken.None);
+        var calls = new List<string>();
+        await new TrayExitService(new FakeStopper(calls) { ThrowOnStop = true }, new FakeShutdown(calls),
+            NullLogger<TrayExitService>.Instance).ExitAsync(CancellationToken.None);
 
-        Assert.Equal("quit", shutdown.Calls.Single());
+        Assert.Equal(new[] { "stop", "quit" }, calls.ToArray());
     }
 }
