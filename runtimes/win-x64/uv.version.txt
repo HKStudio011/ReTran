@@ -1,0 +1,3 @@
+version=0.13.7
+sha256=1791d7a9ed5b6df13ccf80f102e025c333010d96326b4ff0262aa3b578835c5a
+source=https://github.com/astral-sh/uv/releases/tag/0.13.7
