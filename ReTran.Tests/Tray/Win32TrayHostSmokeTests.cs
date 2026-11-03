@@ -10,6 +10,9 @@ public class Win32TrayHostSmokeTests
         using var host = new Win32TrayHost();
         Assert.False(host.IsCreated);
         host.Create(icon.Handle, "ReTran", () => TrayMenuModel.Build("a", "b", "c", false));
+        // Lần Create ĐẦU phải đăng ký THẬT (message-only window + NIM_ADD) — không phải cờ gán vô điều kiện.
+        // The FIRST Create must REALLY register (message-only window + NIM_ADD) — not an unconditionally set flag.
+        Assert.True(host.IsCreated);
         host.Create(icon.Handle, "ReTran", () => TrayMenuModel.Build("a", "b", "c", false)); // idempotent
         Assert.True(host.IsCreated);
         host.Remove();

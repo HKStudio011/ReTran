@@ -16,8 +16,6 @@ namespace ReTran_App.Services.Window;
 /// </summary>
 public sealed class AppWindowBridge : IDisposable
 {
-    private readonly ToastService _toast;
-    private readonly I18nService _L;
     private readonly UpdateCoordinator _coordinator;
     private readonly ILogger<AppWindowBridge> _log;
 
@@ -32,15 +30,10 @@ public sealed class AppWindowBridge : IDisposable
     /// Creates the bridge; no window is hooked until <see cref="Attach"/> is called.
     /// Tạo bridge; chưa hook window nào cho tới khi <see cref="Attach"/> được gọi.
     /// </summary>
-    /// <param name="toast">Toast bus for user-facing messages. Bus toast cho thông điệp tới người dùng.</param>
-    /// <param name="L">Localized UI strings. Chuỗi UI đã dịch.</param>
     /// <param name="coordinator">Update state source read at Closing time. Nguồn trạng thái update đọc lúc Closing.</param>
     /// <param name="log">Reports a hook that could not be installed or a hide that failed. Báo cáo hook không cài được hoặc lần ẩn thất bại.</param>
-    public AppWindowBridge(ToastService toast, I18nService L, UpdateCoordinator coordinator,
-        ILogger<AppWindowBridge> log)
+    public AppWindowBridge(UpdateCoordinator coordinator, ILogger<AppWindowBridge> log)
     {
-        _toast = toast;
-        _L = L;
         _coordinator = coordinator;
         _log = log;
     }

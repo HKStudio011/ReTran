@@ -30,12 +30,14 @@ public static class NotifyRoute
 /// balloon, because a toast raised while the app is hidden or behind a game is never seen.
 /// Balloons are rate-limited by a cooldown: a burst of errors inside that window produces ONE balloon
 /// (the first one) instead of a stack of popups fighting over the notification area. The cooldown is
-/// charged only when a balloon actually fires — toasts are never rate-limited.
+/// charged on every bubble-path attempt — even one where the icon is not registered and the balloon is
+/// a no-op — toasts are never rate-limited.
 /// Định tuyến thông báo lỗi tới kênh mà người dùng thực sự nhìn thấy. Một thông điệp chỉ thành toast
 /// trong app khi cửa sổ đang hiện VÀ đang foreground; ngược lại nó thành balloon tray, vì toast bắn
 /// lúc app ẩn hoặc nằm sau game không bao giờ được thấy. Bubble có cửa sổ cooldown: chuỗi lỗi dồn
 /// trong cửa sổ đó chỉ tạo MỘT bubble (cái đầu tiên) thay vì một chồng popup giành nhau khu vực thông
-/// báo. Cửa sổ cooldown chỉ bị tính khi bubble thực sự bắn — toast không bao giờ bị giới hạn tần suất.
+/// báo. Cửa sổ cooldown bị tính ở MỌI lần thử qua nhánh bubble — kể cả lần icon chưa đăng ký và balloon
+/// chỉ là no-op — toast không bao giờ bị giới hạn tần suất.
 /// </summary>
 public sealed class AppNotifier
 {
@@ -84,12 +86,17 @@ public sealed class AppNotifier
 
     /// <summary>
     /// Publishes one message: an in-app toast when the user is looking at the app, otherwise a tray
-    /// balloon (subject to the cooldown). Adds no try/catch of its own — <see cref="ITrayHost.ShowBalloon"/>
-    /// is specified not to throw when the icon is not registered, so a notification cannot break the
-    /// pipeline that reported the error.
+    /// balloon (subject to the cooldown). Adds no try/catch of its own: <see cref="ITrayHost.ShowBalloon"/>
+    /// is specified not to throw when the icon is not registered, but the toast path is NOT isolated —
+    /// <see cref="ToastService.Show"/> invokes its subscribers synchronously and a throwing subscriber
+    /// propagates out of this method. A caller that must survive a failing notification wraps the call
+    /// itself (<see cref="TrayIconService.NotifyUser"/> is the precedent).
     /// Đăng một thông điệp: toast trong app khi người dùng đang nhìn vào app, ngược lại là balloon tray
-    /// (chịu cửa sổ cooldown). Không tự bọc try/catch — <see cref="ITrayHost.ShowBalloon"/> được cam kết
-    /// không ném lỗi khi icon chưa đăng ký, nên việc thông báo không thể làm hỏng pipeline đã báo lỗi.
+    /// (chịu cửa sổ cooldown). Không tự bọc try/catch: <see cref="ITrayHost.ShowBalloon"/> được cam kết
+    /// không ném lỗi khi icon chưa đăng ký, nhưng nhánh toast KHÔNG được cách ly —
+    /// <see cref="ToastService.Show"/> gọi các subscriber đồng bộ và một subscriber ném lỗi sẽ lan ra
+    /// ngoài hàm này. Caller nào bắt buộc phải sống sót khi việc thông báo thất bại thì tự bọc lời gọi
+    /// (<see cref="TrayIconService.NotifyUser"/> là tiền lệ).
     /// </summary>
     /// <param name="message">The message text, already localized by the caller. Nội dung thông điệp, caller đã dịch sẵn.</param>
     /// <param name="severity">Severity for the toast and the balloon icon. Mức độ cho toast và icon của balloon.</param>

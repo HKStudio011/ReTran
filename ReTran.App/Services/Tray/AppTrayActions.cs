@@ -18,12 +18,15 @@ namespace ReTran_App.Services.Tray;
 /// </summary>
 /// <remarks>
 /// Runs on the UI thread: the tray's message-only window is created there, so its commands are
-/// delivered there (see <see cref="TrayIconService"/>). It is built lazily, when
-/// <see cref="TrayIconService.Start"/> first resolves the menu actions, so an app whose window hook
-/// never runs never touches it.
+/// delivered there (see <see cref="TrayIconService"/>). It is built when <see cref="TrayIconService"/>
+/// is FIRST RESOLVED — it is a constructor dependency of the service, not something Start looks up —
+/// and the only thing that ever resolves <see cref="TrayIconService"/> is the primary-window hook, so
+/// an app whose window hook never runs never touches it.
 /// Chạy trên UI thread: cửa sổ message-only của tray được tạo ở đó nên lệnh của nó được giao ở đó
-/// (xem <see cref="TrayIconService"/>). Nó được tạo chậm, đúng lúc <see cref="TrayIconService.Start"/>
-/// resolve các hành động menu lần đầu, nên app mà hook cửa sổ không chạy sẽ không đụng tới nó.
+/// (xem <see cref="TrayIconService"/>). Nó được tạo khi <see cref="TrayIconService"/> được RESOLVE
+/// lần ĐẦU TIÊN — nó là dependency của constructor service đó, không phải thứ Start tra cứu — và thứ
+/// duy nhất resolve <see cref="TrayIconService"/> là hook cửa sổ chính, nên app mà hook cửa sổ không
+/// chạy sẽ không đụng tới nó.
 /// </remarks>
 public sealed class AppTrayActions : ITrayActions
 {

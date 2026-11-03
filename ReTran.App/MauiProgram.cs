@@ -101,10 +101,26 @@ namespace ReTran_App
                 var ordinal = Interlocked.Increment(ref windowOrdinal);
                 if (!WindowHooks.ShouldHookWindow(ordinal)) return; // chỉ window chính (Review Focus #5)
 
-                IServiceProvider? services = IPlatformApplication.Current?.Services; // pattern repo, xem App.xaml.cs:10
-                if (services is null) return;
-                services.GetRequiredService<AppWindowBridge>().Attach(window);
-                services.GetRequiredService<TrayIconService>().Start();
+                try
+                {
+                    IServiceProvider? services = IPlatformApplication.Current?.Services; // pattern repo, xem App.xaml.cs:10
+                    if (services is null) return;
+                    services.GetRequiredService<AppWindowBridge>().Attach(window);
+                    services.GetRequiredService<TrayIconService>().Start();
+                }
+                catch (Exception ex)
+                {
+                    // Khởi động phải sống sót khi hook tray hỏng: tray là tiện ích, app mới là thứ
+                    // được bảo vệ. Attach kích hoạt WinRT (GetWindowHandle/GetWindowIdFromWindow)
+                    // có thể ném lỗi, và Start cũng vậy — không gì ở nhánh này được giết app.
+                    // Startup must survive a failed tray hook: the tray is a convenience, the app is
+                    // not. Attach activates WinRT (GetWindowHandle/GetWindowIdFromWindow) and can
+                    // throw, and so can Start — nothing in this branch may kill the app.
+                    IPlatformApplication.Current?.Services?
+                        .GetService<ILoggerFactory>()?
+                        .CreateLogger("ReTran.App.Tray")
+                        .LogError(ex, "The tray/close-to-tray hook failed on window creation; the app continues without it.");
+                }
             })));
 
             MauiApp app = builder.Build();

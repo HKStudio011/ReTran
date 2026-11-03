@@ -59,8 +59,16 @@ public sealed class Win32TrayHost : ITrayHost
 
         EnsureWindow();
         _taskbarCreatedId = NativeMethods.RegisterWindowMessageW("TaskbarCreated");
-        AddIcon();
-        _created = true;
+        bool iconAdded = AddIcon();
+        // Report success only if the icon really is in the notification area: a failed message-only
+        // window or a rejected NIM_ADD must leave IsCreated false so a failed registration cannot
+        // masquerade as success. The stored icon/tooltip/menuProvider above and the registered window
+        // class stay — the caller sees the failure and a later Create can retry with them.
+        // Chỉ báo thành công khi icon thật sự nằm ở khu vực thông báo: tạo cửa sổ message-only hỏng
+        // hoặc NIM_ADD bị từ chối phải để IsCreated bằng false, để một lần đăng ký hỏng không mạo
+        // nhận thành công. Icon/tooltip/menuProvider đã gán ở trên và window class đã đăng ký giữ
+        // nguyên — người gọi thấy thất bại và lần Create sau thử lại bằng chính chúng.
+        _created = _hwnd != 0 && iconAdded;
     }
 
     /// <inheritdoc/>
@@ -128,18 +136,20 @@ public sealed class Win32TrayHost : ITrayHost
             NativeMethods.HWND_MESSAGE, IntPtr.Zero, hInstance, IntPtr.Zero);
     }
 
-    // NIM_ADD with the contract's flags and uVersion = 4 (v4 callback layout).
-    // NIM_ADD với cờ của contract và uVersion = 4 (bố cục callback v4).
-    private void AddIcon()
+    // NIM_ADD with the contract's flags and uVersion = 4 (v4 callback layout). Returns whether the
+    // shell accepted the icon (false when there is no window or Shell_NotifyIconW refused).
+    // NIM_ADD với cờ của contract và uVersion = 4 (bố cục callback v4). Trả về shell có nhận icon
+    // hay không (false khi không có cửa sổ hoặc Shell_NotifyIconW từ chối).
+    private bool AddIcon()
     {
-        if (_hwnd == 0) return;
+        if (_hwnd == 0) return false;
 
         var nid = BaseNotifyIconData();
         nid.uFlags = TrayContract.AddUFlags();
         nid.hIcon = _iconHandle;
         nid.szTip = Truncate(_tooltip, TipMax);
         nid.uVersion = 4;
-        NativeMethods.Shell_NotifyIconW(TrayContract.NimAdd, ref nid);
+        return NativeMethods.Shell_NotifyIconW(TrayContract.NimAdd, ref nid);
     }
 
     // Common NOTIFYICONDATA identifying this icon (hWnd + uID).
@@ -156,11 +166,20 @@ public sealed class Win32TrayHost : ITrayHost
     };
 
     private static nint StaticWndProc(nint hWnd, uint msg, nint wParam, nint lParam) =>
-        _instance is { } host ? host.HandleMessage(msg, wParam, lParam) : 0;
+        _instance is { } host ? host.HandleMessage(hWnd, msg, wParam, lParam) : 0;
 
     // v4 shell: LOWORD(lParam) carries the mouse code, screen coordinates live in wParam.
     // Shell v4: từ thấp của lParam mang mã chuột, tọa độ màn hình nằm trong wParam.
-    private nint HandleMessage(uint msg, nint wParam, nint lParam)
+    // hWnd là THAM SỐ cửa sổ thật, không phải field _hwnd: WM_NCCREATE (và mọi message gửi trong
+    // lúc CreateWindowExW còn chạy) đến TRƯỚC khi _hwnd được gán — DefWindowProc với _hwnd==0 trả
+    // FALSE, việc tạo bị abort với ERROR_INVALID_WINDOW_HANDLE, và host không bao giờ có cửa sổ.
+    // Với các message sau khi CreateWindowExW đã trả về, tham số và field là cùng một handle.
+    // hWnd is the real WINDOW parameter, not the _hwnd field: WM_NCCREATE (and every message sent
+    // while CreateWindowExW is still running) arrives BEFORE _hwnd is assigned — DefWindowProc on
+    // _hwnd==0 returns FALSE, the create aborts with ERROR_INVALID_WINDOW_HANDLE, and the host
+    // would never get a window at all. For messages after CreateWindowExW returned, parameter and
+    // field are the same handle.
+    private nint HandleMessage(nint hWnd, uint msg, nint wParam, nint lParam)
     {
         uint mouseMsg = (uint)(lParam & 0xFFFF);
         switch (TrayContract.Dispatch(msg, _taskbarCreatedId, NativeMethods.CallbackMessage, mouseMsg))
@@ -177,7 +196,7 @@ public sealed class Win32TrayHost : ITrayHost
                 ShowContextMenu(GetX(wParam), GetY(wParam));
                 return 0;
         }
-        return NativeMethods.DefWindowProc(_hwnd, msg, wParam, lParam);
+        return NativeMethods.DefWindowProc(hWnd, msg, wParam, lParam);
     }
 
     // GET_X_LPARAM / GET_Y_LPARAM equivalents (sign-extended: multi-monitor coords can be negative).

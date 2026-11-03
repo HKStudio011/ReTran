@@ -106,14 +106,17 @@ public sealed class TrayIconService : IDisposable
     /// Registers the icon, drawing a fresh <see cref="TrayIconSource"/> after every <see cref="Stop"/>;
     /// a second call while already registered does nothing (idempotent). This method NEVER throws: it
     /// runs inside the window-lifecycle hook, where a throw over a cosmetic notification-area icon
-    /// would take the app down. If registration fails the attempt is rolled back completely — the HICON
-    /// is destroyed and the command handler detached — so the service is back in the not-started state
-    /// and a later <see cref="Start"/> can retry.
+    /// would take the app down. A failed registration is rolled back completely whichever way it
+    /// failed — the host throwing, or the host returning without taking the icon (
+    /// <see cref="ITrayHost.IsCreated"/> still false) — the HICON is destroyed and the command handler
+    /// detached, so the service is back in the not-started state and a later <see cref="Start"/>
+    /// retries cleanly.
     /// Đăng ký icon, vẽ <see cref="TrayIconSource"/> mới sau mỗi lần <see cref="Stop"/>; gọi lần hai khi
     /// đã đăng ký thì không làm gì (idempotent). Hàm này KHÔNG BAO GIỜ ném lỗi: nó chạy trong hook
-    /// lifecycle của cửa sổ, nơi một exception chỉ vì icon ở khu vực thông báo sẽ giết app. Nếu việc
-    /// đăng ký thất bại, lần thử được hoàn tác toàn bộ — HICON bị hủy và handler lệnh bị gỡ — để service
-    /// trở về trạng thái chưa-start và lần <see cref="Start"/> sau thử lại được.
+    /// lifecycle của cửa sổ, nơi một exception chỉ vì icon ở khu vực thông báo sẽ giết app. Một lần đăng
+    /// ký thất bại được hoàn tác toàn bộ bất kể thất bại theo cách nào — host ném lỗi, hoặc host trả về
+    /// mà không nhận icon (<see cref="ITrayHost.IsCreated"/> vẫn false) — HICON bị hủy và handler lệnh bị
+    /// gỡ, để service trở về trạng thái chưa-start và lần <see cref="Start"/> sau thử lại sạch sẽ.
     /// </summary>
     public void Start()
     {
@@ -148,17 +151,26 @@ public sealed class TrayIconService : IDisposable
             return;
         }
 
-        // Assigned only once Create returned normally — the guard above must protect real
-        // registrations only, never a failed attempt. Chỉ gán khi Create trả về bình thường — guard ở
+        if (!_host.IsCreated)
+        {
+            // The host reported failure without throwing: a disposed host no-ops Create, and
+            // Win32TrayHost leaves IsCreated false when its message-only window or NIM_ADD failed.
+            // Same rollback as the catch — without it _icon would mark a phantom registration and the
+            // idempotence guard would block every retry.
+            // Host báo thất bại mà không ném lỗi: host đã dispose thì Create no-op, và Win32TrayHost
+            // để IsCreated false khi cửa sổ message-only hoặc NIM_ADD hỏng. Hoàn tác y hệt catch — nếu
+            // không, _icon sẽ đánh dấu một đăng ký ma và guard idempotent chặn mọi lần retry sau.
+            icon?.Dispose();
+            _host.CommandSelected -= OnCommandSelected;
+            TryLog(() => _log.LogWarning("Tray host did not take the icon (host disposed or its Win32 call failed); icon and menu will not appear until a later Start retries."));
+            return;
+        }
+
+        // Assigned only once the host really registered — the guard above must protect real
+        // registrations only, never a failed attempt. Chỉ gán khi host thật sự đã đăng ký — guard ở
         // trên phải bảo vệ ĐĂNG KÝ THẬT, không phải một lần thử hỏng.
         _icon = icon;
-        // IsCreated keeps the success log honest: a host that is already disposed no-ops Create without
-        // throwing, and claiming "registered" would send the next reader hunting for a phantom icon.
-        // IsCreated giữ log thành công trung thực: host đã dispose thì Create no-op mà không ném lỗi, và
-        // báo "registered" sẽ khiến người đọc sau đi tìm icon ma.
-        TryLog(() => _log.LogInformation(_host.IsCreated
-            ? "Tray icon registered."
-            : "Tray host did not take the icon (host disposed or its Win32 call failed); icon and menu will not appear."));
+        TryLog(() => _log.LogInformation("Tray icon registered."));
     }
 
     /// <summary>
