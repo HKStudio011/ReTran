@@ -47,6 +47,14 @@ public sealed class Win32TrayHost : ITrayHost
     /// <inheritdoc/>
     public bool IsCreated => _created;
 
+    /// <summary>
+    /// Whether the message-only window exists, independently of whether the shell accepted the
+    /// icon — pins window creation for tests running without a notification area (no shell on CI).
+    /// Cửa sổ message-only có tồn tại hay không, độc lập với việc shell nhận icon — pin việc tạo
+    /// cửa sổ cho test chạy mà không có khu vực thông báo (CI không có shell).
+    /// </summary>
+    internal bool WindowCreated => _hwnd != 0;
+
     /// <inheritdoc/>
     public void Create(nint iconHandle, string tooltip, Func<IReadOnlyList<TrayCommand>> menuProvider)
     {
@@ -74,15 +82,23 @@ public sealed class Win32TrayHost : ITrayHost
     /// <inheritdoc/>
     public void Remove()
     {
-        if (!_created) return;
+        // Symmetry with Create on the failure path: even when NIM_ADD was rejected (_created false),
+        // the message-only window may exist and Dispose/Stop must reclaim the HWND — a failed
+        // Create otherwise leaks one window per retry. NIM_DELETE is attempted only when the icon
+        // is registered (deleting an unregistered icon would just return false anyway).
+        // Đối xứng với Create trên đường thất bại: dù NIM_ADD bị từ chối (_created false), cửa sổ
+        // message-only có thể còn đó và Dispose/Stop phải thu hồi HWND — nếu không mỗi lần Create
+        // hỏng rò rỉ một cửa sổ. NIM_DELETE chỉ được thử khi icon đã đăng ký (xóa icon chưa đăng
+        // ký vốn chỉ trả về false).
+        if (_hwnd == 0) return;
 
-        var nid = BaseNotifyIconData();
-        NativeMethods.Shell_NotifyIconW(TrayContract.NimDelete, ref nid);
-        if (_hwnd != 0)
+        if (_created)
         {
-            NativeMethods.DestroyWindow(_hwnd);
-            _hwnd = 0;
+            var nid = BaseNotifyIconData();
+            NativeMethods.Shell_NotifyIconW(TrayContract.NimDelete, ref nid);
         }
+        NativeMethods.DestroyWindow(_hwnd);
+        _hwnd = 0;
         _created = false;
     }
 
@@ -185,7 +201,13 @@ public sealed class Win32TrayHost : ITrayHost
         switch (TrayContract.Dispatch(msg, _taskbarCreatedId, NativeMethods.CallbackMessage, mouseMsg))
         {
             case TrayContract.TrayDispatch.ReAddIcon:
-                AddIcon(); // explorer restarted — re-register the icon — explorer khởi động lại — đăng ký lại icon
+                // Re-assign the honest flag: an explorer restart can place the icon even after a
+                // rejected first NIM_ADD — with _created left false, the service (which only stops
+                // what it believes it started) could never take that real icon down.
+                // Gán lại cờ trung thực: explorer khởi động lại có thể đặt icon ngay cả sau NIM_ADD
+                // đầu bị từ chối — nếu _created vẫn false thì service (chỉ dừng những gì nó cho là
+                // mình đã start) sẽ không bao giờ gỡ được icon thật đó.
+                _created = AddIcon(); // explorer restarted — re-register the icon — explorer khởi động lại — đăng ký lại icon
                 return 0;
 
             case TrayContract.TrayDispatch.LeftClick:
