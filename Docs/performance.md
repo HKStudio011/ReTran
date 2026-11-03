@@ -925,3 +925,41 @@ uv run --project ReTran.OCR python Tools/Perf/ocrbench/bench.py --data Tools/Per
 - Đo unit test (`LineGrouperTests.ManyLinesTwoColumns_GroupsPerColumn_Fast`): **300 dòng** (2 cột × 150) **< 5 ms** — budget ghim trong test, có lượt warm-up trước để loại JIT.
 - Tác dụng tích cực: text nhiều dòng liền kề gộp thành 1 block ⇒ `new_texts` tính theo block thay vì theo dòng ⇒ khi màn hình ổn định, **translation requests giảm** (cùng cơ chế diff-based đã đo ở M4: nội dung không đổi ⇒ không request thêm).
 - Không chạy lại annotbench: đường annotate vẫn vẽ ≤ số box như trước (mỗi block gộp là 1 box thay vì N dòng thành viên), chi phí theo box giữ nguyên như bảng annotate phía trên.
+
+---
+
+## Tray icon + close-to-tray — footprint (2026-11-03)
+
+### Cấu phần thêm vào (đọc từ code đã merge, plan `settings-checkbox-tray`)
+
+| Thành phần | Chi phí thêm vào process App | Nguồn code |
+|---|---|---|
+| `Win32TrayHost` | **1 message-only window** (class `ReTranTray`, parent `HWND_MESSAGE`) tạo trên **chính UI thread** — không process mới, không thread mới | `Win32TrayHost.EnsureWindow` |
+| `TrayIconSource` | **1 HICON 32×32** vẽ một lần bằng GDI+ (bitmap nguồn 32×32 BGRA ≈ **4 KB**), dùng font cache sẵn có của `BoxAnnotationStyle` — không load font mới | `TrayIconSource` |
+| Menu ngữ cảnh | Dựng **theo yêu cầu** (mỗi cú click chuột phải: 3 record + 3 tra i18n), không loop | `TrayIconService.BuildMenu`, WndProc của host |
+| Balloon lỗi (`AppNotifier`) | Chỉ bắn khi có lỗi; cooldown 3 s tính bằng **timestamp so sánh**, không timer | `AppNotifier.Notify` |
+| Close-to-tray (`AppWindowBridge`) | **1 event handler** `AppWindow.Closing`; không polling | `AppWindowBridge.Attach` |
+| Icon lifecycle | `Start()` chỉ chạy từ hook `OnWindowCreated` của window chính (ordinal 0); `Dispose` (DI teardown) gỡ icon + DestroyIcon | `MauiProgram` hook, `TrayIconService.Dispose` |
+
+- **Không timer, không redraw định kỳ, không shared memory mới, không IPC mới:** toàn bộ đường tray chạy theo event (callback `Shell_NotifyIcon`, `Closing`, click). Không có loop nền nào mới trong App.
+- **Không đụng đường nóng:** capture/OCR/annotate giữ nguyên như §M5-fix. Tray không thêm frame nào vào pipeline.
+- **Tradeoff có chủ đích:** ẩn window xuống tray **không** giải phóng RAM App/Core/sidecar — đó chính là mục tiêu của tính năng (pipeline vẫn dịch trong lúc window ẩn). Ngân sách RAM của plan này là **footprint của riêng tầng tray**, không phải của pipeline.
+
+### Số đo
+
+**Chưa đo số trong session này** (disclosure): tray là tính năng desktop tương tác (icon, balloon, bấm X, menu) — cần mở app thật để đo trước/sau, và plan không bắt buộc số cho mục này. Kỳ vọng khi đo để đối chiếu:
+
+- **CPU:** đóng góp ≈ 0 khi không có sự kiện (không timer, message-only window không paint). Mốc so sánh hợp lệ: §M4 mục C — App idle **0,08 CPU-s / 0,2% 1 core**.
+- **RAM:** thêm ~4 KB bitmap icon + HICON handle + menu dựng tạm mỗi cú click (phát sinh rồi GC). Không đổi RSS pipeline.
+- **Hành vi có chủ đích cần thấy khi đo:** sau khi bấm X, CPU App **giảm** (WebView/preview không paint) trong khi Core + sidecar vẫn chạy như §M5-fix.
+
+### Lệnh đo (khi user mở app)
+
+```powershell
+# App chạy, tray icon đã hiện; sample per-process rồi so với baseline §M4 C / §M5-fix
+Get-Process ReTran.App | Select-Object Id, CPU, WorkingSet64, PeakWorkingSet64
+Start-Sleep 60
+Get-Process ReTran.App | Select-Object Id, CPU, WorkingSet64, PeakWorkingSet64
+# CPU delta / 60 s = contribution khi không có sự kiện tray (kỳ vọng ~0)
+# Bấm X (ẩn xuống tray) rồi đo lại 60 s: kỳ vọng CPU App giảm, Core/sidecar không đổi.
+```

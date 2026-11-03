@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Windowing;
 using ReTran_App.Services.Update;
 
@@ -18,6 +19,7 @@ public sealed class AppWindowBridge : IDisposable
     private readonly ToastService _toast;
     private readonly I18nService _L;
     private readonly UpdateCoordinator _coordinator;
+    private readonly ILogger<AppWindowBridge> _log;
 
     private nint _hwnd;
     private Microsoft.UI.Xaml.Window? _winuiWindow;
@@ -33,11 +35,14 @@ public sealed class AppWindowBridge : IDisposable
     /// <param name="toast">Toast bus for user-facing messages. Bus toast cho thông điệp tới người dùng.</param>
     /// <param name="L">Localized UI strings. Chuỗi UI đã dịch.</param>
     /// <param name="coordinator">Update state source read at Closing time. Nguồn trạng thái update đọc lúc Closing.</param>
-    public AppWindowBridge(ToastService toast, I18nService L, UpdateCoordinator coordinator)
+    /// <param name="log">Reports a hook that could not be installed or a hide that failed. Báo cáo hook không cài được hoặc lần ẩn thất bại.</param>
+    public AppWindowBridge(ToastService toast, I18nService L, UpdateCoordinator coordinator,
+        ILogger<AppWindowBridge> log)
     {
         _toast = toast;
         _L = L;
         _coordinator = coordinator;
+        _log = log;
     }
 
     /// <summary>Whether the primary window's Closing event has been hooked. Đã hook Closing của cửa sổ chính chưa.</summary>
@@ -51,19 +56,42 @@ public sealed class AppWindowBridge : IDisposable
 
     /// <summary>
     /// Resolves the AppWindow for <paramref name="winuiWindow"/> and hooks its Closing event.
-    /// Call exactly once, for the primary window only (see <see cref="WindowHooks"/>).
+    /// Call exactly once, for the primary window only (see <see cref="WindowHooks"/>). A no-op when
+    /// the AppWindow cannot be resolved — the bridge then stays unattached and a later call can
+    /// retry.
     /// Phân giải AppWindow của <paramref name="winuiWindow"/> và hook Closing của nó. Gọi đúng
-    /// một lần, chỉ cho window chính (xem <see cref="WindowHooks"/>).
+    /// một lần, chỉ cho window chính (xem <see cref="WindowHooks"/>). Không làm gì khi không phân giải
+    /// được AppWindow — bridge khi đó vẫn chưa attach và lần gọi sau thử lại được.
     /// </summary>
     /// <param name="winuiWindow">The WinUI window to hook. Cửa sổ WinUI cần hook.</param>
     public void Attach(Microsoft.UI.Xaml.Window winuiWindow)
     {
         if (_disposed || _appWindow is not null) return;
 
-        _hwnd = WinRT.Interop.WindowNative.GetWindowHandle(winuiWindow);
+        nint hwnd = WinRT.Interop.WindowNative.GetWindowHandle(winuiWindow);
+        var windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(hwnd);
+        AppWindow? appWindow = AppWindow.GetFromWindowId(windowId);
+        if (appWindow is null)
+        {
+            // The WinRT projection declares the return type non-nullable, but GetFromWindowId does
+            // hand back null when no AppWindow backs the id (e.g. the window is already gone).
+            // Storing state BEFORE the check would leave a half-initialized bridge — _hwnd set, so
+            // IsForeground answers, and a NullReferenceException on the Closing line. Skipping the
+            // assignment keeps IsAttached false and lets a later Attach retry.
+            // Projection WinRT khai báo kiểu trả về là non-nullable, nhưng GetFromWindowId vẫn trả
+            // null khi id không có AppWindow đứng sau (vd. window đã đóng). Gán trạng thái TRƯỚC khi
+            // kiểm tra sẽ để lại bridge khởi tạo dở: _hwnd đã gán nên IsForeground trả lời, và NRE
+            // ngay ở dòng đăng ký Closing. Không gán giữ IsAttached bằng false và cho phép Attach
+            // lần sau thử lại.
+            _log.LogWarning(
+                "AppWindow.GetFromWindowId returned no window for HWND 0x{Hwnd:X}; the close-to-tray hook stays off.",
+                hwnd.ToInt64());
+            return;
+        }
+
+        _hwnd = hwnd;
         _winuiWindow = winuiWindow;
-        var windowId = Microsoft.UI.Win32Interop.GetWindowIdFromWindow(_hwnd);
-        _appWindow = AppWindow.GetFromWindowId(windowId);
+        _appWindow = appWindow;
         _appWindow.Closing += OnClosing;
     }
 
@@ -114,6 +142,13 @@ public sealed class AppWindowBridge : IDisposable
             _appWindow = null;
         }
         _winuiWindow = null;
+        // Clearing the HWND makes IsForeground stop answering after detach: the handle it would
+        // compare against is no longer owned by this bridge, so AppNotifier must not keep routing
+        // messages as if this window were still the app's window.
+        // Xóa HWND khiến IsForeground ngừng trả lời sau khi detach: handle mà nó so sánh với
+        // foreground không còn thuộc bridge này, nên AppNotifier không được tiếp tục định tuyến thông
+        // điệp như thể đây vẫn là cửa sổ của app.
+        _hwnd = 0;
     }
 
     // Cancelling Closing only prevents destruction — the window would stay visible — so the
@@ -125,7 +160,24 @@ public sealed class AppWindowBridge : IDisposable
         if (ClosePolicy.Decide(_coordinator.UpdateInProgress, _exiting) == CloseDecision.HideToTray)
         {
             e.Cancel = true;
-            HideToTray();
+            try
+            {
+                HideToTray();
+            }
+            catch (Exception ex)
+            {
+                // The close is already cancelled, so this cannot re-open it — but an exception escaping
+                // a WinRT event handler runs on the window procedure's own call stack and would take
+                // down the process that close-to-tray exists to keep alive. The window simply stays
+                // visible; _visible still describes the last successful hide, so the tray keeps
+                // offering OpenApp (Restore) as the way back.
+                // Cú đóng đã bị cancel nên lỗi không mở lại nó được — nhưng exception thoát khỏi event
+                // handler WinRT sẽ chạy ngay trên call stack của window procedure và giết chính process
+                // mà close-to-tray sinh ra để giữ sống. Cửa sổ chỉ đơn giản là vẫn hiện; _visible vẫn mô
+                // tả lần ẩn thành công gần nhất, nên khay vẫn đưa ra OpenApp (Restore) để mở lại.
+                _log.LogError(ex,
+                    "Hiding the primary window to the tray failed; the window stays visible and the app keeps running.");
+            }
         }
     }
 

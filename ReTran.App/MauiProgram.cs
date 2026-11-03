@@ -1,11 +1,14 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Microsoft.Maui.LifecycleEvents;
 using ReTran_App.Core;
 using ReTran_App.Data;
 using ReTran_App.Services;
 using ReTran_App.Services.OverlayFeed;
 using ReTran_App.Services.OverlayWindow;
+using ReTran_App.Services.Tray;
 using ReTran_App.Services.Update;
+using ReTran_App.Services.Window;
 
 namespace ReTran_App
 {
@@ -40,6 +43,24 @@ namespace ReTran_App
             builder.Services.AddSingleton<IForegroundWatcher, Win32ForegroundWatcher>();
             builder.Services.AddSingleton<OverlayWindowService>();
 
+            // System tray: close-to-tray window bridge, Shell_NotifyIcon host, clean exit path,
+            // error routing (balloon vs toast) and the menu actions behind it. The icon is only
+            // registered from the primary-window hook (below).
+            // Khay hệ thống: bridge cửa sổ close-to-tray, host Shell_NotifyIcon, đường thoát sạch,
+            // định tuyến lỗi (balloon vs toast) và các hành động menu đứng sau đó. Icon chỉ được
+            // đăng ký từ hook cửa sổ chính (bên dưới).
+            builder.Services.AddSingleton<AppWindowBridge>();
+            builder.Services.AddSingleton<ITrayHost, Win32TrayHost>();
+            builder.Services.AddSingleton<ITrayExit, TrayExitService>();
+            builder.Services.AddSingleton(sp => new AppNotifier(
+                sp.GetRequiredService<ToastService>(),
+                sp.GetRequiredService<ITrayHost>(),
+                () => sp.GetRequiredService<AppWindowBridge>().IsVisible,
+                () => sp.GetRequiredService<AppWindowBridge>().IsForeground,
+                sp.GetRequiredService<ILogger<AppNotifier>>()));
+            builder.Services.AddSingleton<ITrayActions, AppTrayActions>();
+            builder.Services.AddSingleton<TrayIconService>();
+
             string dbPath = TranslationCache.DefaultDbPath;
             builder.Services.AddDbContext<RetranDbContext>(
                 options => options.UseSqlite($"Data Source={dbPath}"),
@@ -64,6 +85,27 @@ namespace ReTran_App
     		builder.Services.AddBlazorWebViewDeveloperTools();
     		builder.Logging.AddDebug();
 #endif
+
+            // Hook the primary window: pressing X hides it to the tray, and the tray icon is
+            // registered on the UI thread — exactly where the host's message-only window is created
+            // (no new thread, no timer). Only ordinal 0 is hooked (see WindowHooks): a second
+            // window would mean a second icon and a double hide. The counter starts at -1 because
+            // Interlocked.Increment hands 0 to the first window.
+            // Hook cửa sổ chính: bấm X ẩn cửa sổ xuống khay, và icon khay được đăng ký trên UI
+            // thread — đúng nơi cửa sổ message-only của host được tạo (không thread mới, không
+            // timer). Chỉ ordinal 0 được hook (xem WindowHooks): window thứ hai sẽ sinh icon thứ hai
+            // và ẩn hai lần. Bộ đếm bắt đầu ở -1 vì Interlocked.Increment trả 0 cho window đầu tiên.
+            int windowOrdinal = -1;
+            builder.ConfigureLifecycleEvents(events => events.AddWindows(w => w.OnWindowCreated(window =>
+            {
+                var ordinal = Interlocked.Increment(ref windowOrdinal);
+                if (!WindowHooks.ShouldHookWindow(ordinal)) return; // chỉ window chính (Review Focus #5)
+
+                IServiceProvider? services = IPlatformApplication.Current?.Services; // pattern repo, xem App.xaml.cs:10
+                if (services is null) return;
+                services.GetRequiredService<AppWindowBridge>().Attach(window);
+                services.GetRequiredService<TrayIconService>().Start();
+            })));
 
             MauiApp app = builder.Build();
             MigrateDatabase(app.Services, dbPath);
