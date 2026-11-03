@@ -58,14 +58,19 @@ public interface ITrayActions
 /// unit-testable without a real notification area. A command that fails is reported to the user, not
 /// just logged (spec §Báo lỗi, D12). Not thread-safe: <see cref="Start"/>,
 /// <see cref="Stop"/> and the command handler all run on the UI thread, where the host's message-only
-/// window lives.
+/// window lives. Nothing here may throw back into that window procedure — <see cref="Start"/>, the
+/// command handler and <see cref="BuildMenu"/> are entry points the host or the app lifecycle calls
+/// bare, and every log write goes through <see cref="TryLog"/> for the same reason.
 /// Sở hữu icon khay trong suốt đời app: vẽ icon (<see cref="TrayIconSource"/>), đăng ký với
 /// <see cref="ITrayHost"/>, dựng menu ngữ cảnh từ trạng thái app hiện tại và chuyển mục được chọn
 /// tới một cài đặt <see cref="ITrayActions"/>. Bản thân service không đụng trực tiếp cửa sổ, overlay
 /// hay pipeline — mọi trạng thái nó báo cáo hoặc thay đổi đều đi qua các seam đó, nên kiểm thử được
 /// mà không cần khu vực thông báo thật. Lệnh thất bại được báo cho người dùng, không chỉ log
 /// (spec §Báo lỗi, D12). Không thread-safe: <see cref="Start"/>, <see cref="Stop"/> và handler lệnh
-/// đều chạy trên UI thread, nơi cửa sổ message-only của host tồn tại.
+/// đều chạy trên UI thread, nơi cửa sổ message-only của host tồn tại. Không gì ở đây được ném lỗi
+/// ngược lại window procedure đó — <see cref="Start"/>, handler lệnh và <see cref="BuildMenu"/> là
+/// các entry điểm mà host hoặc lifecycle của app gọi trần, và mọi lần ghi log đi qua
+/// <see cref="TryLog"/> vì cùng lý do.
 /// </summary>
 public sealed class TrayIconService : IDisposable
 {
@@ -98,28 +103,62 @@ public sealed class TrayIconService : IDisposable
     }
 
     /// <summary>
-    /// Registers the icon (idempotent — a second call while already started does nothing), drawing a
-    /// fresh <see cref="TrayIconSource"/> after every <see cref="Stop"/>.
-    /// Đăng ký icon (idempotent — gọi lần hai khi đang chạy thì không làm gì), vẽ
-    /// <see cref="TrayIconSource"/> mới sau mỗi lần <see cref="Stop"/>.
+    /// Registers the icon, drawing a fresh <see cref="TrayIconSource"/> after every <see cref="Stop"/>;
+    /// a second call while already registered does nothing (idempotent). This method NEVER throws: it
+    /// runs inside the window-lifecycle hook, where a throw over a cosmetic notification-area icon
+    /// would take the app down. If registration fails the attempt is rolled back completely — the HICON
+    /// is destroyed and the command handler detached — so the service is back in the not-started state
+    /// and a later <see cref="Start"/> can retry.
+    /// Đăng ký icon, vẽ <see cref="TrayIconSource"/> mới sau mỗi lần <see cref="Stop"/>; gọi lần hai khi
+    /// đã đăng ký thì không làm gì (idempotent). Hàm này KHÔNG BAO GIỜ ném lỗi: nó chạy trong hook
+    /// lifecycle của cửa sổ, nơi một exception chỉ vì icon ở khu vực thông báo sẽ giết app. Nếu việc
+    /// đăng ký thất bại, lần thử được hoàn tác toàn bộ — HICON bị hủy và handler lệnh bị gỡ — để service
+    /// trở về trạng thái chưa-start và lần <see cref="Start"/> sau thử lại được.
     /// </summary>
     public void Start()
     {
         if (_icon is not null)
         {
-            _log.LogDebug("Tray icon already registered; Start ignored.");
+            TryLog(() => _log.LogDebug("Tray icon already registered; Start ignored."));
             return;
         }
 
-        var icon = new TrayIconSource();
+        TrayIconSource? icon = null;
+        try
+        {
+            // Attach the handler BEFORE registering: between NIM_ADD and the first right-click nothing
+            // may be unhandled, and one handler per registration keeps Start/Stop symmetric.
+            // Gắn handler TRƯỚC khi đăng ký: giữa NIM_ADD và cú click đầu tiên không được có lệnh nào
+            // không được xử lý, và mỗi lần đăng ký đúng một handler giữ Start/Stop đối xứng.
+            _host.CommandSelected += OnCommandSelected;
+            icon = new TrayIconSource();
+            _host.Create(icon.Handle, _L["tray.tip"], BuildMenu);
+        }
+        catch (Exception ex)
+        {
+            // Roll the attempt back: an HICON left behind here leaks one per retry, and an _icon left
+            // set would make the idempotence guard skip every later Start — the tray would never appear.
+            // Detaching a handler that was never attached is a no-op.
+            // Hoàn tác lần thử: HICON bị bỏ lại sẽ rò rỉ một handle mỗi lần retry, còn _icon đã gán sẽ
+            // khiến guard idempotent bỏ qua mọi lần Start sau — tray không bao giờ hiện. Gỡ handler chưa
+            // gắn là no-op.
+            icon?.Dispose();
+            _host.CommandSelected -= OnCommandSelected;
+            TryLog(() => _log.LogError(ex, "Failed to register the tray icon; a later Start will retry."));
+            return;
+        }
+
+        // Assigned only once Create returned normally — the guard above must protect real
+        // registrations only, never a failed attempt. Chỉ gán khi Create trả về bình thường — guard ở
+        // trên phải bảo vệ ĐĂNG KÝ THẬT, không phải một lần thử hỏng.
         _icon = icon;
-        // Attach the handler BEFORE registering: between NIM_ADD and the first right-click nothing
-        // may be unhandled, and one handler per registration keeps Start/Stop symmetric.
-        // Gắn handler TRƯỚC khi đăng ký: giữa NIM_ADD và cú click đầu tiên không được có lệnh nào
-        // không được xử lý, và mỗi lần đăng ký đúng một handler giữ Start/Stop đối xứng.
-        _host.CommandSelected += OnCommandSelected;
-        _host.Create(icon.Handle, _L["tray.tip"], BuildMenu);
-        _log.LogInformation("Tray icon registered.");
+        // IsCreated keeps the success log honest: a host that is already disposed no-ops Create without
+        // throwing, and claiming "registered" would send the next reader hunting for a phantom icon.
+        // IsCreated giữ log thành công trung thực: host đã dispose thì Create no-op mà không ném lỗi, và
+        // báo "registered" sẽ khiến người đọc sau đi tìm icon ma.
+        TryLog(() => _log.LogInformation(_host.IsCreated
+            ? "Tray icon registered."
+            : "Tray host did not take the icon (host disposed or its Win32 call failed); icon and menu will not appear."));
     }
 
     /// <summary>
@@ -140,7 +179,7 @@ public sealed class TrayIconService : IDisposable
         // handle thì tray sẽ vẽ lại handle đã chết.
         _host.Remove();
         icon.Dispose();
-        _log.LogInformation("Tray icon removed.");
+        TryLog(() => _log.LogInformation("Tray icon removed."));
     }
 
     /// <summary>
@@ -149,12 +188,36 @@ public sealed class TrayIconService : IDisposable
     /// Dựng menu ngữ cảnh từ trạng thái app HIỆN TẠI: host gọi hàm này mỗi lần click chuột phải, nên
     /// <see cref="ITrayActions.OverlayIsOn"/> phải đọc trực tiếp ở đây, không được cache.
     /// </summary>
+    /// <remarks>
+    /// This is a SECOND entry point the tray window procedure calls bare (the host invokes the provider
+    /// without any guard), so it never throws either: a throw out of <see cref="ITrayActions.OverlayIsOn"/>
+    /// or the label lookup would kill the app on a plain right-click. On failure it returns an EMPTY
+    /// list, which the host reads as "no menu" — the menu simply does not open for that click — and
+    /// the reason is logged.
+    /// Đây là entry điểm THỨ HAI mà window procedure của khay gọi trần (host gọi provider không một lớp
+    /// guard), nên nó cũng không ném lỗi: một exception từ <see cref="ITrayActions.OverlayIsOn"/> hoặc
+    /// từ việc tra nhãn sẽ giết app chỉ bằng một cú click chuột phải. Khi lỗi, hàm trả danh sách RỖNG,
+    /// host hiểu là "không menu" — menu đơn giản không mở cho cú click đó — và lý do được log.
+    /// </remarks>
     /// <returns>
-    /// The ordered entries OpenApp / ToggleOverlay (checked per overlay state) / Exit.
-    /// Các mục theo thứ tự OpenApp / ToggleOverlay (tick theo trạng thái overlay) / Exit.
+    /// The ordered entries OpenApp / ToggleOverlay (checked per overlay state) / Exit, or an empty list
+    /// when the app state could not be read (the host then shows no menu).
+    /// Các mục theo thứ tự OpenApp / ToggleOverlay (tick theo trạng thái overlay) / Exit, hoặc danh sách
+    /// rỗng khi không đọc được trạng thái app (host khi đó không hiện menu).
     /// </returns>
-    public IReadOnlyList<TrayCommand> BuildMenu() => TrayMenuModel.Build(
-        _L["tray.menu.open"], _L["tray.menu.overlay"], _L["tray.menu.exit"], _actions.OverlayIsOn);
+    public IReadOnlyList<TrayCommand> BuildMenu()
+    {
+        try
+        {
+            return TrayMenuModel.Build(
+                _L["tray.menu.open"], _L["tray.menu.overlay"], _L["tray.menu.exit"], _actions.OverlayIsOn);
+        }
+        catch (Exception ex)
+        {
+            TryLog(() => _log.LogWarning(ex, "Failed to read the app state for the tray menu; skipping the menu for this click."));
+            return Array.Empty<TrayCommand>();
+        }
+    }
 
     /// <summary>
     /// Runs a tray command and reports its failure twice — to the log (detail) and to the user (one
@@ -173,7 +236,10 @@ public sealed class TrayIconService : IDisposable
     /// fault is reported the same way instead of becoming an unhandled exception on the message pump —
     /// which would kill the process the tray exists to protect.
     /// A failure is reported exactly once: a command that throws synchronously is handled here, a
-    /// command that returns a faulted task is handled there — never both.
+    /// command that returns a faulted task is handled there — never both. The notice that explains a
+    /// SUCCESSFUL toggle is raised after the catch, deliberately not inside it: if delivering that
+    /// notice failed, reporting the command as failed would tell the user the opposite of what
+    /// happened (the overlay really was turned on).
     /// Tác động của lệnh PHẢI chạy ĐỒNG BỘ ngay trong handler này, tới await thật đầu tiên: host phát
     /// <see cref="ITrayHost.CommandSelected"/> thẳng từ window procedure của khay, và hoãn tác động
     /// (<c>Task.Run</c>) sẽ làm đảo thứ tự các lệnh menu so với UI thread và khiến tác động vô hình
@@ -182,11 +248,14 @@ public sealed class TrayIconService : IDisposable
     /// exception không được xử lý trên message pump — thứ sẽ giết chính process mà tray sinh ra để
     /// bảo vệ.
     /// Mỗi lỗi chỉ được báo ĐÚNG MỘT lần: lệnh ném lỗi đồng bộ thì xử lý ở đây, lệnh trả task lỗi thì
-    /// xử lý ở kia — không bao giờ cả hai.
+    /// xử lý ở kia — không bao giờ cả hai. Thông báo giải thích cho một lệnh toggle THÀNH CÔNG được đặt
+    /// SAU catch, cố ý không nằm trong catch: nếu việc gửi thông báo đó hỏng mà báo lệnh thất bại thì
+    /// ta nói với người dùng điều ngược lại với những gì đã xảy ra (overlay thật sự đã được bật).
     /// </remarks>
     /// <param name="id">The command the user picked. Lệnh người dùng chọn.</param>
     private void OnCommandSelected(TrayCommandId id)
     {
+        bool announceNextStart = false;
         try
         {
             switch (id)
@@ -195,7 +264,7 @@ public sealed class TrayIconService : IDisposable
                     _actions.OpenAppWindow();
                     break;
                 case TrayCommandId.ToggleOverlay:
-                    ToggleOverlay();
+                    announceNextStart = ToggleOverlay();
                     break;
                 case TrayCommandId.Exit:
                     // ExitApp() is CALLED here (not deferred); its task is observed fire-and-forget.
@@ -206,7 +275,7 @@ public sealed class TrayIconService : IDisposable
                 default:
                     // A TrayCommandId added without a case here would otherwise do nothing silently.
                     // Một TrayCommandId thêm mà không có case ở đây sẽ im lặng không làm gì.
-                    _log.LogWarning("No handler for tray command {Command}.", id);
+                    TryLog(() => _log.LogWarning("No handler for tray command {Command}.", id));
                     break;
             }
         }
@@ -217,79 +286,136 @@ public sealed class TrayIconService : IDisposable
             // Lỗi thoát khỏi handler của window procedure khay sẽ kéo theo process chết, nên mọi lỗi
             // lệnh đồng bộ đều dừng ở đây — có báo cáo, không bị nuốt.
             ReportFailure(id, ex);
+            return;
         }
+
+        // After the catch on purpose: this notice belongs to a command that SUCCEEDED, and NotifyUser
+        // cannot throw, so a delivery problem here can never be mislabeled as a command failure.
+        // Đặt SAU catch có chủ đích: thông báo này thuộc về một lệnh đã thành công, và NotifyUser không
+        // ném lỗi, nên lỗi gửi thông báo không thể bị gán nhầm thành lỗi lệnh.
+        if (announceNextStart) NotifyUser("tray.overlay.appliesAtStart", ToastSeverity.Info);
     }
 
     /// <summary>
-    /// Reports one command failure in the two directions that matter: the exception detail goes to the
-    /// log, the user gets one localized sentence through <see cref="AppNotifier"/> — a tray balloon
-    /// while the window is hidden or unfocused, a toast when they are looking at the app (spec
-    /// §Báo lỗi, D12). A command that fails is otherwise invisible: the menu entry just looks like it
-    /// did nothing.
-    /// Báo một lỗi lệnh theo hai chiều quan trọng: chi tiết exception vào log, người dùng nhận một câu
-    /// đã dịch qua <see cref="AppNotifier"/> — bubble tray khi cửa sổ ẩn hoặc không focus, toast khi họ
-    /// đang nhìn vào app (spec §Báo lỗi, D12). Nếu không, một lệnh thất bại vô hình: mục menu chỉ trông
-    /// như không có tác dụng.
+    /// Reports one command failure in the two directions that matter: the user gets one localized
+    /// sentence through <see cref="AppNotifier"/> — a tray balloon while the window is hidden or
+    /// unfocused, a toast when they are looking at the app (spec §Báo lỗi, D12) — and the exception
+    /// detail goes to the log. A command that fails is otherwise invisible: the menu entry just looks
+    /// like it did nothing.
+    /// Báo một lỗi lệnh theo hai chiều quan trọng: người dùng nhận một câu đã dịch qua
+    /// <see cref="AppNotifier"/> — bubble tray khi cửa sổ ẩn hoặc không focus, toast khi họ đang nhìn
+    /// vào app (spec §Báo lỗi, D12) — còn chi tiết exception vào log. Nếu không, một lệnh thất bại vô
+    /// hình: mục menu chỉ trông như không có tác dụng.
     /// </summary>
     /// <remarks>
-    /// The notification is guarded by its own <c>try</c>: <see cref="AppNotifier.Notify"/> is not
-    /// self-isolating (<c>ToastService.Show</c> runs its subscribers synchronously, and a throwing UI
-    /// subscriber propagates), so a failing report must not escape the tray handler and take the
-    /// process down. The report is also deliberately generic (<c>tray.error.command</c>, no exception
-    /// text): an exception message is developer detail, sometimes with paths or tokens, and the log
-    /// already carries it.
-    /// Thông báo được bọc bởi <c>try</c> riêng: <see cref="AppNotifier.Notify"/> không tự cách ly
-    /// (<c>ToastService.Show</c> gọi các subscriber đồng bộ, và một subscriber UI ném lỗi sẽ lan ra),
-    /// nên việc báo lỗi không được thoát khỏi handler khay mà kéo process chết. Thông điệp cũng cố ý
-    /// chung chung (<c>tray.error.command</c>, không kèm text exception): message của exception là chi
-    /// tiết dành cho developer, đôi khi chứa đường dẫn hoặc token, và log đã giữ nó.
+    /// The message is deliberately generic (<c>tray.error.command</c>, no exception text): an exception
+    /// message is developer detail, sometimes with paths or tokens, and the log already carries it.
+    /// Both directions are guarded (<see cref="NotifyUser"/>, <see cref="TryLog"/>) because a report of
+    /// a failure must not itself become a crash. The user is told BEFORE logging so a broken log channel
+    /// cannot hide a failure from them.
+    /// Thông điệp cố ý chung chung (<c>tray.error.command</c>, không kèm text exception): message của
+    /// exception là chi tiết dành cho developer, đôi khi chứa đường dẫn hoặc token, và log đã giữ nó. Cả
+    /// hai chiều đều có guard (<see cref="NotifyUser"/>, <see cref="TryLog"/>) vì việc báo cáo một lỗi
+    /// không được biến thành crash. Báo người dùng TRƯỚC khi log để một kênh log hỏng không che được lỗi.
     /// </remarks>
     /// <param name="id">The command that failed. Lệnh đã thất bại.</param>
     /// <param name="ex">The failure to record. Lỗi cần ghi nhận.</param>
     private void ReportFailure(TrayCommandId id, Exception ex)
     {
-        _log.LogError(ex, "Tray command {Command} failed.", id);
+        NotifyUser("tray.error.command", ToastSeverity.Error);
+        TryLog(() => _log.LogError(ex, "Tray command {Command} failed.", id));
+    }
 
+    /// <summary>
+    /// Sends one localized message through <see cref="AppNotifier"/>: a tray balloon while the app window
+    /// is hidden or unfocused, a toast when the user is looking at the app. It never throws —
+    /// <see cref="AppNotifier.Notify"/> is NOT self-isolating (<c>ToastService.Show</c> runs its
+    /// subscribers synchronously and a throwing UI subscriber propagates), and every caller of this
+    /// helper sits on the tray's native message loop, where an escaping exception kills the app. A
+    /// delivery that fails is logged as a warning, never rethrown.
+    /// Gửi một thông điệp đã dịch qua <see cref="AppNotifier"/>: bubble tray khi cửa sổ app ẩn hoặc không
+    /// focus, toast khi người dùng đang nhìn vào app. Hàm không ném lỗi — <see cref="AppNotifier.Notify"/>
+    /// KHÔNG tự cách ly (<c>ToastService.Show</c> gọi các subscriber đồng bộ và một subscriber UI ném lỗi
+    /// sẽ lan ra), còn mọi nơi gọi helper này đều nằm trên message loop native của khay, nơi một exception
+    /// thoát ra sẽ giết app. Việc gửi hỏng được log warning, không bao giờ ném lại.
+    /// </summary>
+    /// <param name="messageKey">i18n key of the message to show. Key i18n của thông điệp cần hiện.</param>
+    /// <param name="severity">Severity for the toast and the balloon icon. Mức độ cho toast và icon balloon.</param>
+    private void NotifyUser(string messageKey, ToastSeverity severity)
+    {
         try
         {
-            _notifier.Notify(_L["tray.error.command"], ToastSeverity.Error);
+            _notifier.Notify(_L[messageKey], severity);
         }
-        catch (Exception reportError)
+        catch (Exception notifyError)
         {
-            _log.LogError(reportError, "Could not report the failure of tray command {Command} to the user.", id);
+            TryLog(() => _log.LogWarning(notifyError,
+                "Could not deliver the tray message {Key} at {Severity}.", messageKey, severity));
         }
     }
 
     /// <summary>
-    /// Toggles the overlay and explains the one case the user cannot see for themselves: turning it
-    /// on while the pipeline is stopped changes nothing on screen until the next start. The choice is
-    /// still applied (spec §7.2) — saying so beats refusing the click, and the state is read BEFORE
-    /// <see cref="ITrayActions.SetOverlay"/> so an implementation that starts something itself cannot
-    /// talk us out of the notice.
-    /// Bật/tắt overlay và giải thích trường hợp duy nhất người dùng không tự thấy được: bật overlay
-    /// khi pipeline đang dừng thì màn hình không đổi gì cho tới lần Start kế tiếp. Lựa chọn vẫn được
-    /// áp dụng (spec §7.2) — nói rõ vẫn hơn là từ chối click, và trạng thái được đọc TRƯỚC
-    /// <see cref="ITrayActions.SetOverlay"/> để một cài đặt tự khởi động gì đó không khiến ta bỏ qua
-    /// thông báo.
+    /// Attempts one log write and drops it when the logging channel itself fails. Every caller here sits
+    /// on the tray's native message loop (or in a rollback path beside it) and there is no second channel
+    /// to fall back on, so swallowing a broken write is deliberate: the alternative is rethrowing out of
+    /// a catch and killing the process the tray exists to protect.
+    /// Thử ghi một dòng log và bỏ nếu chính kênh log hỏng. Mọi nơi gọi ở đây nằm trên message loop native
+    /// của khay (hoặc trong đường hoàn tác cạnh nó) và không có kênh thứ hai để lùi về, nên việc nuốt một
+    /// lần ghi hỏng là có chủ đích: phương án còn lại là ném lại từ trong catch và giết chính process mà
+    /// tray sinh ra để bảo vệ.
     /// </summary>
-    private void ToggleOverlay()
+    /// <param name="write">The log call to attempt. Lời gọi log cần thử.</param>
+    private void TryLog(Action write)
+    {
+        try
+        {
+            write();
+        }
+        catch (Exception)
+        {
+            // Deliberately empty: the logger is the failing component here, and nothing else can report
+            // it. Cố ý rỗng: logger mới là component hỏng ở đây, và không gì khác báo lại được nó.
+        }
+    }
+
+    /// <summary>
+    /// Toggles the overlay and decides whether the user is owed a word about what they cannot see for
+    /// themselves: turning the overlay on while the pipeline is stopped changes nothing on screen until
+    /// the next start. The choice is still applied (spec §7.2) — saying so beats refusing the click — and
+    /// the state is read BEFORE <see cref="ITrayActions.SetOverlay"/> so an implementation that starts
+    /// something itself cannot talk us out of the notice. The notice is NOT sent here: the caller sends
+    /// it after the failure catch, where a delivery failure cannot be mistaken for a command failure.
+    /// Bật/tắt overlay và quyết định có nợ người dùng một câu về điều họ không tự thấy được: bật overlay
+    /// khi pipeline đang dừng thì màn hình không đổi gì cho tới lần Start kế tiếp. Lựa chọn vẫn được áp
+    /// dụng (spec §7.2) — nói rõ vẫn hơn từ chối click — và trạng thái được đọc TRƯỚC
+    /// <see cref="ITrayActions.SetOverlay"/> để một cài đặt tự khởi động gì đó không khiến ta bỏ qua thông
+    /// báo. Thông báo KHÔNG được gửi ở đây: nơi gọi gửi nó sau catch lỗi, nơi một lỗi gửi thông báo không
+    /// thể bị nhầm thành lỗi lệnh.
+    /// </summary>
+    /// <returns>
+    /// True when the overlay was just turned on while the pipeline is stopped — the caller owes the user
+    /// the "next start" notice. True khi overlay vừa được bật lúc pipeline đang dừng — nơi gọi nợ người
+    /// dùng thông báo "lần Start kế tiếp".
+    /// </returns>
+    private bool ToggleOverlay()
     {
         bool wasRunning = _actions.PipelineRunning;
         bool turnOn = !_actions.OverlayIsOn;
         _actions.SetOverlay(turnOn);
 
-        if (turnOn && !wasRunning) _notifier.Notify(_L["tray.overlay.appliesAtStart"]);
+        return turnOn && !wasRunning;
     }
 
     /// <summary>
     /// Awaits the tail of an exit that has already begun and reports its failure the same way a
     /// synchronous command failure is reported (log + one user-visible message, spec §Báo lỗi D12).
-    /// It cannot throw synchronously — everything is inside the <c>try</c> — which is what lets the
-    /// caller discard the returned task without risking an unhandled exception.
-    /// Chờ phần đuôi của một lệnh thoát đã bắt đầu và báo lỗi của nó đúng như cách báo một lệnh thất
-    /// bại đồng bộ (log + một thông điệp tới người dùng, spec §Báo lỗi D12). Hàm không thể ném đồng bộ —
-    /// mọi thứ nằm trong <c>try</c> — nên nơi gọi được phép bỏ qua task trả về mà không sợ exception
-    /// không được xử lý.
+    /// Nothing can escape it: the await is inside the <c>try</c> and <see cref="ReportFailure"/> cannot
+    /// throw — which is what lets the caller discard the returned task without risking an unhandled
+    /// exception on the message pump.
+    /// Chờ phần đuôi của một lệnh thoát đã bắt đầu và báo lỗi của nó đúng như cách báo một lệnh thất bại
+    /// đồng bộ (log + một thông điệp tới người dùng, spec §Báo lỗi D12). Không gì thoát ra được: await
+    /// nằm trong <c>try</c> và <see cref="ReportFailure"/> không ném lỗi — nên nơi gọi được phép bỏ qua
+    /// task trả về mà không sợ exception không được xử lý trên message pump.
     /// </summary>
     /// <param name="pending">The task returned by <see cref="ITrayActions.ExitApp"/>. Task do <see cref="ITrayActions.ExitApp"/> trả về.</param>
     private async Task ObserveExit(Task pending)
