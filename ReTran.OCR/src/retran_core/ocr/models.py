@@ -372,6 +372,27 @@ def _require_name(params: Any) -> str:
     return name
 
 
+def _require_src(params: Any) -> str:
+    """Extract and validate the 'src' param of ocr.models.recommend.
+
+    Args:
+        params: Raw JSON-RPC params.
+
+    Returns:
+        The source language code (non-empty string).
+
+    Raises:
+        RpcInvalidParams: The params are not an object with a non-empty
+            string 'src'.
+    """
+    if not isinstance(params, dict):
+        raise RpcInvalidParams("params must be an object with 'src'")
+    src = params.get("src")
+    if not isinstance(src, str) or not src.strip():
+        raise RpcInvalidParams("missing or invalid 'src' (non-empty language code string)")
+    return src
+
+
 def _require_pair(params: Any) -> tuple[str, str]:
     """Extract and validate the 'det'/'rec' params of ocr.models.set.
 
@@ -402,9 +423,12 @@ def make_model_handlers(manager: ModelManager) -> dict[str, Handler]:
     Returns:
         Handlers for ``ocr.models.list`` (params ignored), ``ocr.models.download``
         (returns ``{"accepted": true}`` immediately — the download continues
-        on a background thread), ``ocr.models.delete`` and ``ocr.models.set``
-        (returns the new active pair). Invalid params and unknown/in-use
-        models raise ``RpcInvalidParams`` (-32602).
+        on a background thread), ``ocr.models.delete``, ``ocr.models.set``
+        (returns the new active pair) and ``ocr.models.recommend`` (returns
+        ``{"det": ..., "rec": ...}`` — the pair ``recommended()`` picks for the
+        requested ``{"src": <lang-code>}``; the translation target is fixed to
+        ``"vi"`` because it does not influence the pair the OCR needs).
+        Invalid params and unknown/in-use models raise ``RpcInvalidParams`` (-32602).
     """
 
     def download(params: Optional[dict]) -> dict:
@@ -420,9 +444,14 @@ def make_model_handlers(manager: ModelManager) -> dict[str, Handler]:
         manager.set_pair(det, rec)
         return {"active": {"det": det, "rec": rec}}
 
+    def recommend(params: Optional[dict]) -> dict:
+        det, rec = recommended(_require_src(params), "vi")
+        return {"det": det, "rec": rec}
+
     return {
         "ocr.models.list": lambda params: manager.list(),
         "ocr.models.download": download,
         "ocr.models.delete": delete,
         "ocr.models.set": set_pair,
+        "ocr.models.recommend": recommend,
     }

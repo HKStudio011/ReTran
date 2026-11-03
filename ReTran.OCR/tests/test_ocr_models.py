@@ -465,6 +465,30 @@ def test_model_handlers_via_handle_line(cache):
     assert call("ocr.models.delete", {"name": DET})["result"]["deleted"] is True
 
 
+# ---------------------------------------------------------------------------
+# ocr.models.recommend
+
+
+def test_recommend_v6_covered_language_returns_default_small_pair(cache):
+    handler = make_model_handlers(ModelManager(cache))["ocr.models.recommend"]
+    assert handler({"src": "vi"}) == {"det": "PP-OCRv6_small_det", "rec": "PP-OCRv6_small_rec"}
+    assert handler({"src": "ja"}) == {"det": "PP-OCRv6_small_det", "rec": "PP-OCRv6_small_rec"}
+
+
+def test_recommend_legacy_language_routes_to_script_rec_model(cache):
+    handler = make_model_handlers(ModelManager(cache))["ocr.models.recommend"]
+    assert handler({"src": "ko"}) == {"det": "PP-OCRv6_small_det", "rec": "korean_PP-OCRv5_mobile_rec"}
+    assert handler({"src": "ru"}) == {"det": "PP-OCRv6_small_det", "rec": "cyrillic_PP-OCRv5_mobile_rec"}
+    assert handler({"src": "th"}) == {"det": "PP-OCRv6_small_det", "rec": "th_PP-OCRv5_mobile_rec"}
+
+
+def test_recommend_invalid_src_raises_rpc_invalid_params(cache):
+    handler = make_model_handlers(ModelManager(cache))["ocr.models.recommend"]
+    for bad in (None, {}, {"src": ""}, {"src": 5}):
+        with pytest.raises(RpcInvalidParams):
+            handler(bad)
+
+
 def test_main_handlers_register_model_rpc(tmp_path, monkeypatch):
     monkeypatch.setenv("PADDLE_PDX_CACHE_HOME", str(tmp_path))
     from retran_core import __main__ as main_module
@@ -478,6 +502,7 @@ def test_main_handlers_register_model_rpc(tmp_path, monkeypatch):
         "ocr.models.download",
         "ocr.models.delete",
         "ocr.models.set",
+        "ocr.models.recommend",
         "ocr.config.schema",
         "ocr.config.set",
     }
