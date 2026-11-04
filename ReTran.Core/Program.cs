@@ -99,6 +99,7 @@ public static class Program
         server.Register("ocr.models.download", p => host.DownloadOcrModelAsync(p, CancellationToken.None));
         server.Register("ocr.models.delete", p => host.DeleteOcrModelAsync(p, CancellationToken.None));
         server.Register("ocr.models.set", p => host.SetOcrModelPairAsync(p, CancellationToken.None));
+        server.Register("ocr.models.recommend", p => host.RecommendOcrModelsAsync(p, CancellationToken.None));
         // ocr.config.* proxies: the Settings UI reads the engine-parameter schema and saves
         // values through the core; the core forces deferReload from the session state.
         // Proxy ocr.config.*: UI Settings đọc schema tham số engine và lưu giá trị qua core;

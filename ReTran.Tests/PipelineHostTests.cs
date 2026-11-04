@@ -1000,4 +1000,69 @@ public class PipelineHostTests
         var sent = (JsonObject)rpc.Calls.Last(c => c.Method == "ocr.config.set").Params!;
         Assert.True(sent["deferReload"]!.GetValue<bool>());   // IsRunning => Core ép true
     }
+
+    //
+    // ocr.models.recommend proxy — forwards {src} to the sidecar and returns its {det, rec}
+    // verbatim (the first-run wizard preselects the pair without parsing the catalog itself).
+    // Proxy ocr.models.recommend — chuyển {src} sang sidecar và trả {det, rec} nguyên văn
+    // (wizard lần chạy đầu chọn sẵn cặp model mà không phải tự đọc catalog).
+    //
+
+    [Fact]
+    public async Task RecommendOcrModels_ForwardsSrcToSidecar_Verbatim()
+    {
+        var rpc = new FakeSidecarRpc();
+        rpc.ResultsByMethod["ocr.models.recommend"] = new JsonObject { ["det"] = "d1", ["rec"] = "r1" };
+        await using var host = CreateHost(rpc, RegistryWith(new CountingTranslator()), new JsonRpcServer());
+
+        JsonNode? result = await host.RecommendOcrModelsAsync(new JsonObject { ["src"] = "ko" }, CancellationToken.None);
+
+        Assert.Equal("d1", result!["det"]!.GetValue<string>());
+        Assert.Equal("r1", result["rec"]!.GetValue<string>());
+
+        // The sidecar must see exactly the method and params the wizard sent.
+        // Sidecar phải thấy đúng method và params mà wizard gửi xuống.
+        (string method, JsonNode? sent) = Assert.Single(rpc.Calls.Where(c => c.Method == "ocr.models.recommend").ToArray());
+        Assert.Equal("ocr.models.recommend", method);
+        Assert.Equal("ko", sent!["src"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task RecommendOcrModels_NullSidecar_ThrowsMinus32603()
+    {
+        await using var host = CreateHost(rpc: null, RegistryWith(new CountingTranslator()), new JsonRpcServer());
+        var ex = await Assert.ThrowsAsync<RpcMethodException>(async () =>
+            await host.RecommendOcrModelsAsync(new JsonObject { ["src"] = "ko" }, CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InternalError, ex.Code);
+        Assert.Contains("sidecar", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task RecommendOcrModels_ParentedParams_ForwardsDetachedClone()
+    {
+        // Core's JSON-RPC server hands handlers a params node that is still a child of the
+        // parsed request envelope (JsonRpcServer.DispatchRequestAsync). The proxy must not
+        // hand that same node on: serializing the sidecar request re-parents it and throws
+        // InvalidOperationException "The node already has a parent." — a -32603 on the wire.
+        // Server JSON-RPC của Core đưa cho handler node params vẫn còn là con của envelope
+        // đã parse (JsonRpcServer.DispatchRequestAsync). Proxy không được chuyển đúng node
+        // đó: serialize request sidecar re-parent nó và ném InvalidOperationException
+        // "The node already has a parent." — thành -32603 trên wire.
+        var rpc = new FakeSidecarRpc();
+        rpc.ResultsByMethod["ocr.models.recommend"] = new JsonObject { ["det"] = "d1", ["rec"] = "r1" };
+        await using var host = CreateHost(rpc, RegistryWith(new CountingTranslator()), new JsonRpcServer());
+
+        var envelope = new JsonObject { ["params"] = new JsonObject { ["src"] = "ko" } };
+        JsonNode parented = envelope["params"]!;
+        Assert.NotNull(parented.Parent); // precondition: the node is owned by the envelope
+
+        JsonNode? result = await host.RecommendOcrModelsAsync(parented, CancellationToken.None);
+
+        Assert.Equal("d1", result!["det"]!.GetValue<string>());
+        (string _, JsonNode? sent) = Assert.Single(rpc.Calls.Where(c => c.Method == "ocr.models.recommend").ToArray());
+        Assert.NotSame(parented, sent);
+        Assert.Null(sent!.Parent);
+        Assert.Equal("ko", sent["src"]!.GetValue<string>());
+        Assert.Equal("""{"src":"ko"}""", parented.ToJsonString()); // caller's node untouched
+    }
 }

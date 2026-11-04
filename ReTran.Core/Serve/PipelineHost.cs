@@ -416,6 +416,22 @@ public sealed class PipelineHost : IAsyncDisposable
         ForwardToSidecarAsync("ocr.models.set", @params, ct);
 
     /// <summary>
+    /// Proxies <c>ocr.models.recommend {src}</c> to the sidecar: the det/rec pair recommended
+    /// for one source language, returned verbatim as <c>{det, rec}</c> — the first-run setup
+    /// wizard preselects the pair without parsing the catalog itself. The params are forwarded
+    /// verbatim; the sidecar validates them.
+    /// Proxy <c>ocr.models.recommend {src}</c> sang sidecar: cặp det/rec được đề xuất cho một
+    /// ngôn ngữ nguồn, trả nguyên văn dạng <c>{det, rec}</c> — wizard thiết lập lần chạy đầu
+    /// chọn sẵn cặp model mà không phải tự đọc catalog. Params chuyển nguyên văn; sidecar kiểm tra.
+    /// </summary>
+    /// <param name="params">Object <c>{src}</c> with the language code; validated by the sidecar. Object <c>{src}</c> chứa mã ngôn ngữ; sidecar kiểm tra.</param>
+    /// <param name="ct">Token for the sidecar call. Token cho lời gọi sidecar.</param>
+    /// <returns>The sidecar's <c>{det, rec}</c> reply, unchanged. Phản hồi <c>{det, rec}</c> của sidecar, nguyên trạng.</returns>
+    /// <exception cref="RpcMethodException">-32603 when the sidecar is unavailable. -32603 khi sidecar không sẵn sàng.</exception>
+    public Task<JsonNode?> RecommendOcrModelsAsync(JsonNode? @params, CancellationToken ct) =>
+        ForwardToSidecarAsync("ocr.models.recommend", @params, ct);
+
+    /// <summary>
     /// Tells whether a pipeline session currently occupies the slot (evaluated under the
     /// session lock, so it cannot race the start/stop state toggles).
     /// Cho biết slot hiện có phiên pipeline đang chạy hay không (đánh giá dưới lock phiên,
@@ -493,9 +509,19 @@ public sealed class PipelineHost : IAsyncDisposable
 
     /// <summary>
     /// Shared body of the <c>ocr.models.*</c> and <c>ocr.config.*</c> proxies: forwards the
-    /// method and params verbatim to the sidecar, or throws -32603 when it never spawned.
+    /// method and a detached deep copy of the params to the sidecar, or throws -32603 when
+    /// it never spawned. The copy is required because handlers receive their params node as
+    /// a child of the parsed request envelope (<c>JsonRpcServer.DispatchRequestAsync</c>):
+    /// handing that node to <see cref="ISidecarRpc.CallAsync"/> would re-parent it during
+    /// request serialization and throw InvalidOperationException "The node already has a parent."
+    /// (surfacing as -32603). Content stays verbatim.
     /// Thân chung của các proxy <c>ocr.models.*</c> và <c>ocr.config.*</c>: chuyển tiếp method
-    /// và params nguyên văn sang sidecar, hoặc ném -32603 khi sidecar không khởi tạo được.
+    /// và một bản deep copy đã tách rời của params sang sidecar, hoặc ném -32603 khi sidecar
+    /// không khởi tạo được. Bản copy là bắt buộc vì handler nhận node params của nó như con của
+    /// envelope request đã parse (<c>JsonRpcServer.DispatchRequestAsync</c>): đưa đúng
+    /// node đó cho <see cref="ISidecarRpc.CallAsync"/> sẽ re-parent nó lúc serialize request và
+    /// ném InvalidOperationException "The node already has a parent." (hiện thành -32603).
+    /// Nội dung giữ nguyên văn.
     /// </summary>
     /// <exception cref="RpcMethodException">-32603 when <see cref="_rpc"/> is null. -32603 khi <see cref="_rpc"/> là null.</exception>
     private Task<JsonNode?> ForwardToSidecarAsync(string method, JsonNode? @params, CancellationToken ct)
@@ -504,7 +530,7 @@ public sealed class PipelineHost : IAsyncDisposable
         if (rpc is null)
             throw new RpcMethodException(RpcErrorCodes.InternalError,
                 "sidecar not available (python/venv missing or spawn failed).");
-        return rpc.CallAsync(method, @params, ct);
+        return rpc.CallAsync(method, @params?.DeepClone(), ct);
     }
 
     /// <summary>

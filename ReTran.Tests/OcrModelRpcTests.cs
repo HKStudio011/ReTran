@@ -17,9 +17,9 @@ namespace RetranCore.Tests;
 public class OcrModelRpcTests
 {
     /// <summary>
-    /// Recording sidecar fake: appends every call with its exact params node and returns a
+    /// Recording sidecar fake: appends every call with the params it received and returns a
     /// known result so the tests can assert the reply passes through untouched.
-    /// Fake sidecar ghi lại: nối thêm mỗi lời gọi kèm đúng node params và trả kết quả
+    /// Fake sidecar ghi lại: nối thêm mỗi lời gọi kèm params nó nhận được và trả kết quả
     /// biết trước để test khẳng định phản hồi đi qua nguyên trạng.
     /// </summary>
     private sealed class RecordingRpc : ISidecarRpc
@@ -40,10 +40,10 @@ public class OcrModelRpcTests
 
     /// <summary>
     /// The four proxy invocations exercised by the tests, each with the params node the
-    /// caller sends (built once so the tests can assert it is forwarded by reference) and
+    /// caller sends (built once so the tests can compare the forwarded copy against it) and
     /// the exact method name the sidecar must receive.
-    /// Bốn lời gọi proxy mà test dùng, mỗi cái kèm node params bên gửi (dựng một lần để
-    /// test khẳng định nó được chuyển tiếp nguyên bản) và đúng tên method sidecar phải nhận.
+    /// Bốn lời gọi proxy mà test dùng, mỗi cái kèm node params bên gửi (dựng một lần để test
+    /// so sánh bản copy được chuyển tiếp với nó) và đúng tên method sidecar phải nhận.
     /// </summary>
     private static (string Method, JsonNode Params, Func<PipelineHost, Task<JsonNode?>> Invoke)[] Proxies()
     {
@@ -77,9 +77,15 @@ public class OcrModelRpcTests
             (string recordedMethod, JsonNode? recordedParams) =
                 Assert.Single(rpc.Calls.Where(c => c.Method == method).ToArray());
             Assert.Equal(method, recordedMethod);
-            // Verbatim: the sidecar sees the very same params node the caller passed.
-            // Nguyên văn: sidecar thấy đúng node params mà bên gửi truyền.
-            Assert.Same(expectedParams, recordedParams);
+            // Verbatim content: the sidecar sees a detached deep copy of the caller's params —
+            // forwarding the caller's own node crashes request serialization whenever that node
+            // is still a child of a parsed request envelope (see ForwardToSidecarAsync).
+            // Nguyên văn nội dung: sidecar thấy bản deep copy tách rời của node params — chuyển
+            // tiếp đúng node của bên gửi sẽ làm hỏng serialize request khi node đó còn là con của
+            // một envelope request đã parse (xem ForwardToSidecarAsync).
+            Assert.NotSame(expectedParams, recordedParams);
+            Assert.Null(recordedParams!.Parent);
+            Assert.Equal(expectedParams.ToJsonString(), recordedParams.ToJsonString());
             // And the sidecar's reply rides back untouched.
             // Phản hồi của sidecar quay về nguyên trạng.
             Assert.Same(rpc.NextResult, result);
