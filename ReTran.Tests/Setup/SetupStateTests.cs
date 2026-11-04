@@ -1,0 +1,195 @@
+using System.Text.Json;
+using ReTran_App.Services.Setup;
+
+/// <summary>
+/// Tests for <see cref="SetupState"/>: the NeedsSetup predicate (the modal's show condition,
+/// spec §5.9) and the Load/Save cycle over the JSON file bound to each instance.
+/// Test cho <see cref="SetupState"/>: vị từ NeedsSetup (điều kiện hiện modal, spec §5.9) và vòng
+/// Load/Save với file JSON gắn theo path của instance.
+/// </summary>
+public class SetupStateNeedsSetupTests : IDisposable
+{
+    private readonly string _dir;
+
+    public SetupStateNeedsSetupTests()
+    {
+        _dir = Path.Combine(Path.GetTempPath(), $"retran-setup-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(_dir);
+    }
+
+    public void Dispose()
+    {
+        try { Directory.Delete(_dir, recursive: true); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    [Fact]
+    public void NeedsSetup_True_WhenVenvMissing_EvenIfStateComplete()
+    {
+        var state = new SetupState("gpu", "vi", null) { IsComplete = true };
+
+        Assert.True(SetupState.NeedsSetup(state, @"C:\nope\python.exe", MakeModelsDir()));
+    }
+
+    [Fact]
+    public void NeedsSetup_True_WhenModelsDirEmpty()
+    {
+        var state = new SetupState("gpu", "vi", null) { IsComplete = true };
+        string venv = MakeVenvPythonExe();
+
+        // official_models tồn tại nhưng không có mục nào (model chưa tải / đã bị xoá).
+        string modelsEmpty = Temp("models-empty");
+        Directory.CreateDirectory(Path.Combine(modelsEmpty, "official_models"));
+        Assert.True(SetupState.NeedsSetup(state, venv, modelsEmpty));
+
+        // models dir tồn tại, thiếu hẳn official_models.
+        string modelsNoOfficial = Temp("models-no-official");
+        Directory.CreateDirectory(modelsNoOfficial);
+        Assert.True(SetupState.NeedsSetup(state, venv, modelsNoOfficial));
+    }
+
+    [Fact]
+    public void NeedsSetup_False_WhenCompleteAndFilesPresent()
+    {
+        var state = new SetupState("gpu", "vi", new Dictionary<string, string> { ["syncing"] = "done" })
+        {
+            IsComplete = true,
+        };
+        string venv = MakeVenvPythonExe();
+        string models = MakeModelsDir();
+        Assert.False(SetupState.NeedsSetup(state, venv, models));
+
+        // Cùng đủ file trên đĩa nhưng wizard chưa tới bước Done → vẫn phải hiện modal.
+        Assert.True(SetupState.NeedsSetup(state with { IsComplete = false }, venv, models));
+    }
+
+    [Fact]
+    public void Load_MissingFile_ReturnsEmptyState()
+    {
+        string json = Temp("setup.json");
+        Assert.False(File.Exists(json));
+
+        SetupState state = SetupState.Load(json);
+
+        Assert.Null(state.Flavor);
+        Assert.Null(state.Language);
+        Assert.Null(state.Steps);
+        Assert.False(state.IsComplete);
+
+        // State vẫn nhớ path nó được Load từ đó → Save ghi đúng vào file ấy.
+        state.Save();
+        Assert.True(File.Exists(json));
+    }
+
+    [Fact]
+    public void SaveThenLoad_RoundTrips_FlavorAndLanguage()
+    {
+        // Thư mục cha chưa tồn tại → Save phải tự tạo.
+        string json = Path.Combine(_dir, "sub", "setup.json");
+
+        SetupState saved = SetupState.Load(json) with
+        {
+            Flavor = "gpu",
+            Language = "vi",
+            IsComplete = true,
+            Steps = new Dictionary<string, string> { ["syncing"] = "done" },
+        };
+        saved.Save();
+
+        Assert.True(File.Exists(json));
+        // Hình dạng file trên đĩa khớp spec §8 (khóa camelCase) — dev đọc/sửa tay được.
+        using (JsonDocument doc = JsonDocument.Parse(File.ReadAllText(json)))
+        {
+            Assert.Equal("gpu", doc.RootElement.GetProperty("flavor").GetString());
+            Assert.True(doc.RootElement.GetProperty("isComplete").GetBoolean());
+            Assert.Equal("done", doc.RootElement.GetProperty("steps").GetProperty("syncing").GetString());
+            Assert.Equal(1, doc.RootElement.GetProperty("version").GetInt32());
+            // Chốt đủ tập khóa gốc — khóa riêng (BoundPath) không được lọt vào JSON.
+            Assert.Equal(
+                new[] { "flavor", "isComplete", "language", "steps", "version" },
+                doc.RootElement.EnumerateObject()
+                    .Select(p => p.Name)
+                    .OrderBy(n => n, StringComparer.Ordinal)
+                    .ToArray());
+        }
+
+        SetupState back = SetupState.Load(json);
+        Assert.Equal("gpu", back.Flavor);
+        Assert.Equal("vi", back.Language);
+        Assert.True(back.IsComplete);
+        Assert.Equal("done", back.Steps!["syncing"]);
+        Assert.Equal(1, back.Version);
+
+        // File cũ chưa có khóa version → vẫn đọc ra Version 1 (giá trị mặc định của property).
+        string legacy = Temp("setup-legacy.json");
+        File.WriteAllText(legacy, """{"flavor":"cpu","isComplete":true}""");
+        Assert.Equal(1, SetupState.Load(legacy).Version);
+
+        // Path gắn với instance sống qua `with` → bản mới vẫn Save ra đúng file đó.
+        SetupState again = SetupState.Load(json) with { Language = "ja" };
+        again.Save();
+        Assert.Equal("ja", SetupState.Load(json).Language);
+    }
+
+    [Fact]
+    public void Load_CorruptJson_ReturnsEmptyState_NoThrow()
+    {
+        string json = Temp("setup.json");
+        File.WriteAllText(json, "not json");
+
+        SetupState state = SetupState.Load(json);
+
+        Assert.Null(state.Flavor);
+        Assert.Null(state.Language);
+        Assert.False(state.IsComplete);
+
+        // State hỏng vẫn nhớ path yêu cầu → Save ghi đè lại chính file đó.
+        state.Save();
+        Assert.True(File.Exists(json));
+    }
+
+    [Fact]
+    public void Load_UnknownKey_Tolerated_AndDroppedOnSave()
+    {
+        string json = Temp("setup-unknown.json");
+        File.WriteAllText(json, """{"flavor":"gpu","language":"vi","bogusStep":"x","version":1}""");
+
+        // Khóa lạ được bỏ qua khi đọc (state vẫn đúng), và Save() chỉ ghi các trường đã biết.
+        SetupState state = SetupState.Load(json);
+        Assert.Equal("gpu", state.Flavor);
+        Assert.Equal("vi", state.Language);
+
+        state.Save();
+        using JsonDocument doc = JsonDocument.Parse(File.ReadAllText(json));
+        Assert.False(doc.RootElement.TryGetProperty("bogusStep", out _));
+        Assert.Equal(1, doc.RootElement.GetProperty("version").GetInt32());
+    }
+
+    /// <summary>
+    /// Creates <c>&lt;tmp&gt;\models\official_models</c> with one model file and returns the models dir.
+    /// Tạo <c>&lt;tmp&gt;\models\official_models</c> kèm một file model, trả về models dir.
+    /// </summary>
+    private string MakeModelsDir()
+    {
+        string modelsDir = Temp("models");
+        string official = Path.Combine(modelsDir, "official_models");
+        Directory.CreateDirectory(official);
+        File.WriteAllText(Path.Combine(official, "PP-OCRv6_small_det.tar"), "x");
+        return modelsDir;
+    }
+
+    /// <summary>
+    /// Writes a fake <c>&lt;tmp&gt;\.venv\Scripts\python.exe</c> and returns its path.
+    /// Ghi file giả <c>&lt;tmp&gt;\.venv\Scripts\python.exe</c>, trả về đường dẫn tới nó.
+    /// </summary>
+    private string MakeVenvPythonExe()
+    {
+        string exe = Path.Combine(_dir, ".venv", "Scripts", "python.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(exe)!);
+        File.WriteAllText(exe, "");
+        return exe;
+    }
+
+    private string Temp(string name) => Path.Combine(_dir, name);
+}
