@@ -175,4 +175,86 @@ public class AppSettingsServiceTests : IDisposable
 
         Assert.True(settings.OcrMergeLines);
     }
+
+    [Fact]
+    public void MenuAndSourceParams_RoundTrip()
+    {
+        var service = new AppSettingsService(_path);
+        var custom = AppSettings.Default with
+        {
+            FloatingMenuOn = false,
+            FloatingMenuCollapsed = true,
+            FloatingMenuX = 123,
+            FloatingMenuY = 456,
+            SourceUseWindow = true,
+            SourceMonitor = 1,
+            SourceHwnd = "0x1A2B3C",
+        };
+
+        service.Save(custom);
+        AppSettings loaded = service.Load();
+
+        Assert.False(loaded.FloatingMenuOn);
+        Assert.True(loaded.FloatingMenuCollapsed);
+        Assert.Equal(123, loaded.FloatingMenuX);
+        Assert.Equal(456, loaded.FloatingMenuY);
+        Assert.True(loaded.SourceUseWindow);
+        Assert.Equal(1, loaded.SourceMonitor);
+        Assert.Equal("0x1A2B3C", loaded.SourceHwnd);
+    }
+
+    [Fact]
+    public void MenuAndSourceParams_Absent_DefaultsSafe()
+    {
+        // File cũ không có 7 key mới → đúng default (menu bật, nguồn = monitor 0, hwnd null).
+        Directory.CreateDirectory(_dir);
+        File.WriteAllText(_path, """{"provider":"google","src":"auto","dst":"vi"}""");
+        var service = new AppSettingsService(_path);
+
+        AppSettings settings = service.Load();
+
+        Assert.True(settings.FloatingMenuOn);
+        Assert.False(settings.FloatingMenuCollapsed);
+        Assert.Null(settings.FloatingMenuX);
+        Assert.Null(settings.FloatingMenuY);
+        Assert.False(settings.SourceUseWindow);
+        Assert.Equal(0, settings.SourceMonitor);
+        Assert.Null(settings.SourceHwnd);
+    }
+
+    [Fact]
+    public void MergeThresholdParams_RoundTrip()
+    {
+        var service = new AppSettingsService(_path);
+        var custom = AppSettings.Default with
+        {
+            OcrMergeGap = 0.25,
+            OcrMergeHeight = 2.0,
+            OcrMergeOverlap = 0.0,
+        };
+
+        service.Save(custom);
+        AppSettings loaded = service.Load();
+
+        Assert.Equal(0.25, loaded.OcrMergeGap);
+        Assert.Equal(2.0, loaded.OcrMergeHeight);
+        // 0.0 là giá trị hợp lệ của overlap, không được bị thay bằng default 0.5.
+        Assert.Equal(0.0, loaded.OcrMergeOverlap);
+    }
+
+    [Fact]
+    public void MergeThresholdParams_Absent_DefaultsCurrent()
+    {
+        // File cũ không có ba key ngưỡng → đúng ngưỡng hiện tại của LineGrouper (0.6 / 1.35 / 0.5),
+        // không phải 0 hay 1.
+        Directory.CreateDirectory(_dir);
+        File.WriteAllText(_path, """{"provider":"google","src":"auto","dst":"vi"}""");
+        var service = new AppSettingsService(_path);
+
+        AppSettings loaded = service.Load();
+
+        Assert.Equal(0.6, loaded.OcrMergeGap);
+        Assert.Equal(1.35, loaded.OcrMergeHeight);
+        Assert.Equal(0.5, loaded.OcrMergeOverlap);
+    }
 }

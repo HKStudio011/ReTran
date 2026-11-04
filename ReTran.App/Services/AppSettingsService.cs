@@ -6,11 +6,13 @@ namespace ReTran_App.Services;
 /// <summary>
 /// Translation settings persisted in <c>settings.json</c>: provider, language pair and an
 /// optional API key for providers that need one, plus game-overlay display options, the OCR
-/// model pair and engine parameter overrides requested on start, the pipeline rhythm, and the
-/// merge-lines toggle.
+/// model pair and engine parameter overrides requested on start, the pipeline rhythm, the
+/// merge-lines toggle and its thresholds, the floating desktop menu state, and the last
+/// capture source.
 /// Cài đặt dịch thuật lưu trong <c>settings.json</c>: nhà cung cấp, cặp ngôn ngữ và API key tùy
 /// chọn cho các nhà cung cấp cần key, kèm tùy chọn hiển thị overlay trên game, cặp model OCR,
-/// các tham số engine ghi đè yêu cầu khi start, nhịp pipeline, và công tắc gộp dòng.
+/// các tham số engine ghi đè yêu cầu khi start, nhịp pipeline, công tắc gộp dòng cùng các ngưỡng
+/// gộp, trạng thái menu nổi trên desktop, và nguồn capture đã dùng lần cuối.
 /// </summary>
 /// <param name="Provider">Provider name, e.g. <c>google</c>. Tên nhà cung cấp, ví dụ <c>google</c>.</param>
 /// <param name="Src">Source language code, or <c>auto</c>. Mã ngôn ngữ nguồn, hoặc <c>auto</c>.</param>
@@ -30,6 +32,33 @@ namespace ReTran_App.Services;
 /// <param name="OcrFps">OCR rhythm in frames per second (1..60) sent on <c>core.start</c>. Nhịp OCR (khung/giây, 1..60) gửi khi <c>core.start</c>.</param>
 /// <param name="CaptureFps">Capture rhythm in frames per second (1..60) sent on <c>core.start</c>. Nhịp capture (khung/giây, 1..60) gửi khi <c>core.start</c>.</param>
 /// <param name="OcrMergeLines">Merge nearby OCR lines into one block before translation; sent on core.start as ocr.mergeLines. Gộp các dòng OCR gần nhau thành một khối trước khi dịch; gửi trong core.start dưới dạng ocr.mergeLines.</param>
+/// <param name="FloatingMenuOn">Whether the floating desktop menu is shown; it is on by default so a fresh install sees the menu. Có bật menu nổi trên desktop hay không; mặc định bật để bản cài mới đã thấy menu.</param>
+/// <param name="FloatingMenuCollapsed">Whether the floating menu is drawn as the compact chip instead of the full panel. Menu nổi được vẽ dạng chip thu gọn thay vì bảng đầy đủ.</param>
+/// <param name="FloatingMenuX">Left edge of the floating menu in desktop pixels; <see langword="null"/> means place it at the default spot (top-right of the work area) on first run. Tọa độ trái của menu nổi tính theo pixel desktop; <see langword="null"/> nghĩa là tự đặt ở vị trí mặc định (góc trên phải vùng làm việc) ở lần chạy đầu.</param>
+/// <param name="FloatingMenuY">Top edge of the floating menu in desktop pixels; <see langword="null"/> means the default spot on first run. Tọa độ trên của menu nổi tính theo pixel desktop; <see langword="null"/> nghĩa là vị trí mặc định ở lần chạy đầu.</param>
+/// <param name="SourceUseWindow">Last capture source kind: <see langword="true"/> captures a window, <see langword="false"/> captures a monitor. Loại nguồn capture đã dùng lần cuối: <see langword="true"/> capture cửa sổ, <see langword="false"/> capture màn hình.</param>
+/// <param name="SourceMonitor">Zero-based monitor index used when <paramref name="SourceUseWindow"/> is <see langword="false"/>; 0 is the primary monitor. Chỉ số màn hình (bắt đầu từ 0) dùng khi <paramref name="SourceUseWindow"/> là <see langword="false"/>; 0 là màn hình chính.</param>
+/// <param name="SourceHwnd">Window handle of the last window source as a hex string (<c>0x…</c>); handles are only meaningful inside the run that reported them, so a stale value never starts a window capture on its own. Handle của cửa sổ nguồn gần nhất dạng chuỗi hex (<c>0x…</c>); handle chỉ có nghĩa trong lần chạy đã báo cáo nó, nên giá trị cũ không tự khởi động capture cửa sổ.</param>
+/// <param name="OcrMergeGap">
+/// Vertical gap between two lines, as a multiple of the shorter line's height, that still merges
+/// them into one block; valid range <c>0.1..2.0</c>. Sent on <c>core.start</c> as <c>ocr.mergeGapRatio</c>.
+/// Khoảng cách dọc giữa hai dòng, tính theo bội số chiều cao dòng thấp hơn, mà vẫn gộp thành một
+/// khối; dải hợp lệ <c>0.1..2.0</c>. Gửi trong <c>core.start</c> dưới dạng <c>ocr.mergeGapRatio</c>.
+/// </param>
+/// <param name="OcrMergeHeight">
+/// Maximum ratio of taller line height to shorter line height that still merges them into one
+/// block; valid range <c>1.0..3.0</c>. Sent on <c>core.start</c> as <c>ocr.mergeHeightRatio</c>.
+/// Tỉ lệ tối đa giữa chiều cao dòng cao hơn và dòng thấp hơn mà vẫn gộp thành một khối;
+/// dải hợp lệ <c>1.0..3.0</c>. Gửi trong <c>core.start</c> dưới dạng <c>ocr.mergeHeightRatio</c>.
+/// </param>
+/// <param name="OcrMergeOverlap">
+/// Minimum horizontal overlap of two lines, as a fraction of the narrower line's width, required to
+/// treat them as the same column; valid range <c>0.0..1.0</c>, where <c>0.0</c> only requires the
+/// two boxes to touch. Sent on <c>core.start</c> as <c>ocr.mergeOverlapRatio</c>.
+/// Mức chồng nhau ngang tối thiểu giữa hai dòng, tính theo tỉ lệ chiều rộng dòng hẹp hơn, để coi
+/// hai dòng cùng cột; dải hợp lệ <c>0.0..1.0</c>, với <c>0.0</c> chỉ đòi hai box chạm nhau.
+/// Gửi trong <c>core.start</c> dưới dạng <c>ocr.mergeOverlapRatio</c>.
+/// </param>
 public sealed record AppSettings(
     string Provider, string Src, string Dst, string? ApiKey,
     bool OverlayOnGame = false,
@@ -38,7 +67,17 @@ public sealed record AppSettings(
     Dictionary<string, JsonNode?>? OcrEngine = null,
     int OcrFps = 3,
     int CaptureFps = 10,
-    bool OcrMergeLines = true)
+    bool OcrMergeLines = true,
+    bool FloatingMenuOn = true,
+    bool FloatingMenuCollapsed = false,
+    int? FloatingMenuX = null,
+    int? FloatingMenuY = null,
+    bool SourceUseWindow = false,
+    int SourceMonitor = 0,
+    string? SourceHwnd = null,
+    double OcrMergeGap = 0.6,
+    double OcrMergeHeight = 1.35,
+    double OcrMergeOverlap = 0.5)
 {
     /// <summary>
     /// Factory default: Google Translate, auto source, Vietnamese target, no API key.
