@@ -26,6 +26,31 @@ public sealed class SidecarProcess : IAsyncDisposable, ISidecarRpc
     /// <summary>Spawns `python -m retran_core serve` in workingDir and starts the response read loop.</summary>
     public static Task<SidecarProcess> StartAsync(string pythonExe, string workingDir, CancellationToken ct)
     {
+        var psi = BuildStartInfo(pythonExe, workingDir);
+        var proc = new Process { StartInfo = psi };
+        proc.Start();
+        // Paddle floods stderr; an unread redirected pipe would fill up and deadlock the sidecar.
+        proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) Console.Error.WriteLine($"[sidecar] {e.Data}"); };
+        proc.BeginErrorReadLine();
+        // .NET 10: StandardInput is a StreamWriter, StandardOutput a StreamReader — use them directly.
+        proc.StandardInput.NewLine = "\n";
+        var sp = new SidecarProcess(proc, proc.StandardInput);
+        sp.StartReadLoop();
+        return Task.FromResult(sp);
+    }
+
+    /// <summary>
+    /// Builds the sidecar's <see cref="ProcessStartInfo"/>: `python -m retran_core serve` in
+    /// <c>workingDir\ReTran.OCR</c> with the paddlex env vars pinned. No process is started.
+    /// Dựng <see cref="ProcessStartInfo"/> cho sidecar: `python -m retran_core serve` chạy trong
+    /// <c>workingDir\ReTran.OCR</c> với các biến env của paddlex được ghim sẵn. Không khởi chạy
+    /// tiến trình nào.
+    /// </summary>
+    /// <param name="pythonExe">Interpreter to launch. Trình thông dịch cần khởi chạy.</param>
+    /// <param name="workingDir">App/repo root; the sidecar runs in its <c>ReTran.OCR</c> subdirectory. Gốc app/repo; sidecar chạy trong thư mục con <c>ReTran.OCR</c> của nó.</param>
+    /// <returns>The prepared start info. Start info đã chuẩn bị.</returns>
+    internal static ProcessStartInfo BuildStartInfo(string pythonExe, string workingDir)
+    {
         var psi = new ProcessStartInfo
         {
             FileName = pythonExe,
@@ -38,29 +63,14 @@ public sealed class SidecarProcess : IAsyncDisposable, ISidecarRpc
         };
         // Skip PaddleX's model-host connectivity check (adds ~4s to first model load offline).
         psi.EnvironmentVariables["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True";
-        // Pin the model cache next to the app data so core and sidecar agree on one
-        // directory (paddlex reads PADDLE_PDX_CACHE_HOME at import time). When
-        // LOCALAPPDATA is unset the variable is left alone: the sidecar falls back to the
-        // same path by itself.
-        // Ghim cache model cạnh dữ liệu app để core và sidecar thống nhất một thư mục
-        // (paddlex đọc PADDLE_PDX_CACHE_HOME lúc import). Khi LOCALAPPDATA chưa đặt thì
-        // bỏ qua biến này: sidecar tự fallback về đúng path đó.
-        string? localAppData = Environment.GetEnvironmentVariable("LOCALAPPDATA");
-        if (!string.IsNullOrEmpty(localAppData))
-            psi.EnvironmentVariables["PADDLE_PDX_CACHE_HOME"] = Path.Combine(localAppData, "ReTran", "models");
+        // Model cache lives next to the OCR project so venv and models survive app updates
+        // together (spec 2026-11-03-first-run-setup-wizard §5.5).
+        // Cache model nằm cạnh dự án OCR để venv và model sống qua update cùng nhau.
+        psi.EnvironmentVariables["PADDLE_PDX_CACHE_HOME"] = Path.Combine(workingDir, "ReTran.OCR", "models");
         psi.ArgumentList.Add("-m");
         psi.ArgumentList.Add("retran_core");
         psi.ArgumentList.Add("serve");
-        var proc = new Process { StartInfo = psi };
-        proc.Start();
-        // Paddle floods stderr; an unread redirected pipe would fill up and deadlock the sidecar.
-        proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) Console.Error.WriteLine($"[sidecar] {e.Data}"); };
-        proc.BeginErrorReadLine();
-        // .NET 10: StandardInput is a StreamWriter, StandardOutput a StreamReader — use them directly.
-        proc.StandardInput.NewLine = "\n";
-        var sp = new SidecarProcess(proc, proc.StandardInput);
-        sp.StartReadLoop();
-        return Task.FromResult(sp);
+        return psi;
     }
 
     /// <summary>Background loop: reads response lines and routes each to its waiter by id.</summary>
