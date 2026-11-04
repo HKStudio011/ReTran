@@ -5,7 +5,8 @@ The sidecar owns the model cache paddlex downloads into
 ``installed`` purely from the filesystem, downloads on a background thread so
 ``ocr.spot`` is never blocked, refuses to delete the active pair, forwards
 pair switches to the engine, and migrates existing models from the legacy
-``~/.paddlex`` cache on first run.
+``~/.paddlex`` cache and from ReTran's own previous location
+(``%LOCALAPPDATA%\\ReTran\\models``) on first run.
 
 Offline by design: the download backend is injectable, so tests never touch
 paddlex or the network.
@@ -35,6 +36,13 @@ _PARTIAL_SUFFIX = ".partial"
 # One-shot migration marker in the cache root; its presence means the copy
 # from ~/.paddlex already ran and must not run again.
 _MIGRATED_MARKER = ".migrated"
+
+# Second one-shot migration marker, for the copy from ReTran's own previous
+# model location (%LOCALAPPDATA%\ReTran\models, before the 2026-11-03
+# first-run-setup spec moved the cache next to the app). Kept separate from
+# `.migrated` so machines that already ran the paddlex migration still get
+# this one.
+_RETRAN_LEGACY_MARKER = ".migrated-retran"
 
 Downloader = Callable[[str], Any]
 
@@ -331,6 +339,65 @@ def migrate_from_paddlex(cache_dir: Path, source: Path | None = None) -> list[st
     if marker.exists():
         return []
     src_official = (Path(source) if source is not None else Path.home() / ".paddlex") / _OFFICIAL_DIR
+    copied: list[str] = []
+    if src_official.is_dir():
+        dst_official = cache / _OFFICIAL_DIR
+        dst_official.mkdir(parents=True, exist_ok=True)
+        for m in CATALOG:
+            src_model = src_official / m.name
+            dst_model = dst_official / m.name
+            if not src_model.is_dir() or dst_model.exists():
+                continue
+            try:
+                shutil.copytree(src_model, dst_model)
+            except OSError as exc:
+                print(f"model migration: skipping '{m.name}': {exc}", file=sys.stderr, flush=True)
+                continue
+            copied.append(m.name)
+    cache.mkdir(parents=True, exist_ok=True)
+    marker.touch()
+    return copied
+
+
+def migrate_from_retran_legacy(cache_dir: Path, source: Path | None = None) -> list[str]:
+    """One-shot copy of catalog models from ReTran's previous model location.
+
+    Until the 2026-11-03 first-run-setup spec moved the model cache next to
+    the app (``<appDir>\\ReTran.OCR\\models``), ReTran kept downloaded models
+    in ``%LOCALAPPDATA%\\ReTran\\models`` — the fallback ``model_cache_dir()``
+    still returns for standalone CLI runs. This copies each catalog model found
+    in ``source/official_models/<name>`` into
+    ``cache_dir/official_models/<name>`` (skipping models already present in
+    the cache, so a source and cache that resolve to the same directory copy
+    nothing) and writes a ``.migrated-retran`` marker in the cache root so the
+    copy never runs again. The source is only ever read — never moved or
+    deleted. Each model is best-effort: a failing copy is logged and the model
+    simply stays "not installed" (it can be downloaded again).
+
+    Only Windows has a legacy ReTran location, so off ``win32`` the call is a
+    no-op that returns before touching the filesystem (``~/.paddlex`` on every
+    platform is handled by ``migrate_from_paddlex``).
+
+    Args:
+        cache_dir: The sidecar's model cache (``PADDLE_PDX_CACHE_HOME``).
+        source: Legacy ReTran model location; defaults to
+            ``%LOCALAPPDATA%\\ReTran\\models`` on Windows (``None`` elsewhere).
+
+    Returns:
+        Names of the models actually copied, in catalog order. Empty when the
+        marker already exists, when this platform has no legacy location, or
+        when nothing was found to copy.
+    """
+    cache = Path(cache_dir)
+    marker = cache / _RETRAN_LEGACY_MARKER
+    if marker.exists():
+        return []
+    if source is None:
+        if sys.platform != "win32":
+            return []
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        source = Path(base) / "ReTran" / "models"
+    src_official = Path(source) / _OFFICIAL_DIR
     copied: list[str] = []
     if src_official.is_dir():
         dst_official = cache / _OFFICIAL_DIR

@@ -13,6 +13,7 @@ from .ocr.models import (
     ModelManager,
     make_model_handlers,
     migrate_from_paddlex,
+    migrate_from_retran_legacy,
     model_cache_dir,
 )
 from .ocr.paddle_engine import PaddleOcrEngine
@@ -40,9 +41,11 @@ def _handlers():
 
 
 def _prepare_model_cache() -> None:
-    """Sync the paddlex env vars and run the one-shot `~/.paddlex` migration.
+    """Sync the paddlex env vars and run the one-shot model-cache migrations.
 
-    Both ``PADDLE_PDX_CACHE_HOME`` and ``PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK``
+    Runs both one-shot copies: from the legacy ``~/.paddlex`` cache and from
+    ReTran's own previous location (``%LOCALAPPDATA%\\ReTran\\models``). Both
+    ``PADDLE_PDX_CACHE_HOME`` and ``PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK``
     are read by paddlex at import time, so they must be pinned here — before
     any lazy paddlex/paddleocr import later in the process. Best-effort: a
     migration failure is logged and never kills the sidecar (the affected
@@ -69,6 +72,17 @@ def _prepare_model_cache() -> None:
     if migrated:
         print(
             f"migrated model(s) from ~/.paddlex: {', '.join(migrated)}",
+            file=sys.stderr,
+            flush=True,
+        )
+    try:
+        migrated = migrate_from_retran_legacy(cache_dir)
+    except Exception as exc:  # noqa: BLE001 - migration must never be fatal
+        print(f"legacy ReTran model migration failed: {exc}", file=sys.stderr, flush=True)
+        return
+    if migrated:
+        print(
+            f"migrated model(s) from legacy ReTran cache: {', '.join(migrated)}",
             file=sys.stderr,
             flush=True,
         )

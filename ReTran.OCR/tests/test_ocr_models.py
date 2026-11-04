@@ -438,6 +438,40 @@ def test_migrate_default_source_is_dot_paddlex_home(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# migrate_from_retran_legacy (%LOCALAPPDATA%\ReTran\models -> app-local cache)
+
+
+def test_migrate_from_retran_legacy_copies_models_and_writes_marker(tmp_path):
+    from retran_core.ocr.models import migrate_from_retran_legacy
+    old = tmp_path / "old"
+    model_name = CATALOG[1].name  # PP-OCRv6_small_det
+    (old / "official_models" / model_name).mkdir(parents=True)
+    (old / "official_models" / model_name / "weights.inference.json").write_text("{}")
+    cache = tmp_path / "cache"
+    copied = migrate_from_retran_legacy(cache, source=old)
+    assert copied == [model_name]
+    assert (cache / "official_models" / model_name / "weights.inference.json").exists()
+    assert (cache / ".migrated-retran").exists()
+
+
+def test_migrate_from_retran_legacy_is_idempotent(tmp_path):
+    from retran_core.ocr.models import migrate_from_retran_legacy
+    old = tmp_path / "old"
+    model_name = CATALOG[1].name
+    (old / "official_models" / model_name).mkdir(parents=True)
+    (old / "official_models" / model_name / "f").write_text("x")
+    cache = tmp_path / "cache"
+    migrate_from_retran_legacy(cache, source=old)
+    assert migrate_from_retran_legacy(cache, source=old) == []
+
+
+def test_migrate_from_retran_legacy_default_source_noop_off_windows(tmp_path, monkeypatch):
+    from retran_core.ocr import models as m
+    monkeypatch.setattr(m.sys, "platform", "linux")
+    assert m.migrate_from_retran_legacy(tmp_path / "cache") == []
+
+
+# ---------------------------------------------------------------------------
 # handlers + __main__ wiring
 
 
