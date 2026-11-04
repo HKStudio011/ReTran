@@ -1,5 +1,6 @@
 namespace ReTran.Core.Serve;
 
+using System.Globalization;
 using System.Text.Json.Nodes;
 using ReTran.Core.Capture;
 using ReTran.Core.Cli;
@@ -116,20 +117,26 @@ public sealed class PipelineHost : IAsyncDisposable
     /// </summary>
     /// <param name="@params">
     /// <c>{source:{kind:"screen",monitor}|"window",hwnd}, translate:{provider,src,dst},
-    /// ocr?:{det,rec,params,mergeLines?}, ocrFps?, captureFps?}</c> — missing fps values fall
+    /// ocr?:{det,rec,params,mergeLines?,mergeGapRatio?,mergeHeightRatio?,mergeOverlapRatio?},
+    /// ocrFps?, captureFps?}</c> — missing fps values fall
     /// back to <see cref="CoreConfig"/> defaults; a missing <c>ocr</c> keeps the sidecar's
-    /// current pair and engine config (no <c>ocr.models.*</c>/<c>ocr.config.set</c> call).
+    /// current pair and engine config (no <c>ocr.models.*</c>/<c>ocr.config.set</c> call); a
+    /// missing merge threshold keeps the shipped default (0.6 / 1.35 / 0.5).
     /// Tham số theo hợp đồng spec §3.1 — fps thiếu thì lấy default từ
     /// <see cref="CoreConfig"/>; thiếu <c>ocr</c> thì giữ cặp model và cấu hình engine hiện
-    /// tại của sidecar (không gọi <c>ocr.models.*</c>/<c>ocr.config.set</c>).
+    /// tại của sidecar (không gọi <c>ocr.models.*</c>/<c>ocr.config.set</c>); thiếu ngưỡng gộp
+    /// thì giữ mặc định gốc (0.6 / 1.35 / 0.5).
     /// </param>
     /// <param name="ct">Caller token; the session runs on its own token. Token của caller; phiên chạy bằng token riêng.</param>
     /// <returns><c>{"running": true}</c>. Kết quả <c>{"running": true}</c>.</returns>
     /// <exception cref="RpcMethodException">
-    /// -32602 on malformed params or unknown provider; -32600 when a session is already running;
+    /// -32602 on malformed params or unknown provider, including an
+    /// <c>ocr.merge*Ratio</c> that is not a number or sits outside its spec-K2 range; -32600 when
+    /// a session is already running;
     /// -32603 when the sidecar is unavailable, the capture source cannot be opened, or a
     /// requested OCR model is not installed (<c>ocr-model-missing</c>).
-    /// -32602 khi tham số sai hoặc provider lạ; -32600 khi phiên đang chạy;
+    /// -32602 khi tham số sai hoặc provider lạ, kể cả <c>ocr.merge*Ratio</c> không phải số hoặc
+    /// ngoài dải spec K2; -32600 khi phiên đang chạy;
     /// -32603 khi sidecar không sẵn sàng, không mở được capture source, hoặc model OCR
     /// yêu cầu chưa được cài (<c>ocr-model-missing</c>).
     /// </exception>
@@ -210,7 +217,7 @@ public sealed class PipelineHost : IAsyncDisposable
             string context = spec.UseWindow
                 ? ContextKey.FromHwnd(spec.Hwnd)
                 : ContextKey.FromMonitor(spec.Monitor);
-            var pipeline = new OcrPipeline(rpc, new OcrDiff(), spec.MergeLines);
+            var pipeline = new OcrPipeline(rpc, new OcrDiff(), spec.MergeLines, spec.Merge);
             var snapshot = new AnnotationSnapshot();
             var sink = new TranslateCycleSink(context, spec.Src, spec.Dst, spec.Translator,
                 new JsonRpcCacheChannel(_server), _server, _stderr, snapshot);
@@ -676,6 +683,7 @@ public sealed class PipelineHost : IAsyncDisposable
         string? recModel = null;
         JsonObject? ocrParams = null;
         bool mergeLines = false;
+        MergeThresholds merge = MergeThresholds.Default;
         if (p.TryGetPropertyValue("ocr", out JsonNode? ocrNode))
         {
             if (ocrNode is not JsonObject ocr)
@@ -703,10 +711,25 @@ public sealed class PipelineHost : IAsyncDisposable
                     throw new RpcMethodException(RpcErrorCodes.InvalidParams,
                         "'ocr.mergeLines' must be a boolean.");
             }
+            // Merge thresholds (spec K2): absent or JSON null -> the shipped defaults, i.e. exactly
+            // the behaviour from before these keys existed; a non-number or an out-of-range value is
+            // a contract violation (-32602) naming the key and its range — thrown before any session
+            // slot is claimed, so a rejected core.start never leaves a half-started pipeline.
+            // Ngưỡng gộp (spec K2): thiếu hoặc JSON null -> mặc định gốc, tức đúng hành vi trước khi
+            // các key này tồn tại; giá trị không phải số hoặc ngoài dải là vi phạm hợp đồng (-32602)
+            // nêu tên key và dải của nó — ném trước khi slot phiên bị chiếm, nên core.start bị chặn
+            // không để lại pipeline nửa vời.
+            merge = new MergeThresholds(
+                ParseRatio(ocr, "mergeGapRatio", MergeThresholds.Default.GapRatio,
+                    MergeThresholds.GapRatioLow, MergeThresholds.GapRatioHigh),
+                ParseRatio(ocr, "mergeHeightRatio", MergeThresholds.Default.HeightRatio,
+                    MergeThresholds.HeightRatioLow, MergeThresholds.HeightRatioHigh),
+                ParseRatio(ocr, "mergeOverlapRatio", MergeThresholds.Default.MinOverlapRatio,
+                    MergeThresholds.OverlapRatioLow, MergeThresholds.OverlapRatioHigh));
         }
 
         return new StartSpec(useWindow, monitor, hwnd, provider, src, dst, translator, ocrFps,
-            captureFps, detModel, recModel, ocrParams, mergeLines);
+            captureFps, detModel, recModel, ocrParams, mergeLines, merge);
     }
 
     /// <summary>
@@ -1059,10 +1082,64 @@ public sealed class PipelineHost : IAsyncDisposable
     private static string? ReadString(JsonObject obj, string key) =>
         obj[key] is JsonValue value && value.TryGetValue<string>(out string? text) ? text : null;
 
+    /// <summary>
+    /// Reads one optional numeric ratio field of the <c>ocr</c> object: missing or JSON <see langword="null"/>
+    /// yields <paramref name="fallback"/>; anything that is not a JSON number, or a number outside
+    /// <paramref name="lo"/>..<paramref name="hi"/> (inclusive), is a contract violation (-32602) whose
+    /// message names the key and the allowed range.
+    /// Đọc một field số tùy chọn của object <c>ocr</c>: thiếu hoặc JSON <see langword="null"/> trả
+    /// <paramref name="fallback"/>; mọi giá trị không phải số JSON, hoặc số ngoài
+    /// <paramref name="lo"/>..<paramref name="hi"/> (bao gồm biên), là vi phạm hợp đồng (-32602) với
+    /// message nêu tên key và dải cho phép.
+    /// </summary>
+    /// <remarks>
+    /// A quoted number ("0.25") is rejected on purpose: in a hand-edited settings.json it is a typo,
+    /// and quietly coercing it would hide the mistake.
+    /// Chuỗi có dấu nháy ("0.25") bị chặn có chủ ý: trong settings.json sửa tay đó là lỗi gõ, và âm
+    /// thầm ép kiểu sẽ giấu sai sót đó.
+    /// </remarks>
+    private static double ParseRatio(JsonObject ocr, string key, double fallback, double lo, double hi)
+    {
+        if (!ocr.TryGetPropertyValue(key, out JsonNode? node) || node is null)
+            return fallback;
+        if (node is not JsonValue value || !TryToDouble(value, out double parsed)
+            || !double.IsFinite(parsed) || parsed < lo || parsed > hi)
+        {
+            throw new RpcMethodException(RpcErrorCodes.InvalidParams,
+                $"'ocr.{key}' must be a number between "
+                + $"{lo.ToString("0.0##", CultureInfo.InvariantCulture)} and {hi.ToString("0.0##", CultureInfo.InvariantCulture)}.");
+        }
+        return parsed;
+    }
+
+    /// <summary>
+    /// Reads a <see cref="JsonValue"/> as a double, accepting integral JSON numbers as well, but never
+    /// a JSON string or boolean.
+    /// Đọc <see cref="JsonValue"/> thành double, chấp nhận cả số JSON nguyên, nhưng không bao giờ chấp
+    /// nhận chuỗi hoặc boolean JSON.
+    /// </summary>
+    private static bool TryToDouble(JsonValue value, out double result)
+    {
+        result = 0;
+        if (value.TryGetValue(out double d)) { result = d; return true; }
+        if (value.TryGetValue(out int i)) { result = i; return true; }
+        if (value.TryGetValue(out long l)) { result = l; return true; }
+        if (value.TryGetValue(out float f)) { result = f; return true; }
+        return false;
+    }
+
     /// <summary>Parsed and validated <c>core.start</c> params (spec §3.1). Tham số <c>core.start</c> đã parse và kiểm tra (spec §3.1).</summary>
     /// <param name="MergeLines">
     /// Group multi-line OCR spots before translation (<c>ocr.mergeLines</c>; absent/null = off).
     /// Gom spot OCR đa dòng trước khi dịch (<c>ocr.mergeLines</c>; thiếu/null = tắt).
+    /// </param>
+    /// <param name="Merge">
+    /// Line-merge caps from <c>ocr.mergeGapRatio</c>/<c>mergeHeightRatio</c>/<c>mergeOverlapRatio</c>;
+    /// already range-validated by <c>ParseStart</c>, and equal to <see cref="MergeThresholds.Default"/>
+    /// when the keys are absent.
+    /// Ngưỡng gộp dòng lấy từ <c>ocr.mergeGapRatio</c>/<c>mergeHeightRatio</c>/<c>mergeOverlapRatio</c>;
+    /// đã được <c>ParseStart</c> kiểm tra dải, và đúng bằng <see cref="MergeThresholds.Default"/> khi
+    /// thiếu các key.
     /// </param>
     private sealed record StartSpec(
         bool UseWindow,
@@ -1077,7 +1154,8 @@ public sealed class PipelineHost : IAsyncDisposable
         string? DetModel,
         string? RecModel,
         JsonObject? OcrParams,
-        bool MergeLines)
+        bool MergeLines,
+        MergeThresholds Merge)
     {
         /// <summary>
         /// Builds the loop options; <see cref="StartSpec.CaptureFps"/> only cadences the capture

@@ -9,10 +9,31 @@ namespace ReTran.Core.Ocr;
 /// <param name="MinOverlapRatio">Horizontal overlap floor, as a fraction of the narrower line's width. Ngưỡng độ chồng ngang tối thiểu, tính theo tỷ lệ chiều rộng của dòng hẹp hơn.</param>
 public readonly record struct MergeThresholds(double GapRatio, double HeightRatio, double MinOverlapRatio)
 {
-    // Ranges fixed by design spec K2; shared by settings validation and core.start (Task 3).
-    private const double GapLow = 0.1, GapHigh = 2.0;
-    private const double HeightLow = 1.0, HeightHigh = 3.0;
-    private const double OverlapLow = 0.0, OverlapHigh = 1.0;
+    /// <summary>
+    /// Allowed range for <see cref="GapRatio"/>, bounds inclusive (design spec K2). Used by both
+    /// <see cref="IsValid"/> and <c>core.start</c> validation, so the bounds are never restated as
+    /// literals by a caller.
+    /// Dải cho phép của <see cref="GapRatio"/>, bao gồm biên (spec thiết kế K2). Cả
+    /// <see cref="IsValid"/> và phần kiểm tra của <c>core.start</c> đều dùng dải này, nên nơi gọi
+    /// không phải nhắc lại các hằng số.
+    /// </summary>
+    public const double GapRatioLow = 0.1, GapRatioHigh = 2.0;
+
+    /// <summary>
+    /// Allowed range for <see cref="HeightRatio"/>, bounds inclusive (design spec K2); same role as
+    /// <see cref="GapRatioLow"/>.
+    /// Dải cho phép của <see cref="HeightRatio"/>, bao gồm biên (spec thiết kế K2); vai trò như
+    /// <see cref="GapRatioLow"/>.
+    /// </summary>
+    public const double HeightRatioLow = 1.0, HeightRatioHigh = 3.0;
+
+    /// <summary>
+    /// Allowed range for <see cref="MinOverlapRatio"/>, bounds inclusive (design spec K2); same role
+    /// as <see cref="GapRatioLow"/>.
+    /// Dải cho phép của <see cref="MinOverlapRatio"/>, bao gồm biên (spec thiết kế K2); vai trò như
+    /// <see cref="GapRatioLow"/>.
+    /// </summary>
+    public const double OverlapRatioLow = 0.0, OverlapRatioHigh = 1.0;
 
     /// <summary>
     /// The shipped defaults, taken from the original <see cref="LineGrouper"/> constants — identical to pre-configuration behaviour.
@@ -27,7 +48,7 @@ public readonly record struct MergeThresholds(double GapRatio, double HeightRati
     /// </summary>
     /// <returns>true when all three values are in range; false otherwise (NaN is out of range). true khi cả ba giá trị đều trong dải; ngược lại false (NaN ngoài dải).</returns>
     public bool IsValid() =>
-        GapRatio is >= GapLow and <= GapHigh
-        && HeightRatio is >= HeightLow and <= HeightHigh
-        && MinOverlapRatio is >= OverlapLow and <= OverlapHigh;
+        GapRatio is >= GapRatioLow and <= GapRatioHigh
+        && HeightRatio is >= HeightRatioLow and <= HeightRatioHigh
+        && MinOverlapRatio is >= OverlapRatioLow and <= OverlapRatioHigh;
 }

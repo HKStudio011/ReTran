@@ -862,6 +862,178 @@ public class PipelineHostTests
     }
 
     //
+    // core.start ocr.mergeGapRatio / mergeHeightRatio / mergeOverlapRatio — parse-level checks
+    // only; the runtime effect (grouping with the custom caps) is covered by OcrPipelineTests.
+    // core.start ocr.mergeGapRatio / mergeHeightRatio / mergeOverlapRatio — chỉ kiểm tra ở tầng
+    // parse; hiệu ứng runtime (gom dòng theo ngưỡng tùy chọn) do OcrPipelineTests phủ.
+    //
+    // Dải ngưỡng do spec K2 ấn định (gap 0.1..2.0, height 1.0..3.0, overlap 0..1); test là
+    // nơi duy nhất nhắc lại các con số đó.
+    //
+
+    /// <summary>
+    /// start params with an <c>ocr</c> block whose pair is installed in the fake catalog, plus the
+    /// given merge-threshold keys (a <see langword="null"/> <see cref="JsonNode"/> writes JSON null,
+    /// omitting the pair leaves the key absent).
+    /// Tham số start với khối <c>ocr</c> có cặp model đã cài trong catalog giả, cộng các key ngưỡng
+    /// gộp được truyền (<see cref="JsonNode"/> <see langword="null"/> ghi JSON null, bỏ qua cặp
+    /// thì key không có mặt).
+    /// </summary>
+    private static JsonObject StartParamsWithMerge(params (string Key, JsonNode? Value)[] merge)
+    {
+        var ocr = new JsonObject { ["det"] = "detA", ["rec"] = "recA", ["mergeLines"] = true };
+        foreach ((string key, JsonNode? value) in merge)
+            ocr[key] = value;
+        var parameters = StartParams();
+        parameters["ocr"] = ocr;
+        return parameters;
+    }
+
+    /// <summary>
+    /// Host whose fake sidecar reports detA/recA installed, so an <c>ocr</c> block reaches
+    /// <c>ParseStart</c>'s validation instead of failing the model check first.
+    /// Host có sidecar giả báo detA/recA đã cài, để khối <c>ocr</c> đi tới phần kiểm tra của
+    /// <c>ParseStart</c> thay vì hỏng ở bước kiểm tra model trước.
+    /// </summary>
+    private static PipelineHost CreateHostWithInstalledPair(out FakeSidecarRpc rpc)
+    {
+        rpc = new FakeSidecarRpc { NextResult = SpotResult() };
+        rpc.ResultsByMethod["ocr.models.list"] = CatalogResult(("detA", true), ("recA", true));
+        return CreateHost(rpc, RegistryWith(new CountingTranslator()), new JsonRpcServer());
+    }
+
+    [Fact]
+    public async Task Start_MergeThresholdsInRange_ParsesOk()
+    {
+        await using var host = CreateHostWithInstalledPair(out _);
+
+        // In-range values (a mid-range gap, a wide height cap, no overlap floor): start must run.
+        // Giá trị trong dải (gap giữa dải, cap chiều cao rộng, không có ngưỡng overlap): start
+        // phải chạy được.
+        JsonNode? started = await host.StartAsync(StartParamsWithMerge(
+            ("mergeGapRatio", JsonValue.Create(0.25)),
+            ("mergeHeightRatio", JsonValue.Create(2.0)),
+            ("mergeOverlapRatio", JsonValue.Create(0.0))), CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task Start_MergeThresholdsOnBounds_ParsesOk()
+    {
+        await using var host = CreateHostWithInstalledPair(out _);
+
+        // Spec K2 ranges are inclusive on both ends.
+        // Dải theo spec K2 bao gồm cả hai biên.
+        JsonNode? started = await host.StartAsync(StartParamsWithMerge(
+            ("mergeGapRatio", JsonValue.Create(0.1)),
+            ("mergeHeightRatio", JsonValue.Create(1.0)),
+            ("mergeOverlapRatio", JsonValue.Create(1.0))), CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task Start_MergeThresholdsNull_TreatedAsAbsent()
+    {
+        await using var host = CreateHostWithInstalledPair(out _);
+
+        // JSON null = "keep the shipped defaults (0.6 / 1.35 / 0.5)": no -32602.
+        // JSON null = "giữ mặc định gốc (0.6 / 1.35 / 0.5)": không -32602.
+        JsonNode? started = await host.StartAsync(StartParamsWithMerge(
+            ("mergeGapRatio", null), ("mergeHeightRatio", null), ("mergeOverlapRatio", null)),
+            CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task Start_MergeThresholdsAbsent_UsesCurrentDefaults()
+    {
+        await using var host = CreateHostWithInstalledPair(out _);
+
+        // Review Focus #1: an old settings.json has none of the three keys — absent keys fall
+        // back to the shipped defaults, never 0 or 1.
+        // Review Focus #1: settings.json cũ không có cả ba key — thiếu key phải rơi về mặc định
+        // gốc, không bao giờ thành 0 hay 1.
+        JsonNode? started = await host.StartAsync(StartParamsWithMerge(), CancellationToken.None);
+        Assert.True(started!["running"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task Start_MergeGapRatioNonNumber_InvalidParams()
+    {
+        await using var host = CreateHostWithInstalledPair(out FakeSidecarRpc rpc);
+
+        // A JSON string number is not a number: silently coercing "0.25" would hide a typo in
+        // a hand-edited settings.json.
+        // Chuỗi JSON dạng số không phải số: âm thầm ép "0.25" sẽ giấu một lỗi gõ trong
+        // settings.json sửa tay.
+        var asString = StartParamsWithMerge(("mergeGapRatio", JsonValue.Create("0.25")));
+        var ex1 = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(asString, CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InvalidParams, ex1.Code);
+        Assert.Contains("ocr.mergeGapRatio", ex1.Message, StringComparison.Ordinal);
+        Assert.Contains("0.1", ex1.Message, StringComparison.Ordinal);
+        Assert.Contains("2.0", ex1.Message, StringComparison.Ordinal);
+
+        var asBool = StartParamsWithMerge(("mergeGapRatio", JsonValue.Create(true)));
+        var ex2 = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(asBool, CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InvalidParams, ex2.Code);
+        Assert.Contains("ocr.mergeGapRatio", ex2.Message, StringComparison.Ordinal);
+
+        // Review Focus #2: a rejected start leaves no half-started session — no sidecar call
+        // at all, and the very next valid start still works.
+        // Review Focus #2: start bị chặn không để lại phiên nửa vời — không gọi sidecar, và lần
+        // start hợp lệ ngay sau vẫn chạy.
+        Assert.DoesNotContain(rpc.Calls, c => c.Method.StartsWith("ocr.", StringComparison.Ordinal));
+        JsonNode? restarted = await host.StartAsync(StartParams(), CancellationToken.None);
+        Assert.True(restarted!["running"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task Start_MergeGapRatioOutOfRange_InvalidParams()
+    {
+        await using var host = CreateHostWithInstalledPair(out _);
+
+        var tooHigh = StartParamsWithMerge(("mergeGapRatio", JsonValue.Create(2.5)));
+        var ex1 = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(tooHigh, CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InvalidParams, ex1.Code);
+        Assert.Contains("ocr.mergeGapRatio", ex1.Message, StringComparison.Ordinal);
+
+        var tooLow = StartParamsWithMerge(("mergeGapRatio", JsonValue.Create(0.05)));
+        var ex2 = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(tooLow, CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InvalidParams, ex2.Code);
+        Assert.Contains("ocr.mergeGapRatio", ex2.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Start_MergeHeightRatioOutOfRange_InvalidParams()
+    {
+        await using var host = CreateHostWithInstalledPair(out _);
+
+        var parameters = StartParamsWithMerge(("mergeHeightRatio", JsonValue.Create(0.5)));
+        var ex = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(parameters, CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InvalidParams, ex.Code);
+        Assert.Contains("ocr.mergeHeightRatio", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("1.0", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("3.0", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Start_MergeOverlapRatioOutOfRange_InvalidParams()
+    {
+        await using var host = CreateHostWithInstalledPair(out _);
+
+        var parameters = StartParamsWithMerge(("mergeOverlapRatio", JsonValue.Create(1.5)));
+        var ex = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.StartAsync(parameters, CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InvalidParams, ex.Code);
+        Assert.Contains("ocr.mergeOverlapRatio", ex.Message, StringComparison.Ordinal);
+    }
+
+    //
     // Warmup — one fire-and-forget tiny spot after core.start; never blocks, never crashes.
     // Warmup — một spot nhỏ fire-and-forget sau core.start; không chặn, không crash.
     //
