@@ -283,9 +283,11 @@ public sealed class PipelineController
 
     /// <summary>
     /// Sends <c>core.stop</c> to end the current session; Core treats it as idempotent (Core sends
-    /// no <c>pipeline.state</c> for a normal stop).
+    /// no <c>pipeline.state</c> for a normal stop). Also clears the overlay feed, since a session
+    /// that ended must not keep serving its text to a subscriber that connects later.
     /// Gửi <c>core.stop</c> để kết thúc phiên hiện tại; Core coi lệnh này là idempotent (Core
-    /// không gửi <c>pipeline.state</c> khi dừng bình thường).
+    /// không gửi <c>pipeline.state</c> khi dừng bình thường). Đồng thời xóa feed overlay, vì một
+    /// phiên đã dừng không được tiếp tục phục vụ chữ của nó cho subscriber kết nối sau.
     /// </summary>
     /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
     /// <returns>A task that completes once Core acknowledges the stop. Task hoàn tất khi Core xác nhận dừng.</returns>
@@ -294,6 +296,7 @@ public sealed class PipelineController
         await _peer.CallAsync("core.stop", null, ct).ConfigureAwait(false);
         IsRunning = false;
         ActiveSource = null;
+        ClearOverlayFrames();
         StateChanged?.Invoke();
     }
 
@@ -630,9 +633,16 @@ public sealed class PipelineController
         _log.LogWarning("Core process exited with code {ExitCode}; the pipeline is gone.", exitCode);
         IsRunning = false;
         ActiveSource = null;
+        ClearOverlayFrames();
         PipelineStateChanged?.Invoke(false, CoreExitedReason);
         StateChanged?.Invoke();
     }
+
+    // Mọi đường chuyển sang không-chạy (StopAsync, core exit, notification running:false) đều xóa
+    // feed overlay: OBS Browser Source kết nối muộn phải thấy snapshot rỗng, không dựng lại chữ
+    // của phiên đã tắt. Clear idempotent nên các đường dừng chồng nhau (exit ngay sau Stop) chỉ nổ
+    // một payload rỗng. Không gọi khi Start — preview/overlay của phiên mới bắt đầu bằng khung mới.
+    private void ClearOverlayFrames() => _overlay.Clear();
 
     private async Task<JsonNode?> HandleRequestAsync(string method, JsonNode? @params)
     {
@@ -827,6 +837,7 @@ public sealed class PipelineController
             ? reasonValue.GetValue<string>()
             : null;
         IsRunning = running;
+        if (!running) ClearOverlayFrames();
         PipelineStateChanged?.Invoke(running, reason);
         StateChanged?.Invoke();
     }

@@ -953,6 +953,131 @@ public class PipelineControllerTests : IDisposable
         Assert.Null(controller.ActiveSource);
     }
 
+    [Fact]
+    public async Task Stop_ClearsOverlayState()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        var overlay = new OverlayState();
+        PipelineController controller = CreateController(peer, overlay);
+        await controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None);
+        RaiseTranslatedFrame(peer);
+        Assert.NotNull(overlay.Latest);
+
+        int changed = 0;
+        overlay.Changed += () => changed++;
+
+        await controller.StopAsync(CancellationToken.None);
+
+        // OBS Browser Source kết nối SAU khi dừng phải thấy snapshot rỗng, không dựng lại chữ
+        // của phiên cũ (Spec §3 / Review Focus #3).
+        Assert.Null(overlay.Latest);
+        // Đường dừng do người dùng chỉ nổ StateChanged, nên phần xóa phải nổ Changed đúng một lần.
+        Assert.Equal(1, changed);
+    }
+
+    [Fact]
+    public async Task Stop_ThenCoreExited_ClearsOverlayOnce()
+    {
+        // Một lần dừng có thể đi qua hai đường (StopAsync rồi core exit) → Clear phải idempotent:
+        // subscriber feed chỉ nhận một payload rỗng, không phải hai.
+        var peer = new FakeCorePeer { IsStarted = true };
+        var overlay = new OverlayState();
+        PipelineController controller = CreateController(peer, overlay);
+        await controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None);
+        RaiseTranslatedFrame(peer);
+
+        int changed = 0;
+        overlay.Changed += () => changed++;
+
+        await controller.StopAsync(CancellationToken.None);
+        peer.RaiseExited(0);
+
+        Assert.Null(overlay.Latest);
+        Assert.Equal(1, changed);
+    }
+
+    [Fact]
+    public async Task CoreExited_ClearsOverlayState()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        var overlay = new OverlayState();
+        PipelineController controller = CreateController(peer, overlay);
+        await controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None);
+        RaiseTranslatedFrame(peer);
+
+        peer.RaiseExited(0);
+
+        Assert.Null(overlay.Latest);
+    }
+
+    [Fact]
+    public async Task PipelineStateNotification_Stopped_ClearsOverlayState()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        var overlay = new OverlayState();
+        PipelineController controller = CreateController(peer, overlay);
+        await controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None);
+        RaiseTranslatedFrame(peer);
+
+        peer.RaiseNotification("pipeline.state", new JsonObject
+        {
+            ["running"] = false,
+            ["reason"] = "sidecar-exited",
+        });
+
+        Assert.Null(overlay.Latest);
+    }
+
+    [Fact]
+    public async Task PipelineStateNotification_Running_KeepsOverlayState()
+    {
+        // Chỉ đường chuyển sang KHÔNG chạy mới xóa; notification running:true giữa phiên mà xóa thì
+        // feed sẽ nháy trắng mỗi lần Core báo nhịp.
+        var peer = new FakeCorePeer { IsStarted = true };
+        var overlay = new OverlayState();
+        PipelineController controller = CreateController(peer, overlay);
+        await controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None);
+        RaiseTranslatedFrame(peer);
+
+        peer.RaiseNotification("pipeline.state", new JsonObject { ["running"] = true });
+
+        Assert.NotNull(overlay.Latest);
+    }
+
+    [Fact]
+    public async Task Start_KeepsExistingOverlayState()
+    {
+        // Clear chỉ gắn với các đường chuyển sang không-chạy — Start không được xóa.
+        var peer = new FakeCorePeer { IsStarted = true };
+        var overlay = new OverlayState();
+        PipelineController controller = CreateController(peer, overlay);
+        overlay.Publish(new OverlayFrame(1920, 1080, DateTime.UtcNow,
+            new[] { new OverlayBox(0.1, 0.1, 0.2, 0.05, "HELLO", "Xin chào") }));
+
+        await controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None);
+
+        Assert.NotNull(overlay.Latest);
+    }
+
+    /// <summary>
+    /// Pushes one <c>frame.translated</c> notification through the wired handler so the overlay has
+    /// a frame to lose. Đẩy một thông báo <c>frame.translated</c> qua handler đã gắn để overlay có
+    /// khung hình cần xóa.
+    /// </summary>
+    private static void RaiseTranslatedFrame(FakeCorePeer peer)
+        => peer.RaiseNotification("frame.translated", new JsonObject
+        {
+            ["seq"] = 1,
+            ["w"] = 1920,
+            ["h"] = 1080,
+            ["boxes"] = new JsonArray(
+                new JsonObject
+                {
+                    ["x"] = 0.10, ["y"] = 0.20, ["w"] = 0.30, ["h"] = 0.05,
+                    ["text"] = "HELLO", ["translated"] = "Xin chào",
+                }),
+        });
+
     private sealed class FakeCorePeer : ICorePeer
     {
         public bool IsStarted { get; set; }
