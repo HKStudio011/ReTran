@@ -69,6 +69,9 @@
         <!-- GDI+ drawing for the Win32 layered overlay host (Task 5).
              Vẽ GDI+ cho overlay host layered Win32 (Task 5). -->
         <PackageReference Include="System.Drawing.Common" Version="10.*" />
+        <!-- WMI (Win32_VideoController) for the first-run SystemCheck GPU gate (Task 6).
+             WMI (Win32_VideoController) cho cổng GPU của SystemCheck chạy lần đầu (Task 6). -->
+        <PackageReference Include="System.Management" Version="10.0.14" />
     </ItemGroup>
 
     <ItemGroup>
