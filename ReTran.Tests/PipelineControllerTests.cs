@@ -143,6 +143,61 @@ public class PipelineControllerTests : IDisposable
     }
 
     [Fact]
+    public async Task Start_SendsMergeThresholdsFromSettings()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        new AppSettingsService(_settingsPath).Save(AppSettings.Default with
+        {
+            OcrMergeGap = 0.2,
+            OcrMergeHeight = 1.1,
+            OcrMergeOverlap = 0.0,
+        });
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+
+        // Ba ngưỡng gộp luôn đi kèm core.start, nằm TRONG khối "ocr" đúng chỗ Core đọc
+        // (PipelineHost.ParseStart → ParseRatio), và là số JSON — GetValue<double> ném nếu
+        // node mang chuỗi.
+        JsonObject ocr = Assert.Single(peer.Calls).Params!["ocr"]!.AsObject();
+        Assert.Equal(0.2, ocr["mergeGapRatio"]!.GetValue<double>());
+        Assert.Equal(1.1, ocr["mergeHeightRatio"]!.GetValue<double>());
+        Assert.Equal(0.0, ocr["mergeOverlapRatio"]!.GetValue<double>());
+
+        // AppSettings.Default ⇒ mặc định spec K2 0.6/1.35/0.5.
+        await controller.StopAsync(CancellationToken.None);
+        new AppSettingsService(_settingsPath).Save(AppSettings.Default);
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+
+        JsonObject ocrDefault = peer.Calls.Last(call => call.Method == "core.start").Params!["ocr"]!.AsObject();
+        Assert.Equal(0.6, ocrDefault["mergeGapRatio"]!.GetValue<double>());
+        Assert.Equal(1.35, ocrDefault["mergeHeightRatio"]!.GetValue<double>());
+        Assert.Equal(0.5, ocrDefault["mergeOverlapRatio"]!.GetValue<double>());
+    }
+
+    [Fact]
+    public async Task Start_ForwardsOutOfRangeMergeThresholds_Verbatim()
+    {
+        // Hợp đồng "App chuyển nguyên vẹn, Core là nơi duy nhất chặn dải": App không clamp,
+        // không kiểm tra dải — giá trị ngoài dải (gap 2.5 > max 2.0) phải tới Core y hệt để
+        // Core ném -32602 (test chặn dải ở PipelineHost thuộc Task 3).
+        var peer = new FakeCorePeer { IsStarted = true };
+        new AppSettingsService(_settingsPath).Save(AppSettings.Default with { OcrMergeGap = 2.5 });
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        await controller.StartAsync(
+            new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null),
+            CancellationToken.None);
+
+        JsonObject ocr = Assert.Single(peer.Calls).Params!["ocr"]!.AsObject();
+        Assert.Equal(2.5, ocr["mergeGapRatio"]!.GetValue<double>());
+    }
+
+    [Fact]
     public async Task StartAsync_SendsOcrParamsAndFps_AndSurvivesSecondStart()
     {
         var peer = new FakeCorePeer { IsStarted = true };

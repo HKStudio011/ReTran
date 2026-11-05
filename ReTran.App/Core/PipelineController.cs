@@ -238,6 +238,12 @@ public sealed class PipelineController
         var ocr = new JsonObject { ["det"] = settings.OcrDet, ["rec"] = settings.OcrRec };
         // mergeLines luôn gửi — Core cũ bỏ qua key lạ.
         ocr["mergeLines"] = settings.OcrMergeLines;
+        // Ba ngưỡng gộp dòng (spec K2) cũng luôn gửi — AppSettings lúc nào cũng mang giá trị,
+        // và Core đọc đúng trong khối "ocr" (PipelineHost.ParseStart). App chuyển nguyên vẹn,
+        // không clamp: Core là nơi duy nhất chặn dải ngoài 0.1..2.0 / 1.0..3.0 / 0.0..1.0.
+        ocr["mergeGapRatio"] = settings.OcrMergeGap;
+        ocr["mergeHeightRatio"] = settings.OcrMergeHeight;
+        ocr["mergeOverlapRatio"] = settings.OcrMergeOverlap;
         JsonObject? ocrParams = BuildOcrParams(settings.OcrEngine ?? new Dictionary<string, JsonNode?>());
         if (ocrParams is not null) ocr["params"] = ocrParams;
 
