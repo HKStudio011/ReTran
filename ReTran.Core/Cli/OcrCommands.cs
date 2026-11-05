@@ -30,9 +30,10 @@ public static class OcrCommands
         {
             return await RunLoopAsync(args[1..]);
         }
-        if (!TryParseOneShot(args, out string? input, out bool mergeLines, out string? parseError))
+        if (!TryParseOneShot(args, out string? input, out bool mergeLines, out MergeThresholds merge, out string? parseError))
         {
-            Console.Error.WriteLine("usage: ReTran.Core ocr <input.png> [--merge-lines]");
+            Console.Error.WriteLine(
+                "usage: ReTran.Core ocr <input.png> [--merge-lines] " + OcrLoop.MergeFlags.UsageSuffix);
             if (parseError is not null)
                 Console.Error.WriteLine(parseError);
             return 2;
@@ -57,7 +58,7 @@ public static class OcrCommands
         try
         {
             await using var sp = await SidecarProcess.StartAsync(python, repoRoot, CancellationToken.None);
-            var pipeline = new OcrPipeline(sp, new OcrDiff(), mergeLines);
+            var pipeline = new OcrPipeline(sp, new OcrDiff(), mergeLines, merge);
             string b64 = Convert.ToBase64String(await File.ReadAllBytesAsync(input));
             JsonObject result = await pipeline.SpotAsync(b64);
             Console.Out.WriteLine(result.ToJsonString());
@@ -71,43 +72,62 @@ public static class OcrCommands
     }
 
     /// <summary>
-    /// Parses one-shot <c>ocr</c> arguments: exactly one input path plus the optional
-    /// <c>--merge-lines</c> flag (no value).
-    /// Phân tích đối số <c>ocr</c> một lần: đúng một đường dẫn đầu vào kèm cờ tùy chọn
-    /// <c>--merge-lines</c> (không có giá trị).
+    /// Parses one-shot <c>ocr</c> arguments: exactly one input path, the optional <c>--merge-lines</c>
+    /// flag (no value), and the three optional merge-threshold flags (each with one number).
+    /// Phân tích đối số <c>ocr</c> một lần: đúng một đường dẫn đầu vào, cờ tùy chọn
+    /// <c>--merge-lines</c> (không có giá trị), và ba cờ ngưỡng gộp tùy chọn (mỗi cờ một số).
     /// </summary>
     /// <param name="args">Arguments after <c>ocr</c> (the <c>loop</c> form is handled by the caller). Đối số sau <c>ocr</c> (dạng <c>loop</c> do caller xử lý).</param>
     /// <param name="input">The input path on success. Đường dẫn đầu vào khi hợp lệ.</param>
     /// <param name="mergeLines">True when <c>--merge-lines</c> is present. True khi có <c>--merge-lines</c>.</param>
+    /// <param name="merge">
+    /// Thresholds collected from the merge flags; exactly <see cref="MergeThresholds.Default"/> when
+    /// none of them is present, and always range-validated (see <see cref="OcrLoop.TryReadMergeThreshold"/>).
+    /// Ngưỡng thu từ các cờ gộp; đúng bằng <see cref="MergeThresholds.Default"/> khi không có cờ nào,
+    /// và luôn đã kiểm dải (xem <see cref="OcrLoop.TryReadMergeThreshold"/>).
+    /// </param>
     /// <param name="error">Null on success; otherwise the reason. Không null khi thành công; ngược lại là lý do.</param>
     /// <returns>True when the arguments are valid. True khi đối số hợp lệ.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="args"/> is null. Ném khi <paramref name="args"/> là null.</exception>
-    internal static bool TryParseOneShot(string[] args, out string? input, out bool mergeLines, out string? error)
+    internal static bool TryParseOneShot(string[] args, out string? input, out bool mergeLines,
+        out MergeThresholds merge, out string? error)
     {
         ArgumentNullException.ThrowIfNull(args);
         input = null;
         mergeLines = false;
+        merge = MergeThresholds.Default;
         error = null;
 
-        foreach (string arg in args)
+        for (int i = 0; i < args.Length; i++)
         {
-            if (arg == "--merge-lines")
+            string arg = args[i];
+            switch (arg)
             {
-                mergeLines = true;
-            }
-            else if (arg.StartsWith("--", StringComparison.Ordinal))
-            {
-                error = $"unknown argument '{arg}'.";
-                return false;
-            }
-            else if (input is null)
-            {
-                input = arg;
-            }
-            else
-            {
-                error = $"unexpected argument '{arg}' (one input only).";
-                return false;
+                case "--merge-lines":
+                    mergeLines = true;
+                    break;
+                case OcrLoop.MergeFlags.Gap:
+                case OcrLoop.MergeFlags.Height:
+                case OcrLoop.MergeFlags.Overlap:
+                    if (!OcrLoop.TryReadMergeThreshold(arg, args, ref i, merge, out merge, out error))
+                        return false;
+                    break;
+                default:
+                    if (arg.StartsWith("--", StringComparison.Ordinal))
+                    {
+                        error = $"unknown argument '{arg}'.";
+                        return false;
+                    }
+                    if (input is null)
+                    {
+                        input = arg;
+                    }
+                    else
+                    {
+                        error = $"unexpected argument '{arg}' (one input only).";
+                        return false;
+                    }
+                    break;
             }
         }
 
@@ -165,7 +185,7 @@ public static class OcrCommands
                 return 1;
             }
             await using var sp = await SidecarProcess.StartAsync(python, repoRoot, cts.Token);
-            var pipeline = new OcrPipeline(sp, new OcrDiff(), options.MergeLines);
+            var pipeline = new OcrPipeline(sp, new OcrDiff(), options.MergeLines, options.Merge);
             return await OcrLoop.RunAsync(options, source, pipeline, new JsonLinesSink(Console.Out), Console.Error, cts.Token);
         }
         catch (OperationCanceledException) when (cts.IsCancellationRequested)
