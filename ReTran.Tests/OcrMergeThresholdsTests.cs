@@ -29,6 +29,13 @@ public class OcrMergeThresholdsTests
         // Số mũ bị chính bộ parse từ chối (không phải bị dải giá trị chặn lại), nên "1e5" không
         // bao giờ biến thành 100000 rồi lọt qua ô nhập.
         Assert.False(OcrMergeThresholds.TryParseRatio("1e5", out _));
+        // Guard IsFinite: chuỗi vô hạn và số tràn double bị từ chối, khớp chính sách
+        // OcrConfigValidation.TryGetNumber phía tham số engine.
+        Assert.False(OcrMergeThresholds.TryParseRatio("NaN", out _));
+        Assert.False(OcrMergeThresholds.TryParseRatio("nan", out _));
+        Assert.False(OcrMergeThresholds.TryParseRatio("Infinity", out _));
+        Assert.False(OcrMergeThresholds.TryParseRatio("-Infinity", out _));
+        Assert.False(OcrMergeThresholds.TryParseRatio("1" + new string('9', 400), out _));
     }
 
     [Theory]
@@ -94,8 +101,18 @@ public class OcrMergeThresholdsTests
     [Fact]
     public void AppRanges_MatchCoreBounds()
     {
-        // Mỗi biên của Core phải nằm trong dải App chấp nhận, và ngay bên ngoài biên đó phải bị
-        // từ chối: dải hai phía lệch nhau bất kỳ hướng nào cũng làm test này đỏ.
+        // Biên App phải bằng đúng biên Core (không chỉ "nằm trong dải"), rồi mỗi biên của Core
+        // phải nằm trong dải App chấp nhận và ngay bên ngoài biên đó phải bị từ chối: dải hai
+        // phía lệch nhau bất kỳ hướng nào cũng làm test này đỏ.
+        // App bounds must equal Core bounds exactly (not merely "inside the range"), and each Core
+        // bound must sit inside the App range with just-outside rejected: drift either way fails.
+        Assert.Equal(MergeThresholds.GapRatioLow, OcrMergeThresholds.GapRatioLow);
+        Assert.Equal(MergeThresholds.GapRatioHigh, OcrMergeThresholds.GapRatioHigh);
+        Assert.Equal(MergeThresholds.HeightRatioLow, OcrMergeThresholds.HeightRatioLow);
+        Assert.Equal(MergeThresholds.HeightRatioHigh, OcrMergeThresholds.HeightRatioHigh);
+        Assert.Equal(MergeThresholds.OverlapRatioLow, OcrMergeThresholds.OverlapRatioLow);
+        Assert.Equal(MergeThresholds.OverlapRatioHigh, OcrMergeThresholds.OverlapRatioHigh);
+
         Assert.True(OcrMergeThresholds.InGapRange(MergeThresholds.GapRatioLow));
         Assert.True(OcrMergeThresholds.InGapRange(MergeThresholds.GapRatioHigh));
         Assert.False(OcrMergeThresholds.InGapRange(MergeThresholds.GapRatioLow - 0.01));

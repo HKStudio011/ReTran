@@ -23,6 +23,30 @@ public static class OcrMergeThresholds
     public const double DefaultGap = 0.6, DefaultHeight = 1.35, DefaultOverlap = 0.5;
 
     /// <summary>
+    /// Allowed range bounds for the gap ratio (inclusive, spec K2); mirrored from Core's
+    /// <c>MergeThresholds.GapRatioLow/High</c> and pinned by <c>OcrMergeThresholdsTests.AppRanges_MatchCoreBounds</c>.
+    /// Biên dải cho phép của ngưỡng khoảng cách (bao gồm hai biên, spec K2); mô phỏng đúng
+    /// <c>MergeThresholds.GapRatioLow/High</c> của Core và được ghim bởi test <c>AppRanges_MatchCoreBounds</c>.
+    /// </summary>
+    public const double GapRatioLow = 0.1, GapRatioHigh = 2.0;
+
+    /// <summary>
+    /// Allowed range bounds for the height ratio (inclusive, spec K2); mirrored from Core's
+    /// <c>MergeThresholds.HeightRatioLow/High</c> and pinned by the same drift test.
+    /// Biên dải cho phép của ngưỡng chênh chiều cao (bao gồm hai biên, spec K2); mô phỏng đúng
+    /// <c>MergeThresholds.HeightRatioLow/High</c> của Core và được ghim bởi cùng test chống trôi.
+    /// </summary>
+    public const double HeightRatioLow = 1.0, HeightRatioHigh = 3.0;
+
+    /// <summary>
+    /// Allowed range bounds for the overlap ratio (inclusive, spec K2); mirrored from Core's
+    /// <c>MergeThresholds.OverlapRatioLow/High</c> and pinned by the same drift test.
+    /// Biên dải cho phép của ngưỡng chồng ngang (bao gồm hai biên, spec K2); mô phỏng đúng
+    /// <c>MergeThresholds.OverlapRatioLow/High</c> của Core và được ghim bởi cùng test chống trôi.
+    /// </summary>
+    public const double OverlapRatioLow = 0.0, OverlapRatioHigh = 1.0;
+
+    /// <summary>
     /// Float parse style without <see cref="NumberStyles.AllowExponent"/>, so text like
     /// <c>"1e5"</c> is rejected by the parser instead of quietly becoming 100000 for the range
     /// checks to judge.
@@ -43,7 +67,12 @@ public static class OcrMergeThresholds
     /// </summary>
     /// <param name="text">Raw control text, or null. Chuỗi thô của ô nhập, hoặc null.</param>
     /// <param name="value">Parsed value on success, otherwise 0. Giá trị đã phân tích khi thành công, ngược lại là 0.</param>
-    /// <returns>True when the text is a plain decimal number. True khi chuỗi là số thập phân trần.</returns>
+    /// <returns>
+    /// True only for a finite plain decimal number — words and non-finite forms such as <c>"NaN"</c>
+    /// or <c>"Infinity"</c> are invalid (same policy as <c>OcrConfigValidation.TryGetNumber</c>).
+    /// True chỉ với số thập phân trần hữu hạn — chuỗi chữ và dạng vô hạn như <c>"NaN"</c>,
+    /// <c>"Infinity"</c> đều không hợp lệ (cùng chính sách với <c>OcrConfigValidation.TryGetNumber</c>).
+    /// </returns>
     public static bool TryParseRatio(string? text, out double value)
     {
         value = 0;
@@ -58,7 +87,10 @@ public static class OcrMergeThresholds
             return false;
         }
 
-        if (double.TryParse(trimmed, RatioStyle, CultureInfo.InvariantCulture, out value))
+        // IsFinite chặn "NaN"/"Infinity"/"-Infinity" (NumberStyles.Float không cho phép các dạng
+        // đó nhưng giữ guard để khớp chính sách OcrConfigValidation.TryGetNumber và an toàn trước
+        // chuỗi dạng số cực lớn tràn số).
+        if (double.TryParse(trimmed, RatioStyle, CultureInfo.InvariantCulture, out value) && double.IsFinite(value))
         {
             return true;
         }
@@ -66,7 +98,7 @@ public static class OcrMergeThresholds
         // Ô nhập hiển thị theo culture nên người dùng gõ dấu phẩy thập phân; chỉ đổi dấu phân
         // cách, không lấy NumberFormatInfo của CurrentCulture.
         var commaFormat = new NumberFormatInfo { NumberDecimalSeparator = "," };
-        if (double.TryParse(trimmed, RatioStyle, commaFormat, out value))
+        if (double.TryParse(trimmed, RatioStyle, commaFormat, out value) && double.IsFinite(value))
         {
             return true;
         }
@@ -82,7 +114,7 @@ public static class OcrMergeThresholds
     /// </summary>
     /// <param name="value">Value to check (NaN is out of range). Giá trị cần kiểm (NaN ngoài dải).</param>
     /// <returns>True when in range. True khi nằm trong dải.</returns>
-    public static bool InGapRange(double value) => value is >= 0.1 and <= 2.0;
+    public static bool InGapRange(double value) => value is >= GapRatioLow and <= GapRatioHigh;
 
     /// <summary>
     /// Whether a height ratio sits in the allowed range 1.0..3.0 (bounds inclusive, spec K2).
@@ -91,7 +123,7 @@ public static class OcrMergeThresholds
     /// </summary>
     /// <param name="value">Value to check (NaN is out of range). Giá trị cần kiểm (NaN ngoài dải).</param>
     /// <returns>True when in range. True khi nằm trong dải.</returns>
-    public static bool InHeightRange(double value) => value is >= 1.0 and <= 3.0;
+    public static bool InHeightRange(double value) => value is >= HeightRatioLow and <= HeightRatioHigh;
 
     /// <summary>
     /// Whether an overlap ratio sits in the allowed range 0.0..1.0 (bounds inclusive, spec K2).
@@ -100,7 +132,7 @@ public static class OcrMergeThresholds
     /// </summary>
     /// <param name="value">Value to check (NaN is out of range). Giá trị cần kiểm (NaN ngoài dải).</param>
     /// <returns>True when in range. True khi nằm trong dải.</returns>
-    public static bool InOverlapRange(double value) => value is >= 0.0 and <= 1.0;
+    public static bool InOverlapRange(double value) => value is >= OverlapRatioLow and <= OverlapRatioHigh;
 
     /// <summary>
     /// Whether all three thresholds are in their own ranges — the settings sheet saves only when

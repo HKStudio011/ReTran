@@ -762,6 +762,12 @@ body { background: var(--rt-page); }
 .rt-srow:has(> input[type="checkbox"]) > input[type="checkbox"] { grid-row: 1; grid-column: 2; justify-self: end; width: 15px; height: 15px; accent-color: var(--rt-tally); cursor: pointer; }
 .rt-srow:has(> input[type="checkbox"]) > .rt-hint { grid-row: 2; grid-column: 1 / -1; }
 
+/* Numeric rows (merge thresholds): label left, narrow number input right, hint below. */
+.rt-srow--num { grid-template-columns: 1fr 78px; column-gap: 10px; align-items: center; }
+.rt-srow--num > span { grid-row: 1; grid-column: 1; }
+.rt-srow--num > input { grid-row: 1; grid-column: 2; justify-self: end; }
+.rt-srow--num > .rt-hint { grid-row: 2; grid-column: 1 / -1; }
+
 .rt-input {
   height: 32px;
   width: 100%;
