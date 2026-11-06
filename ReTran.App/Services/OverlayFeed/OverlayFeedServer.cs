@@ -34,8 +34,9 @@ namespace ReTran_App.Services.OverlayFeed;
 /// </para>
 /// <para>
 /// <c>GET /events</c> answers with content type <c>text/event-stream</c>: it first queues a snapshot of the
-/// latest frame (empty <c>boxes</c> when nothing was published yet), then one <c>data:</c> event per
-/// <see cref="OverlayState.Changed"/> with payload
+/// latest frame (empty <c>boxes</c> when nothing was published yet, when the session was cleared with
+/// <see cref="OverlayState.Clear"/>, or while the visibility gate hides the overlay), then one <c>data:</c>
+/// event per <see cref="OverlayState.Changed"/> with payload
 /// <c>{"seq":n,"boxes":[{"x":..,"y":..,"w":..,"h":..,"text":"..","translated":"..","paragraph":false}]}</c>
 /// (lowercase keys, 0–1 normalized coordinates), plus <c>:ping</c> comment heartbeats every
 /// <c>heartbeat</c> (default 15 s) to keep the stream alive. There is no <c>translatedLang</c> field (spec C12).
@@ -44,11 +45,29 @@ namespace ReTran_App.Services.OverlayFeed;
 /// </para>
 /// <para>
 /// <c>GET /events</c> trả content type <c>text/event-stream</c>: trước hết đưa vào hàng một snapshot của khung
-/// mới nhất (<c>boxes</c> rỗng khi chưa có gì được xuất bản), rồi một sự kiện <c>data:</c> cho mỗi
+/// mới nhất (<c>boxes</c> rỗng khi chưa có gì được xuất bản, khi phiên bị <see cref="OverlayState.Clear"/>
+/// xóa, hoặc khi gate hiển thị đang ẩn overlay), rồi một sự kiện <c>data:</c> cho mỗi
 /// <see cref="OverlayState.Changed"/> với payload như trên (key chữ thường, tọa độ chuẩn hóa 0–1), cộng chú thích
 /// <c>:ping</c> mỗi <c>heartbeat</c> (mặc định 15 giây) để giữ luồng sống. Không có trường <c>translatedLang</c>
 /// (spec C12). Snapshot được soạn và đăng ký khi giữ cùng khóa mà broadcast copy danh sách client, nên một
 /// publish rơi vào lúc client đang connect không còn có thể bị lỡ.
+/// </para>
+/// <para>
+/// When an <see cref="IOverlayVisibility"/> is supplied (spec K8/K9) the feed follows the single
+/// <c>OverlayOnGame</c> switch: while it hides the overlay, frame events are dropped at the gate (the
+/// sequence counter does not even move) and each hidden edge broadcasts exactly one
+/// <c>{"boxes":[]}</c> payload, which is how OBS clears its stage — no traffic is wasted while the
+/// overlay is off. Turning the overlay back on sends the current snapshot immediately, and a client
+/// that connects while hidden is served an empty one, so a finished session's text never reappears in
+/// a Browser Source. Without a gate every frame is broadcast as before.
+/// </para>
+/// <para>
+/// Khi có <see cref="IOverlayVisibility"/> (spec K8/K9), feed theo đúng công tắc <c>OverlayOnGame</c>
+/// duy nhất: lúc công tắc ẩn overlay, event khung hình bị bỏ ngay tại gate (bộ đếm seq còn không chạy)
+/// và mỗi edge ẩn phát đúng một payload <c>{"boxes":[]}</c>, đó là cách OBS xóa sân khấu — không tốn
+/// traffic khi overlay đang tắt. Bật overlay lại gửi ngay snapshot hiện tại, và client kết nối lúc đang
+/// ẩn nhận snapshot rỗng, nên chữ của phiên đã tắt không bao giờ hiện lại trong Browser Source. Không
+/// có gate thì mọi khung hình vẫn được phát như trước.
 /// </para>
 /// <para>
 /// Each subscriber owns a bounded queue drained by its own writer task, so publishes only ever enqueue and
@@ -91,6 +110,7 @@ public sealed class OverlayFeedServer : IAsyncDisposable
     private static readonly Lazy<string?> OverlayFolderLazy = new(ResolveOverlayFolder);
 
     private readonly OverlayState _state;
+    private readonly IOverlayVisibility? _visibility;
     private readonly int _requestedPort;
     private readonly TimeSpan _heartbeat;
     private readonly ILogger<OverlayFeedServer>? _logger;
@@ -105,6 +125,19 @@ public sealed class OverlayFeedServer : IAsyncDisposable
     private int _startAttempted;
     private int _started;
     private int _disposed;
+
+    // Visibility gate (spec K8/K9): the visibility the server has already told its clients about
+    // (1 = hidden, so the stage it holds is empty). Written on each edge; read by the snapshot handed
+    // to a client that connects. It is deliberately NOT what OnStateChanged checks: that handler reads
+    // the live value, because a stop flips IsRunning before Clear() runs (PipelineController:297-300),
+    // and gating on the announced value would broadcast the Clear() frame and then the edge's clear
+    // payload — two empty payloads for one stop.
+    // Gate hiển thị (spec K8/K9): độ hiển thị mà server đã báo cho client của nó (1 = ẩn, tức sân khấu
+    // nó đang giữ là rỗng). Ghi ở mỗi edge; được đọc bởi snapshot trao cho client vừa kết nối. Cố tình
+    // KHÔNG dùng nó cho OnStateChanged: handler đó đọc giá trị trực tiếp, vì một lần dừng lật IsRunning
+    // TRƯỚC khi Clear() chạy (PipelineController:297-300), và gate theo giá trị đã-báo sẽ phát khung
+    // Clear() rồi tới payload xóa của edge — hai payload rỗng cho một lần dừng.
+    private int _hidden;
 
     /// <summary>
     /// The port actually bound after <see cref="StartAsync"/>; the requested port before that.
@@ -133,6 +166,17 @@ public sealed class OverlayFeedServer : IAsyncDisposable
     /// </param>
     /// <param name="heartbeat">Interval between SSE <c>:ping</c> comments; 15 s when null. / Chu kỳ giữa các chú thích <c>:ping</c>; 15 giây nếu null.</param>
     /// <param name="logger">Optional logger for start/accept failures. / Logger tùy chọn cho lỗi start/accept.</param>
+    /// <param name="visibility">
+    /// Optional visibility gate (spec K8/K9). When given, frames stop reaching subscribers while
+    /// <see cref="IOverlayVisibility.ShouldShowObs"/> is false, and each hidden edge sends exactly one
+    /// <c>{"boxes":[]}</c> payload so OBS clears its stage; a client that connects while hidden gets an
+    /// empty snapshot. <see langword="null"/> means "always visible" — every frame is broadcast, which
+    /// is the pre-gate behaviour.
+    /// Gate hiển thị tùy chọn (spec K8/K9). Khi được truyền, khung hình ngừng tới subscriber lúc
+    /// <see cref="IOverlayVisibility.ShouldShowObs"/> sai, và mỗi edge ẩn gửi đúng một payload
+    /// <c>{"boxes":[]}</c> để OBS xóa sân khấu; client kết nối lúc đang ẩn nhận snapshot rỗng.
+    /// <see langword="null"/> nghĩa là "luôn hiện" — mọi khung hình được phát, đúng hành vi trước gate.
+    /// </param>
     /// <exception cref="ArgumentOutOfRangeException">
     /// Thrown when <paramref name="port"/> leaves no room for the fallback range (1..65525) or
     /// <paramref name="heartbeat"/> is zero or negative.
@@ -140,9 +184,10 @@ public sealed class OverlayFeedServer : IAsyncDisposable
     /// <paramref name="heartbeat"/> bằng 0 hoặc âm.
     /// </exception>
     public OverlayFeedServer(OverlayState state, int port = 17863, TimeSpan? heartbeat = null,
-        ILogger<OverlayFeedServer>? logger = null)
+        ILogger<OverlayFeedServer>? logger = null, IOverlayVisibility? visibility = null)
     {
         _state = state ?? throw new ArgumentNullException(nameof(state));
+        _visibility = visibility;
         if (port is < 1 or > MaxPort - MaxPortOffset)
         {
             throw new ArgumentOutOfRangeException(nameof(port), port,
@@ -226,6 +271,15 @@ public sealed class OverlayFeedServer : IAsyncDisposable
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _cts.Token.Register(static l => { try { ((HttpListener?)l)?.Close(); } catch { } }, _listener);
         _state.Changed += OnStateChanged;
+        if (_visibility is not null)
+        {
+            // Seed from the current value so the first edge is measured against it: a server that
+            // starts while the overlay is hidden must not treat the next "shown" event as no change.
+            // Gieo từ giá trị hiện tại để edge đầu tiên được đo theo nó: server start lúc overlay đang
+            // ẩn không được coi event "hiện" kế tiếp là không đổi.
+            Volatile.Write(ref _hidden, _visibility.ShouldShowObs ? 0 : 1);
+            _visibility.Changed += OnVisibilityChanged;
+        }
         _acceptLoop = Task.Run(() => AcceptLoopAsync(_cts.Token));
         _heartbeatLoop = Task.Run(() => HeartbeatLoopAsync(_cts.Token));
         Volatile.Write(ref _started, 1);
@@ -234,11 +288,12 @@ public sealed class OverlayFeedServer : IAsyncDisposable
 
     /// <summary>
     /// Stops the listener and both loops, closes every SSE connection, and unsubscribes from
-    /// <see cref="OverlayState.Changed"/>. Safe to call multiple times; never blocks indefinitely on a
-    /// client whose write is stuck in the OS (its writer task is cancelled, bounded-waited, then abandoned).
+    /// <see cref="OverlayState.Changed"/> and from the visibility gate. Safe to call multiple times;
+    /// never blocks indefinitely on a client whose write is stuck in the OS (its writer task is
+    /// cancelled, bounded-waited, then abandoned).
     /// Dừng listener và hai vòng lặp, đóng mọi kết nối SSE, và gỡ đăng ký khỏi
-    /// <see cref="OverlayState.Changed"/>. Gọi nhiều lần vẫn an toàn; không bao giờ chặn vô hạn trên
-    /// client có lệnh ghi kẹt trong OS (task writer bị hủy, chờ có giới hạn, rồi bỏ).
+    /// <see cref="OverlayState.Changed"/> cùng gate hiển thị. Gọi nhiều lần vẫn an toàn; không bao giờ
+    /// chặn vô hạn trên client có lệnh ghi kẹt trong OS (task writer bị hủy, chờ có giới hạn, rồi bỏ).
     /// </summary>
     public async ValueTask DisposeAsync()
     {
@@ -248,6 +303,10 @@ public sealed class OverlayFeedServer : IAsyncDisposable
         }
 
         _state.Changed -= OnStateChanged;
+        if (_visibility is not null)
+        {
+            _visibility.Changed -= OnVisibilityChanged;
+        }
         var cts = _cts;
         if (cts is not null)
         {
@@ -467,7 +526,7 @@ public sealed class OverlayFeedServer : IAsyncDisposable
             // Soạn snapshot và đăng ký khi giữ cùng khóa mà broadcast copy danh sách client,
             // nên một publish rơi vào giữa lúc soạn và lúc đăng ký không còn bị lỡ — hoặc nó trước
             // snapshot, hoặc đến client này qua hàng đợi. Bản thân snapshot đi qua hàng đợi như mọi khung.
-            if (!client.TryEnqueue(ComposePayload(Interlocked.Read(ref _seq), _state.Latest)))
+            if (!client.TryEnqueue(ComposePayload(Interlocked.Read(ref _seq), HiddenNow() ? null : _state.Latest)))
             {
                 client.Dispose();
                 return;
@@ -479,6 +538,20 @@ public sealed class OverlayFeedServer : IAsyncDisposable
         // Response giữ mở cho đến khi writer bỏ nó (ghi lỗi/quá deadline/hàng đầy) hoặc server bị dispose.
     }
 
+    /// <summary>
+    /// Live gate read: true when a visibility gate was injected and says the overlay is hidden. While
+    /// hidden nothing of the current session reaches subscribers, so both the connecting client's
+    /// snapshot and every frame event must answer empty even though <see cref="OverlayState.Latest"/>
+    /// may still hold a frame (Task 8 showed a <c>frame.translated</c> still queued on stdio can
+    /// repopulate it after <see cref="OverlayState.Clear"/>).
+    /// Đọc gate trực tiếp: đúng khi có gate hiển thị được bơm và nó báo overlay đang ẩn. Khi đang ẩn,
+    /// không gì của phiên hiện tại tới subscriber, nên cả snapshot của client đang kết nối lẫn mọi event
+    /// khung hình phải trả rỗng dù <see cref="OverlayState.Latest"/> vẫn có thể còn khung hình (Task 8
+    /// cho thấy một <c>frame.translated</c> còn xếp hàng trên stdio có thể đổ lại nó sau
+    /// <see cref="OverlayState.Clear"/>).
+    /// </summary>
+    private bool HiddenNow() => _visibility is not null && !_visibility.ShouldShowObs;
+
     private static void CloseWithStatus(HttpListenerResponse response, int statusCode)
     {
         response.StatusCode = statusCode;
@@ -486,10 +559,37 @@ public sealed class OverlayFeedServer : IAsyncDisposable
         response.Close();
     }
 
+    /// <summary>
+    /// Handles one <see cref="OverlayState.Changed"/>: while the gate is hidden it returns before the
+    /// sequence counter moves (no work, no traffic), otherwise it forwards the current frame.
+    /// Xử lý một <see cref="OverlayState.Changed"/>: khi gate ẩn thì trả về trước khi bộ đếm seq chạy
+    /// (không tốn work, không có traffic), ngược lại chuyển tiếp khung hình hiện tại.
+    /// </summary>
     private void OnStateChanged()
     {
+        if (HiddenNow()) return;
         var seq = Interlocked.Increment(ref _seq);
         Broadcast(ComposePayload(seq, _state.Latest));
+    }
+
+    /// <summary>
+    /// Handles one visibility edge: the first (and only) payload the transition owes every connected
+    /// client — an empty <c>boxes</c> payload when the overlay goes hidden (the spec K9 clear OBS
+    /// needs), the current snapshot when it becomes visible again. Duplicate notifications change
+    /// nothing, so one pipeline stop that raises two pipeline events still clears exactly once.
+    /// Xử lý một edge hiển thị: payload đầu tiên (và duy nhất) mà transition nợ mọi client đang kết nối
+    /// — payload <c>boxes</c> rỗng khi overlay chuyển sang ẩn (lệnh xóa spec K9 mà OBS cần), snapshot hiện
+    /// tại khi nó hiện lại. Thông báo trùng lặp không đổi gì, nên một lần dừng pipeline nổ hai event
+    /// pipeline vẫn xóa đúng một lần.
+    /// </summary>
+    private void OnVisibilityChanged()
+    {
+        bool hide = HiddenNow();
+        int hideFlag = hide ? 1 : 0;
+        if (Interlocked.Exchange(ref _hidden, hideFlag) == hideFlag) return; // no edge / không có edge
+
+        var seq = Interlocked.Increment(ref _seq);
+        Broadcast(ComposePayload(seq, hide ? null : _state.Latest));
     }
 
     private void Broadcast(string payload)

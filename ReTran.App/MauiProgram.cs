@@ -34,6 +34,11 @@ namespace ReTran_App
 
             // OBS overlay feed: loopback server serving the transparent /overlay page + SSE /events.
             // Feed overlay OBS: server loopback phục vụ trang trong suốt /overlay + SSE /events.
+            // Một công tắc OverlayOnGame điều khiển cả overlay desktop lẫn feed OBS (spec K8): gate
+            // phải là singleton dùng chung, nếu không hai bề mặt sẽ thấy hai giá trị khác nhau.
+            // One OverlayOnGame switch drives both the desktop overlay and the OBS feed (spec K8): the
+            // gate must be one shared singleton, or the two surfaces would see different values.
+            builder.Services.AddSingleton<IOverlayVisibility, OverlayVisibility>();
             builder.Services.AddSingleton<OverlayFeedServer>();
 
             // Local game overlay: layered Win32 window + window/monitor anchor tracker.
