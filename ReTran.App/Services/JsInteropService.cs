@@ -92,6 +92,24 @@ public class JsInteropService : IAsyncDisposable
     /// <summary>Sets the accent color pair via the Vite module. Đặt cặp màu nhấn qua module Vite.</summary>
     public async ValueTask SetColorAsync(string colorId) => await InvokeVoidAsync("setColor", colorId);
 
+    /// <summary>
+    /// Toggles light/dark and returns the resolved theme (<c>"light"</c> or <c>"dark"</c>).
+    /// Đảo sáng/tối và trả về theme đã áp (<c>"light"</c> hoặc <c>"dark"</c>).
+    /// </summary>
+    public async ValueTask<string?> ToggleThemeAsync() => await InvokeAsync<string?>("toggleTheme");
+
+    /// <summary>Reads the persisted theme setting ("light", "dark" or "system"). Đọc theme đã lưu.</summary>
+    public async ValueTask<string?> GetThemeSettingAsync() => await InvokeAsync<string?>("getThemeSetting");
+
+    /// <summary>Sets the accent id ("amber", "jade" or "coral"). Đặt mã màu nhấn.</summary>
+    public async ValueTask SetAccentAsync(string accentId) => await InvokeVoidAsync("setAccent", accentId);
+
+    /// <summary>Reads the persisted accent id. Đọc mã màu nhấn đã lưu.</summary>
+    public async ValueTask<string?> GetAccentAsync() => await InvokeAsync<string?>("getAccent");
+
+    /// <summary>Copies text to the system clipboard. Sao chép văn bản vào clipboard hệ thống.</summary>
+    public async ValueTask CopyTextAsync(string text) => await InvokeVoidAsync("copyText", text);
+
     /// <summary>Reads the persisted UI language from WebView storage. Đọc ngôn ngữ UI đã lưu trong WebView storage.</summary>
     public async ValueTask<string?> GetLangAsync() => await InvokeAsync<string?>("getLang");
 

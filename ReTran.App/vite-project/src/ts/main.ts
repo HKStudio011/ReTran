@@ -1,6 +1,17 @@
 import '../css/style.css';
 
-export { applyTheme, applyColor, setTheme, setColor, initTheme } from './theme-manager'
+export {
+  applyTheme,
+  applyColor,
+  applyAccent,
+  setTheme,
+  setColor,
+  setAccent,
+  getThemeSetting,
+  getAccent,
+  toggleTheme,
+  initTheme,
+} from './theme-manager'
 
 /** Copies text to the clipboard. Sao chép văn bản vào clipboard. */
 export async function copyText(text: string): Promise<void> {

@@ -17,7 +17,9 @@
 
 /* 1. Base Tailwind - imported first for lowest priority */
 @import "./theme.css";
+@import "./fonts.css";
 @import "./utility.css";
+@import "./deck.css";
 
 @layer base {
   * {

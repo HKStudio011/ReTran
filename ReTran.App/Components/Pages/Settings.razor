@@ -1,189 +1,27 @@
 @page "/settings"
 @using ReTran_App.Services
-@using ReTran_App.Services.Update
-@inject ReTran_App.Services.I18nService L
-@inject ReTran_App.Services.AppSettingsService SettingsStore
-@inject UpdateCheckService Check
-@inject UpdateCoordinator Coordinator
-@inject ToastService Toast
-@inject IAppUpdateService Updates
+@inject I18nService L
 @implements IDisposable
 
 <PageTitle>@(L["settings.title"])</PageTitle>
 
-<div class="flex items-center justify-between mb-6">
-    <h1 class="text-2xl font-bold text-surface m-0">@(L["settings.title"])</h1>
-</div>
-
-<div class="space-y-4">
-    <Card Title="@(L["settings.card.provider"])">
-        <label class="flex flex-col gap-1.5 text-sm text-surface">
-            @(L["settings.label.provider"])
-            <select @bind="_model.Provider" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
-                <option value="google">@(L["settings.provider.google"])</option>
-                <option value="deepl" disabled>@(L["settings.provider.deepl"]) (@(L["settings.opt.comingSoon"]))</option>
-                <option value="llm" disabled>@(L["settings.provider.llm"]) (@(L["settings.opt.comingSoon"]))</option>
-            </select>
-        </label>
-        <label class="flex flex-col gap-1.5 text-sm text-surface">
-            @(L["settings.label.apiKey"])
-            <input type="text" @bind="_model.ApiKey" disabled="@(_model.Provider == "google")"
-                   class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary" />
-        </label>
-    </Card>
-
-    <Card Title="@(L["settings.card.lang"])">
-        <label class="flex flex-col gap-1.5 text-sm text-surface">
-            @(L["settings.label.src"])
-            <select @bind="_model.Src" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
-                @foreach (string lang in _srcOptions)
-                {
-                    <option value="@lang">@(lang == "auto" ? L["settings.opt.auto"] : I18nStrings.LanguageName(lang))</option>
-                }
-            </select>
-        </label>
-        <label class="flex flex-col gap-1.5 text-sm text-surface">
-            @(L["settings.label.dst"])
-            <select @bind="_model.Dst" class="w-full px-3 py-2 border rounded bg-background text-surface focus:outline-none focus:ring-2 focus:ring-primary">
-                @foreach (string lang in _dstOptions)
-                {
-                    <option value="@lang">@(I18nStrings.LanguageName(lang))</option>
-                }
-            </select>
-        </label>
-        <p class="text-sm text-secondary">@(L["settings.note.srcNextStart"])</p>
-    </Card>
-
-    @if (UpdateFeature.IsEnabled)
-    {
-        <Card Title="@(L["update.title"])">
-            <div class="text-sm">@(L["update.version"]): @_appVersion
-                @if (Check.IsUpdateAvailable)
-                {
-                    <span class="ml-1 rounded-full bg-warning px-2 py-0.5 text-xs">@(L["update.badge"])</span>
-                }
-            </div>
-            <div class="flex items-center gap-3 flex-wrap">
-                <button class="btn btn-primary" disabled="@_checking" @onclick="CheckAsync">@(L["update.check"])</button>
-                @if (Check.IsUpdateAvailable)
-                {
-                    <button class="btn btn-primary" disabled="@Coordinator.UpdateInProgress" @onclick="UpdateNowAsync">@(L["update.now"])</button>
-                }
-            </div>
-        </Card>
-    }
-
-    <div class="flex items-center gap-3 flex-wrap">
-        <button class="btn btn-primary" @onclick="Save">@(L["settings.btn.save"])</button>
-        @if (StatusText.Length > 0)
-        {
-            <span class="text-sm @(_statusKind == "saved" ? "text-secondary" : "text-danger")">@StatusText</span>
-        }
+<div class="rt-page">
+    <div class="rt-page-head">
+        <h1>@(L["settings.title"])</h1>
+    </div>
+    <div class="rt-panel">
+        <SettingsPanel />
     </div>
 </div>
 
 @code {
-    // Model mutable cho @bind — AppSettings là record init-only nên không bind trực tiếp được.
-    private sealed class SettingsModel
-    {
-        public string Provider { get; set; } = "google";
-        public string Src { get; set; } = "auto";
-        public string Dst { get; set; } = "vi";
-        public string? ApiKey { get; set; }
-    }
-
-    private static readonly string[] SrcCodes = ["auto", "en", "ja", "ko", "zh", "ru", "fr", "de", "es"];
-    private static readonly string[] DstCodes = ["vi", "en", "ja", "ko", "zh", "ru", "fr", "de", "es"];
-
-    private readonly SettingsModel _model = new();
-    private string[] _srcOptions = SrcCodes;
-    private string[] _dstOptions = DstCodes;
-    private string? _statusKind; // "saved" | "saveFailed" | null
-    private string _appVersion = string.Empty;
-    private bool _checking;
-
-    private string StatusText => _statusKind switch
-    {
-        "saved" => L["settings.status.saved"],
-        "saveFailed" => L["settings.status.saveFailed"],
-        _ => string.Empty,
-    };
-
     protected override void OnInitialized()
     {
-        AppSettings current = SettingsStore.Load();
-        _model.Provider = current.Provider;
-        _model.Src = current.Src;
-        _model.Dst = current.Dst;
-        _model.ApiKey = current.ApiKey;
-        _appVersion = AppVersionFormatter.Format(Updates.CurrentVersion);
-        // File ghi tay có thể chứa giá trị ngoài danh sách — thêm vào để select không bị trống.
-        if (Array.IndexOf(_srcOptions, current.Src) < 0) _srcOptions = [current.Src, .. _srcOptions];
-        if (Array.IndexOf(_dstOptions, current.Dst) < 0) _dstOptions = [current.Dst, .. _dstOptions];
-        L.Changed += OnLangChanged;
+        L.Changed += OnStateChanged;
         base.OnInitialized();
     }
 
-    private void Save()
-    {
-        try
-        {
-            SettingsStore.Save(new AppSettings(_model.Provider, _model.Src, _model.Dst, _model.ApiKey));
-            _statusKind = "saved";
-        }
-        catch (Exception)
-        {
-            _statusKind = "saveFailed";
-        }
-    }
+    private void OnStateChanged() => _ = InvokeAsync(StateHasChanged);
 
-    private void OnLangChanged() => _ = InvokeAsync(StateHasChanged);
-
-    private async Task CheckAsync()
-    {
-        if (_checking) return;
-        _checking = true;
-        try
-        {
-            // Bắt trạng thái TRƯỚC khi check: chuyển tiếp none→available sẽ bắn UpdateFound
-            // (MainLayout đã toast) — Settings chỉ toast khi user check lại update
-            // đã biết (không có chuyển tiếp) để làm phản hồi nút Check, tránh toast đôi
-            var wasAvailable = Check.IsUpdateAvailable;
-            var result = await Check.CheckOnceAsync();
-            if (result == UpdateCheckResult.UpdateAvailable && wasAvailable
-                && Check.AvailableRelease is { } release)
-            {
-                Toast.Show(string.Format(L["update.available"], release.TagName));
-            }
-            else if (result == UpdateCheckResult.AlreadyLatest)
-            {
-                Toast.Show(L["update.latest"]);
-            }
-            else if (result == UpdateCheckResult.Failed)
-            {
-                // User chủ động bấm Check → cần feedback lỗi (check nền 24h vẫn im lặng vì không có ai xem toast)
-                Toast.Show(L["update.checkFailed"], ToastSeverity.Error);
-            }
-        }
-        finally
-        {
-            _checking = false;
-        }
-    }
-
-    private void UpdateNowAsync()
-    {
-        // is { } guard: 24h loop có thể vừa xác nhận "bản mới nhất" và xoá release
-        // giữa lúc render nút và lúc bấm — chạy với release null sẽ bắt đầu update "ma"
-        // rồi fail ở download, toast "tải thất bại" sai bản chất
-        if (Check.AvailableRelease is not { } release) return;
-        // Double-click trước khi modal render: StartUpdateAsync lần 2 throw
-        // InvalidOperationException trên task fire-and-forget (unobserved) — chặn sớm tại UI
-        if (Coordinator.UpdateInProgress) return;
-        // Fire-and-forget: await sẽ giữ handler mở suốt thời gian download —
-        // modal hiển thị qua UpdateCoordinator.UpdateInProgress + event Changed
-        _ = Coordinator.StartUpdateAsync(release);
-    }
-
-    public void Dispose() => L.Changed -= OnLangChanged;
+    public void Dispose() => L.Changed -= OnStateChanged;
 }

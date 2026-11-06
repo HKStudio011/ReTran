@@ -14,41 +14,29 @@
     --color-dark: #343a40;
 }
 
-/* LIGHT THEME (default) */
+/* LIGHT THEME (default) — signal-deck palette */
 :root, [data-theme="light"] {
-    --background: #ffffff;
-    --surface: #141414;
+    --background: #E2E8E3;
+    --surface: #07201E;
+    --primary: #A85F00;
+    --secondary: #3D5956;
     --crack-stroke: color-mix(in srgb, var(--color-dark) 40%, transparent);
 }
 
 /* DARK THEME */
 [data-theme="dark"] {
-    --background: #141414;
-    --surface: #ffffff;
+    --background: #0A191C;
+    --surface: #EFEAD9;
+    --primary: #FFB020;
+    --secondary: #94A9A5;
     --crack-stroke: color-mix(in srgb, var(--color-light) 40%, transparent);
 }
 
-/* X/O COLOR PAIRS */
-:root, [data-color="default"] {
-    --primary: #007bff;
-    --secondary: #6c757d;
-}
+/* ACCENT PAIRS — amber is the default; jade / coral override the tally colour. */
+[data-theme="light"][data-accent="jade"] { --primary: #087A60; }
+[data-theme="dark"][data-accent="jade"]  { --primary: #37D6A8; }
+[data-theme="light"][data-accent="coral"] { --primary: #B4452B; }
+[data-theme="dark"][data-accent="coral"]  { --primary: #FF7A59; }
 
-/* EMERALD */
-[data-color="emerald"] {
-    --primary: #16a34a;
-    --secondary: #64748b;
-}
-
-/* VIOLET */
-[data-color="violet"] {
-    --primary: #7c3aed;
-    --secondary: #64748b;
-}
-
-/* SUNSET */
-[data-color="sunset"] {
-    --primary: #ea580c;
-    --secondary: #57534c;
-}
-
+/* Legacy data-color values stay inert so an old localStorage entry cannot
+   break theming; the new attribute is data-accent. */
