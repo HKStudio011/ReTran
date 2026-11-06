@@ -59,15 +59,19 @@ namespace ReTran_App.Services.OverlayFeed;
 /// <c>{"boxes":[]}</c> payload, which is how OBS clears its stage — no traffic is wasted while the
 /// overlay is off. Turning the overlay back on sends the current snapshot immediately, and a client
 /// that connects while hidden is served an empty one, so a finished session's text never reappears in
-/// a Browser Source. Without a gate every frame is broadcast as before.
+/// a Browser Source. The gate is re-read under the same lock that queues the payload, so a frame that
+/// loses the race with a hidden edge is dropped instead of landing after that edge's clear payload
+/// (and it burns no sequence number). Without a gate every frame is broadcast as before.
 /// </para>
 /// <para>
 /// Khi có <see cref="IOverlayVisibility"/> (spec K8/K9), feed theo đúng công tắc <c>OverlayOnGame</c>
 /// duy nhất: lúc công tắc ẩn overlay, event khung hình bị bỏ ngay tại gate (bộ đếm seq còn không chạy)
 /// và mỗi edge ẩn phát đúng một payload <c>{"boxes":[]}</c>, đó là cách OBS xóa sân khấu — không tốn
 /// traffic khi overlay đang tắt. Bật overlay lại gửi ngay snapshot hiện tại, và client kết nối lúc đang
-/// ẩn nhận snapshot rỗng, nên chữ của phiên đã tắt không bao giờ hiện lại trong Browser Source. Không
-/// có gate thì mọi khung hình vẫn được phát như trước.
+/// ẩn nhận snapshot rỗng, nên chữ của phiên đã tắt không bao giờ hiện lại trong Browser Source. Gate
+/// được đọc lại dưới đúng khóa dùng để xếp payload, nên khung hình thua cuộc đua với một edge ẩn bị bỏ
+/// thay vì rơi xuống sau payload xóa của edge đó (và không tiêu tốn số seq). Không có gate thì mọi khung
+/// hình vẫn được phát như trước.
 /// </para>
 /// <para>
 /// Each subscriber owns a bounded queue drained by its own writer task, so publishes only ever enqueue and
@@ -561,26 +565,31 @@ public sealed class OverlayFeedServer : IAsyncDisposable
 
     /// <summary>
     /// Handles one <see cref="OverlayState.Changed"/>: while the gate is hidden it returns before the
-    /// sequence counter moves (no work, no traffic), otherwise it forwards the current frame.
+    /// sequence counter moves (no work, no traffic), otherwise it forwards the current frame. That
+    /// check is only a fast path: <see cref="BroadcastFrame"/> re-reads the gate under the client lock.
     /// Xử lý một <see cref="OverlayState.Changed"/>: khi gate ẩn thì trả về trước khi bộ đếm seq chạy
-    /// (không tốn work, không có traffic), ngược lại chuyển tiếp khung hình hiện tại.
+    /// (không tốn work, không có traffic), ngược lại chuyển tiếp khung hình hiện tại. Kiểm tra đó chỉ là
+    /// đường nhanh: <see cref="BroadcastFrame"/> đọc lại gate dưới khóa client.
     /// </summary>
     private void OnStateChanged()
     {
-        if (HiddenNow()) return;
-        var seq = Interlocked.Increment(ref _seq);
-        Broadcast(ComposePayload(seq, _state.Latest));
+        if (HiddenNow()) return; // fast path only / chỉ là đường nhanh — see BroadcastFrame
+        BroadcastFrame(_state.Latest);
     }
 
     /// <summary>
     /// Handles one visibility edge: the first (and only) payload the transition owes every connected
     /// client — an empty <c>boxes</c> payload when the overlay goes hidden (the spec K9 clear OBS
     /// needs), the current snapshot when it becomes visible again. Duplicate notifications change
-    /// nothing, so one pipeline stop that raises two pipeline events still clears exactly once.
+    /// nothing, so one pipeline stop that raises two pipeline events still clears exactly once. The
+    /// payload goes through <see cref="BroadcastFrame"/>: the clear it owes can never be gated away, and
+    /// a shown edge whose gate flips back inside the lock is dropped for the next hide edge to clear.
     /// Xử lý một edge hiển thị: payload đầu tiên (và duy nhất) mà transition nợ mọi client đang kết nối
     /// — payload <c>boxes</c> rỗng khi overlay chuyển sang ẩn (lệnh xóa spec K9 mà OBS cần), snapshot hiện
     /// tại khi nó hiện lại. Thông báo trùng lặp không đổi gì, nên một lần dừng pipeline nổ hai event
-    /// pipeline vẫn xóa đúng một lần.
+    /// pipeline vẫn xóa đúng một lần. Payload đi qua <see cref="BroadcastFrame"/>: lệnh xóa mà transition
+    /// nợ không bao giờ bị gate chặn, còn edge hiện mà gate lật lại bên trong khóa thì bị bỏ để edge ẩn
+    /// kế tiếp gửi lệnh xóa.
     /// </summary>
     private void OnVisibilityChanged()
     {
@@ -588,25 +597,89 @@ public sealed class OverlayFeedServer : IAsyncDisposable
         int hideFlag = hide ? 1 : 0;
         if (Interlocked.Exchange(ref _hidden, hideFlag) == hideFlag) return; // no edge / không có edge
 
-        var seq = Interlocked.Increment(ref _seq);
-        Broadcast(ComposePayload(seq, hide ? null : _state.Latest));
+        BroadcastFrame(hide ? null : _state.Latest);
     }
 
-    private void Broadcast(string payload)
+    /// <summary>
+    /// Publishes one payload — a frame, or the empty stage (<paramref name="frame"/> is
+    /// <see langword="null"/>) a hidden edge sends to clear OBS: the sequence number moves and the
+    /// payload is queued to every subscriber while the client lock is held, and the visibility gate is
+    /// re-read inside that same lock. Re-reading is what makes the gate decision atomic with the
+    /// enqueue: a frame thread preempted between its own <see cref="HiddenNow"/> check and this method
+    /// can no longer land its frame after the hidden edge's clear payload, which would leave the old
+    /// text on a stage with no clear left to remove it. A payload the re-read rejects burns no sequence
+    /// number, so the counter stays monotonic and gapless exactly as it does for frames the gate stops
+    /// before this method. An empty payload is never rejected: it is the clear the transition owes.
+    /// </summary>
+    /// <remarks>
+    /// Publish một payload — một khung hình, hoặc sân khấu rỗng (<paramref name="frame"/> là
+    /// <see langword="null"/>) mà edge ẩn gửi để xóa OBS: bộ đếm seq chạy và payload được xếp vào hàng
+    /// của mọi subscriber khi đang giữ khóa client, và gate hiển thị được đọc lại ngay trong cùng khóa
+    /// đó. Đọc lại chính là điều làm quyết định gate trở nên atomic với việc xếp hàng: một thread khung
+    /// hình bị preempt giữa lệnh <see cref="HiddenNow"/> của nó và method này không còn có thể đưa khung
+    /// hình của nó xuống sau payload xóa của edge ẩn, điều sẽ để chữ cũ trên sân khấu mà không còn lệnh
+    /// xóa nào gỡ nó đi. Payload bị đọc lại từ chối không tiêu tốn số seq, nên bộ đếm vẫn đơn điệu và
+    /// không thủng, đúng như với các khung hình bị gate chặn trước method này. Payload rỗng thì không bao
+    /// giờ bị từ chối: nó chính là lệnh xóa mà transition phải trả.
+    /// </remarks>
+    private void BroadcastFrame(OverlayFrame? frame)
     {
-        SseClient[] clients;
+        List<SseClient>? stalled;
         lock (_gate)
         {
-            clients = [.. _clients];
+            // Only a payload carrying boxes can be gated away; an empty one is always allowed, so the
+            // hidden edge's clear can never be lost by its own re-check.
+            // Chỉ payload mang box mới bị gate chặn; payload rỗng luôn được đi, nên lệnh xóa của edge ẩn
+            // không bao giờ bị chính phép đọc lại của nó làm mất.
+            if (frame is not null && HiddenNow()) return;
+
+            // seq moves only for a payload that is actually queued. / seq chỉ chạy cho payload thật sự được xếp.
+            stalled = EnqueueLocked(ComposePayload(Interlocked.Increment(ref _seq), frame));
         }
-        foreach (var client in clients)
+        DropStalled(stalled);
+    }
+
+    // Ungated on purpose: a :ping comment carries no boxes, and keeping every connection alive while
+    // the gate hides the stage is what lets a Browser Source show the next session without reconnecting.
+    // Cố tình không gate: chú thích :ping không mang box, và giữ mọi kết nối sống lúc gate ẩn sân khấu
+    // chính là điều giúp Browser Source hiển thị phiên kế tiếp mà không phải kết nối lại.
+    private void Broadcast(string payload)
+    {
+        List<SseClient>? stalled;
+        lock (_gate)
         {
-            // Enqueue-only: a full queue means a stalled subscriber — drop it, never block.
-            // Chỉ đưa vào hàng: hàng đầy nghĩa là subscriber chết cứng — bỏ nó, không bao giờ chặn.
+            stalled = EnqueueLocked(payload);
+        }
+        DropStalled(stalled);
+    }
+
+    // Queues one payload to every registered subscriber; the caller must hold _gate. Enqueue-only: a
+    // full queue means a stalled subscriber, and it is collected here rather than dropped in place —
+    // DropClient disposes the client, and the lock must not be held over that.
+    // Xếp một payload vào hàng của mọi subscriber đã đăng ký; caller phải giữ _gate. Chỉ đưa vào hàng:
+    // hàng đầy nghĩa là subscriber chết cứng, và nó được gom ở đây thay vì bị bỏ ngay tại chỗ — DropClient
+    // dispose client, và không được giữ khóa qua việc đó.
+    private List<SseClient>? EnqueueLocked(string payload)
+    {
+        List<SseClient>? stalled = null;
+        foreach (var client in _clients)
+        {
             if (!client.TryEnqueue(payload))
             {
-                DropClient(client);
+                (stalled ??= []).Add(client);
             }
+        }
+        return stalled;
+    }
+
+    // Drops the subscribers EnqueueLocked collected, once _gate is released.
+    // Bỏ các subscriber mà EnqueueLocked gom lại, sau khi _gate đã nhả.
+    private void DropStalled(List<SseClient>? stalled)
+    {
+        if (stalled is null) return;
+        foreach (var client in stalled)
+        {
+            DropClient(client);
         }
     }
 

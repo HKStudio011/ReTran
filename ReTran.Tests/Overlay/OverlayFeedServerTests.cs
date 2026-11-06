@@ -245,6 +245,14 @@ public sealed class OverlayFeedServerTests
         return doc.RootElement.GetProperty("boxes")[0].GetProperty("text").GetString() ?? string.Empty;
     }
 
+    // The feed's own sequence number — a suppressed payload must not move it.
+    // Số seq của chính feed — một payload bị chặn không được làm nó chạy.
+    private static long SeqOf(string payload)
+    {
+        using var doc = JsonDocument.Parse(payload);
+        return doc.RootElement.GetProperty("seq").GetInt64();
+    }
+
     // One frame holding a single named box — the name is what a test matches the SSE payload against.
     // Một khung hình chứa đúng một box có tên — tên là thứ test dùng để so với payload SSE.
     private static OverlayFrame FrameWithBox(string text) => new(1920, 1080, DateTime.UtcNow,
@@ -650,6 +658,65 @@ public sealed class OverlayFeedServerTests
     }
 
     [Fact]
+    public async Task FramePreemptedBetweenGateCheckAndEnqueue_NeverLandsAfterTheClear()
+    {
+        // The reported interleaving, made deterministic: the publish thread's own gate read is parked, so
+        // the hidden edge and its clear payload land while that thread still sits between the check and
+        // the enqueue. The payload it wanted to queue must be dropped by the gate re-check under the
+        // client lock, and it must not have burned a sequence number either.
+        // Đúng interleaving bị báo lỗi, được làm cho tất định: phép đọc gate của thread publish bị kẹt, nên
+        // edge ẩn và payload xóa của nó rơi xuống khi thread đó vẫn còn nằm giữa kiểm tra và xếp hàng.
+        // Payload nó muốn xếp phải bị phép đọc lại gate dưới khóa client bỏ, và cũng không được tiêu tốn
+        // số seq.
+        var state = new OverlayState();
+        var gate = new ParkingGateVisibility();
+        await using var server = new OverlayFeedServer(state, FreePort(), visibility: gate);
+        await server.StartAsync(TestContext.Current.CancellationToken);
+
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        await using var events = await SseCollector.OpenAsync(http, server.Port);
+        await events.NextEventAsync("initial snapshot");
+
+        gate.ParkNextRead();
+        // The publish runs on its own thread: parking its gate read must not starve the thread pool.
+        // Publish chạy trên thread riêng: việc kẹt phép đọc gate của nó không được làm đói thread pool.
+        var published = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var publisher = new Thread(() =>
+        {
+            state.Publish(FrameWithBox("preempted"));
+            published.TrySetResult();
+        })
+        { IsBackground = true };
+        publisher.Start();
+
+        await gate.Parked.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        // The user turns the overlay off while that publish is parked inside its gate check.
+        // Người dùng tắt overlay ngay lúc lệnh publish đang kẹt trong phép kiểm tra gate của nó.
+        gate.HideWithoutEdge();
+        gate.RaiseEdge();
+        string clear = await events.NextEventAsync("the hidden edge's clear");
+        Assert.Equal(0, BoxCount(clear));
+        long clearSeq = SeqOf(clear);
+
+        gate.Release();
+        var resumed = await Task.WhenAny(published.Task, Task.Delay(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+        Assert.True(resumed == published.Task, "The parked publish never resumed. / Publish bị kẹt không bao giờ chạy tiếp.");
+
+        await events.AssertSilenceAsync(TimeSpan.FromMilliseconds(1000), "the preempted frame after the clear");
+
+        // Turning the overlay back on delivers the frame that was waiting with the number right after the
+        // clear: the dropped payload left the counter untouched.
+        // Bật overlay lại trả chính khung hình đã chờ với số ngay sau lệnh xóa: payload bị bỏ không đụng gì
+        // bộ đếm.
+        gate.ShowWithoutEdge();
+        gate.RaiseEdge();
+        string shown = await events.NextEventAsync("the shown edge");
+        Assert.Equal("preempted", FirstBoxText(shown));
+        Assert.Equal(clearSeq + 1, SeqOf(shown));
+    }
+
+    [Fact]
     public async Task ClientConnecting_WhileHidden_GetsEmptySnapshot()
     {
         // Latest still holds a frame (a frame.translated queued on stdio can repopulate it after
@@ -899,6 +966,81 @@ public sealed class OverlayFeedServerTests
                 Changed?.Invoke();
             }
         }
+    }
+
+    /// <summary>
+    /// Gate double that parks one chosen read inside <see cref="ShouldShowObs"/>: it answers from the value
+    /// it read <em>before</em> parking, which is exactly the state of a thread preempted between its gate
+    /// check and the enqueue. <see cref="HideWithoutEdge"/>/<see cref="ShowWithoutEdge"/> change the value
+    /// with no edge — the flip that parked read is stale about — and <see cref="RaiseEdge"/> announces it
+    /// the way the real <see cref="OverlayVisibility"/> does.
+    /// Bản thử gate kẹt một lần đọc được chọn bên trong <see cref="ShouldShowObs"/>: nó trả lời theo giá trị
+    /// đọc <em>trước</em> lúc kẹt, đúng bằng trạng thái của một thread bị preempt giữa kiểm tra gate và việc
+    /// xếp hàng. <see cref="HideWithoutEdge"/>/<see cref="ShowWithoutEdge"/> đổi giá trị mà không nổ edge —
+    /// cú lật mà lần đọc đang kẹt bị cũ so với nó — còn <see cref="RaiseEdge"/> báo lại edge đó đúng như
+    /// <see cref="OverlayVisibility"/> thật.
+    /// </summary>
+    private sealed class ParkingGateVisibility : IOverlayVisibility
+    {
+        // Monitor (not a Task) for the hold: the parked getter answers inside a property, and a bounded
+        // Monitor wait cannot hang the suite even if the feed never resumes it.
+        // Dùng Monitor (không phải Task) cho chỗ kẹt: getter bị kẹt chạy bên trong một property, và một
+        // Monitor wait có giới hạn không thể treo cả bộ test kể cả khi feed không chạy tiếp.
+        private readonly object _holdLock = new();
+        private TaskCompletionSource _parked = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _armed;
+        private int _released;
+        private int _shown = 1;
+
+        public event Action? Changed;
+
+        /// <summary>Completes once the armed read is parked. / Hoàn tất khi lần đọc đã được vũ trang đang kẹt.</summary>
+        public Task Parked => _parked.Task;
+
+        public bool ShouldShowObs
+        {
+            get
+            {
+                bool shown = Volatile.Read(ref _shown) == 1;
+                if (Interlocked.Exchange(ref _armed, 0) != 1) return shown;
+
+                _parked.TrySetResult();
+                lock (_holdLock)
+                {
+                    while (Volatile.Read(ref _released) == 0 && Monitor.Wait(_holdLock, TimeSpan.FromSeconds(5)))
+                    {
+                    }
+                }
+                return shown; // the value from before the flip / giá trị trước cú lật
+            }
+        }
+
+        /// <summary>Arms the next read to park. / Vũ trang để lần đọc kế tiếp kẹt lại.</summary>
+        public void ParkNextRead()
+        {
+            Volatile.Write(ref _released, 0);
+            _parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            Volatile.Write(ref _armed, 1);
+        }
+
+        /// <summary>Frees the parked read. / Giải phóng lần đọc đang kẹt.</summary>
+        public void Release()
+        {
+            Volatile.Write(ref _released, 1);
+            lock (_holdLock)
+            {
+                Monitor.PulseAll(_holdLock);
+            }
+        }
+
+        /// <summary>Flips the gate off without an edge. / Lật gate sang ẩn mà không nổ edge.</summary>
+        public void HideWithoutEdge() => Volatile.Write(ref _shown, 0);
+
+        /// <summary>Flips the gate back on without an edge. / Lật gate sang hiện mà không nổ edge.</summary>
+        public void ShowWithoutEdge() => Volatile.Write(ref _shown, 1);
+
+        /// <summary>Announces the current value as an edge, like the real gate. / Báo giá trị hiện tại như một edge, giống gate thật.</summary>
+        public void RaiseEdge() => Changed?.Invoke();
     }
 
     /// <summary>
