@@ -144,4 +144,83 @@ internal static class NativeMethods
     /// <summary>Returns the DPI of the monitor hosting a window. Trả về DPI của màn hình chứa cửa sổ.</summary>
     [DllImport("user32.dll")]
     internal static extern uint GetDpiForWindow(nint hWnd);
+
+    // ---------------------------------------------------------------------------------------
+    // DWM thumbnail fallback: some DirectX windows ignore WM_PRINT, so PrintWindow fails.
+    // Rendering a DWM thumbnail of the source into a hidden helper window and printing that
+    // helper recovers the live content without a graphics-capture hook.
+    // Dự phòng DWM thumbnail: một số cửa sổ DirectX bỏ qua WM_PRINT nên PrintWindow thất bại.
+    // Vẽ thumbnail DWM của nguồn vào một cửa sổ phụ ẩn rồi PrintWindow cửa sổ đó sẽ lấy lại
+    // nội dung sống mà không cần hook capture đồ hoạ.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>Popup window style (WS_POPUP). Kiểu cửa sổ popup (WS_POPUP).</summary>
+    internal const int WS_POPUP = unchecked((int)0x80000000);
+
+    /// <summary>Tool-window extended style: no taskbar entry (WS_EX_TOOLWINDOW). Kiểu mở rộng tool-window: không lên taskbar (WS_EX_TOOLWINDOW).</summary>
+    internal const int WS_EX_TOOLWINDOW = 0x00000080;
+
+    /// <summary>Do not activate the window on show (WS_EX_NOACTIVATE). Không kích hoạt cửa sổ khi hiện (WS_EX_NOACTIVATE).</summary>
+    internal const int WS_EX_NOACTIVATE = 0x08000000;
+
+    /// <summary>Shows the window without activating it (SW_SHOWNA). Hiện cửa sổ không kích hoạt (SW_SHOWNA).</summary>
+    internal const int SW_SHOWNA = 8;
+
+    /// <summary>Thumbnail flag: rcDestination is valid. Cờ thumbnail: rcDestination hợp lệ.</summary>
+    internal const int DWM_TNP_RECTDESTINATION = 0x00000001;
+
+    /// <summary>Thumbnail flag: opacity is valid. Cờ thumbnail: opacity hợp lệ.</summary>
+    internal const int DWM_TNP_OPACITY = 0x00000004;
+
+    /// <summary>Thumbnail flag: fVisible is valid. Cờ thumbnail: fVisible hợp lệ.</summary>
+    internal const int DWM_TNP_VISIBLE = 0x00000008;
+
+    /// <summary>Thumbnail flag: fSourceClientAreaOnly is valid. Cờ thumbnail: fSourceClientAreaOnly hợp lệ.</summary>
+    internal const int DWM_TNP_SOURCECLIENTAREAONLY = 0x00000010;
+
+    /// <summary>
+    /// DWM_THUMBNAIL_PROPERTIES; BOOL fields are 4-byte ints, matching the native layout
+    /// (a C# <see langword="bool"/> would silently shrink the struct and corrupt the call).
+    /// DWM_THUMBNAIL_PROPERTIES; trường BOOL là int 4 byte đúng bố cục native (dùng
+    /// <see langword="bool"/> C# sẽ làm struct ngắn đi và hỏng lời gọi).
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct DWM_THUMBNAIL_PROPERTIES
+    {
+        internal int dwFlags;
+        internal RECT rcDestination;
+        internal RECT rcSource;
+        internal byte opacity;
+        internal int fVisible;
+        internal int fSourceClientAreaOnly;
+    }
+
+    /// <summary>Creates a window of a system class (helper for the DWM thumbnail). Tạo cửa sổ thuộc lớp hệ thống (cửa sổ phụ cho DWM thumbnail).</summary>
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    internal static extern nint CreateWindowExW(
+        int dwExStyle, string lpClassName, string lpWindowName, int dwStyle,
+        int x, int y, int nWidth, int nHeight,
+        nint hWndParent, nint hMenu, nint hInstance, nint lpParam);
+
+    /// <summary>Shows/hides a window. Hiện/ẩn cửa sổ.</summary>
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool ShowWindow(nint hWnd, int nCmdShow);
+
+    /// <summary>Destroys a window. Huỷ cửa sổ.</summary>
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool DestroyWindow(nint hWnd);
+
+    /// <summary>Registers a thumbnail of the source window into the destination window. Đăng ký thumbnail của cửa sổ nguồn vào cửa sổ đích.</summary>
+    [DllImport("dwmapi.dll")]
+    internal static extern int DwmRegisterThumbnail(nint dest, nint src, out nint thumb);
+
+    /// <summary>Removes a registered thumbnail. Gỡ thumbnail đã đăng ký.</summary>
+    [DllImport("dwmapi.dll")]
+    internal static extern int DwmUnregisterThumbnail(nint thumb);
+
+    /// <summary>Updates thumbnail properties (destination rect, visibility, opacity). Cập nhật thuộc tính thumbnail (rect đích, hiển thị, độ mờ).</summary>
+    [DllImport("dwmapi.dll")]
+    internal static extern int DwmUpdateThumbnailProperties(nint thumb, ref DWM_THUMBNAIL_PROPERTIES props);
 }

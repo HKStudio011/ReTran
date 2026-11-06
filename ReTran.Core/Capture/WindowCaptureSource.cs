@@ -16,11 +16,17 @@ using Microsoft.Extensions.Logging;
 public sealed record WindowInfo(nint Hwnd, string Title, int Width, int Height);
 
 /// <summary>
-/// Per-window capture source backed by PrintWindow/BitBlt GDI on a dedicated background thread.
-/// Nguồn chụp từng cửa sổ dùng PrintWindow/BitBlt GDI trên một luồng nền riêng.
+/// Per-window capture source backed by PrintWindow GDI on a dedicated background thread, with a
+/// DWM-thumbnail fallback for DirectX windows that ignore WM_PRINT (PrintWindow fails).
+/// Nguồn chụp từng cửa sổ dùng PrintWindow GDI trên một luồng nền riêng, kèm dự phòng DWM
+/// thumbnail cho cửa sổ DirectX bỏ qua WM_PRINT (PrintWindow thất bại).
 /// </summary>
 public class WindowCaptureSource : ICaptureSource
 {
+    /// <summary>Off-screen position of the DWM helper window (no visual flash). Vị trí ngoài màn hình của cửa sổ phụ DWM (không gây nháy hình).</summary>
+    private const int DwmHelperX = -32000;
+    private const int DwmHelperY = -32000;
+
     private readonly WindowTarget _target;
     private readonly ILogger? _logger;
     private readonly int _fps;
@@ -29,6 +35,14 @@ public class WindowCaptureSource : ICaptureSource
     private Thread? _thread;
     private volatile bool _running;
     private bool _disposed;
+
+    // DWM-thumbnail fallback state; touched only on the capture thread.
+    // Trạng thái dự phòng DWM thumbnail; chỉ dùng trên luồng chụp.
+    private nint _dwmDest;
+    private nint _dwmThumb;
+    private int _dwmWidth;
+    private int _dwmHeight;
+    private bool _dwmUnavailable;
 
     private static int s_dpiAwarenessAttempted;
 
@@ -74,6 +88,7 @@ public class WindowCaptureSource : ICaptureSource
         // DPI: đăng ký Per-Monitor-V2 một lần (best effort) trước mọi phép đo kích
         // thước, để GetClientRect/kích thước DIB tính theo pixel vật lý.
         EnsureDpiAwareness();
+        _dwmUnavailable = false; // a new session may retry the fallback. phiên mới được thử lại dự phòng.
 
         _cts = new CancellationTokenSource();
         var token = _cts.Token;
@@ -205,15 +220,18 @@ public class WindowCaptureSource : ICaptureSource
         }
         finally
         {
+            ReleaseDwmThumbnail();
             _running = false;
         }
     }
 
     /// <summary>
     /// One capture attempt: sizes via GetClientRect (0-size → log + skip, no throw), renders via PrintWindow
-    /// into a 32-bit top-down DIB, reads back with GetDIBits honoring stride, and raises FrameArrived.
+    /// (or the DWM-thumbnail fallback for windows that ignore WM_PRINT) into a 32-bit top-down DIB,
+    /// reads back with GetDIBits honoring stride, and raises FrameArrived.
     /// Một lần thử chụp: đo kích thước qua GetClientRect (0-size → log + bỏ qua, không throw), vẽ qua PrintWindow
-    /// vào DIB 32-bit top-down, đọc lại bằng GetDIBits theo stride, rồi kích hoạt FrameArrived.
+    /// (hoặc dự phòng DWM thumbnail cho cửa sổ bỏ qua WM_PRINT) vào DIB 32-bit top-down, đọc lại
+    /// bằng GetDIBits theo stride, rồi kích hoạt FrameArrived.
     /// </summary>
     /// <returns>True when a frame was raised; false when skipped. True khi đã phát frame; false khi bỏ qua.</returns>
     private bool CaptureOnce()
@@ -280,12 +298,19 @@ public class WindowCaptureSource : ICaptureSource
                     nint hOld = NativeMethods.SelectObject(hdcMem, hBmp);
                     try
                     {
-                        bool ok = NativeMethods.PrintWindow(hwnd, hdcMem, NativeMethods.PW_RENDERFULLCONTENT);
-                        if (!ok)
+                        // Fast path only while no DWM fallback is active; once the window proved
+                        // unprintable, the thumbnail path is used directly.
+                        // Chỉ thử đường nhanh khi chưa bật dự phòng DWM; khi cửa sổ đã chứng minh
+                        // không in được, dùng thẳng đường thumbnail.
+                        bool ok = _dwmDest == 0
+                            && NativeMethods.PrintWindow(hwnd, hdcMem, NativeMethods.PW_RENDERFULLCONTENT);
+                        if (!ok && _dwmDest == 0)
                             ok = NativeMethods.PrintWindow(hwnd, hdcMem, 0); // retry with legacy flag 0. Thử lại với cờ legacy 0.
-                        if (!ok)
+                        if (!ok && !DrawViaDwmThumbnail(hwnd, hdcMem, width, height))
                         {
-                            LogWarning("PrintWindow failed for HWND {Hwnd} — frame skipped.", hwnd);
+                            LogWarning(
+                                "PrintWindow failed for HWND {Hwnd} and the DWM thumbnail fallback is unavailable — frame skipped.",
+                                hwnd);
                             return false;
                         }
 
@@ -330,6 +355,111 @@ public class WindowCaptureSource : ICaptureSource
         {
             NativeMethods.ReleaseDC(nint.Zero, hdcScreen);
         }
+    }
+
+    /// <summary>
+    /// Draws the source window into <paramref name="hdcMem"/> through a DWM thumbnail hosted by
+    /// an off-screen helper window. Used when the source ignores WM_PRINT (DirectX/Unity
+    /// windows): DWM keeps rendering the window's surface even while it is behind other windows.
+    /// Vẽ cửa sổ nguồn vào <paramref name="hdcMem"/> qua thumbnail DWM nằm trên một cửa sổ phụ
+    /// ngoài màn hình. Dùng khi nguồn bỏ qua WM_PRINT (cửa sổ DirectX/Unity): DWM vẫn vẽ bề mặt
+    /// cửa sổ ngay cả khi nó bị các cửa sổ khác che.
+    /// </summary>
+    /// <param name="hwnd">Source window handle. Handle cửa sổ nguồn.</param>
+    /// <param name="hdcMem">Memory DC with the destination DIB selected. Memory DC đã chọn DIB đích.</param>
+    /// <param name="width">Client width in pixels. Chiều rộng vùng client (pixel).</param>
+    /// <param name="height">Client height in pixels. Chiều cao vùng client (pixel).</param>
+    /// <returns>True when the thumbnail was drawn; false when the fallback is unavailable. True khi đã vẽ được; false khi không dùng được dự phòng.</returns>
+    private bool DrawViaDwmThumbnail(nint hwnd, nint hdcMem, int width, int height)
+    {
+        if (_dwmUnavailable) return false;
+
+        // Resolution changes invalidate the destination rect; rebuild the helper.
+        // Đổi độ phân giải làm rect đích vô hiệu; dựng lại cửa sổ phụ.
+        if (_dwmDest != 0 && (_dwmWidth != width || _dwmHeight != height))
+            ReleaseDwmThumbnail();
+
+        if (_dwmDest == 0)
+        {
+            nint dest = NativeMethods.CreateWindowExW(
+                NativeMethods.WS_EX_TOOLWINDOW | NativeMethods.WS_EX_NOACTIVATE,
+                "Static", string.Empty, NativeMethods.WS_POPUP,
+                DwmHelperX, DwmHelperY, width, height,
+                0, 0, 0, 0);
+            if (dest == 0)
+            {
+                _dwmUnavailable = true;
+                LogWarning("DWM fallback: CreateWindowEx failed for HWND {Hwnd} — frames will be skipped.", hwnd);
+                return false;
+            }
+
+            NativeMethods.ShowWindow(dest, NativeMethods.SW_SHOWNA);
+            int hr = NativeMethods.DwmRegisterThumbnail(dest, hwnd, out nint thumb);
+            if (hr != 0)
+            {
+                NativeMethods.DestroyWindow(dest);
+                _dwmUnavailable = true;
+                LogWarning(
+                    "DWM fallback: DwmRegisterThumbnail failed for HWND {Hwnd} (hr 0x{Hr:X8}) — frames will be skipped.",
+                    hwnd, hr);
+                return false;
+            }
+
+            var props = new NativeMethods.DWM_THUMBNAIL_PROPERTIES
+            {
+                dwFlags = NativeMethods.DWM_TNP_RECTDESTINATION
+                    | NativeMethods.DWM_TNP_OPACITY
+                    | NativeMethods.DWM_TNP_VISIBLE
+                    | NativeMethods.DWM_TNP_SOURCECLIENTAREAONLY,
+                rcDestination = new NativeMethods.RECT { Left = 0, Top = 0, Right = width, Bottom = height },
+                opacity = 255,
+                fVisible = 1,
+                fSourceClientAreaOnly = 1,
+            };
+            hr = NativeMethods.DwmUpdateThumbnailProperties(thumb, ref props);
+            if (hr != 0)
+            {
+                NativeMethods.DwmUnregisterThumbnail(thumb);
+                NativeMethods.DestroyWindow(dest);
+                _dwmUnavailable = true;
+                LogWarning(
+                    "DWM fallback: DwmUpdateThumbnailProperties failed for HWND {Hwnd} (hr 0x{Hr:X8}) — frames will be skipped.",
+                    hwnd, hr);
+                return false;
+            }
+
+            _dwmDest = dest;
+            _dwmThumb = thumb;
+            _dwmWidth = width;
+            _dwmHeight = height;
+            LogWarning("PrintWindow failed for HWND {Hwnd}; switched to the DWM thumbnail fallback.", hwnd);
+
+            // DWM paints the thumbnail asynchronously; give it one composition pass before the
+            // first read. Chỉ chờ một nhịp vì DWM vẽ thumbnail bất đồng bộ.
+            Thread.Sleep(200);
+        }
+
+        return NativeMethods.PrintWindow(_dwmDest, hdcMem, NativeMethods.PW_RENDERFULLCONTENT);
+    }
+
+    /// <summary>
+    /// Unregisters the DWM thumbnail and destroys the helper window; safe when inactive.
+    /// Gỡ thumbnail DWM và huỷ cửa sổ phụ; an toàn khi chưa bật.
+    /// </summary>
+    private void ReleaseDwmThumbnail()
+    {
+        if (_dwmThumb != 0)
+        {
+            NativeMethods.DwmUnregisterThumbnail(_dwmThumb);
+            _dwmThumb = 0;
+        }
+        if (_dwmDest != 0)
+        {
+            NativeMethods.DestroyWindow(_dwmDest);
+            _dwmDest = 0;
+        }
+        _dwmWidth = 0;
+        _dwmHeight = 0;
     }
 
     /// <summary>Reads a window's title (empty when unreadable). Đọc tiêu đề cửa sổ (rỗng khi không đọc được).</summary>

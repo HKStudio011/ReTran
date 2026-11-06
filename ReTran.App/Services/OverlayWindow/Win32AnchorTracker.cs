@@ -5,10 +5,14 @@ using ReTran_App.Core;
 namespace ReTran_App.Services.OverlayWindow;
 
 /// <summary>
-/// Resolves the on-screen rect of the active capture source with Win32 calls: window bounds
-/// for window sources, monitor bounds (by enumeration order) for screen sources.
-/// Tìm hình chữ nhật màn hình của nguồn capture đang hoạt động bằng các gọi Win32: khổ cửa sổ
-/// cho nguồn cửa sổ, khổ monitor (theo thứ tự liệt kê) cho nguồn màn hình.
+/// Resolves the on-screen rect of the active capture source with Win32 calls: the client area
+/// (mapped to screen coordinates) for window sources, monitor bounds (by enumeration order) for
+/// screen sources. The client area matches what <c>WindowCaptureSource</c> captures; using the
+/// full window rect would offset every box by the title bar and borders.
+/// Tìm hình chữ nhật màn hình của nguồn capture đang hoạt động bằng các gọi Win32: vùng client
+/// (đổi sang toạ độ màn hình) cho nguồn cửa sổ, khổ monitor (theo thứ tự liệt kê) cho nguồn màn
+/// hình. Vùng client khớp với thứ <c>WindowCaptureSource</c> chụp; dùng khổ cửa sổ đầy đủ sẽ
+/// làm mọi box lệch đúng bằng title bar và viền.
 /// </summary>
 public sealed class Win32AnchorTracker : IAnchorTracker
 {
@@ -24,7 +28,7 @@ public sealed class Win32AnchorTracker : IAnchorTracker
         ArgumentNullException.ThrowIfNull(source);
         if (!OperatingSystem.IsWindows()) return null;
 
-        if (source.UseWindow) return GetWindowRect(source.HwndHex);
+        if (source.UseWindow) return GetClientRect(source.HwndHex);
         return GetMonitorRect(source.Monitor);
     }
 
@@ -73,15 +77,20 @@ public sealed class Win32AnchorTracker : IAnchorTracker
         return overlayMonitor == 0 || foregroundMonitor == 0 || overlayMonitor != foregroundMonitor;
     }
 
-    private static (int X, int Y, int Width, int Height)? GetWindowRect(string? hwndHex)
+    private static (int X, int Y, int Width, int Height)? GetClientRect(string? hwndHex)
     {
         if (!TryParseHwnd(hwndHex, out nint hwnd)) return null;
         if (!NativeMethods.IsWindow(hwnd) || NativeMethods.IsIconic(hwnd)) return null;
-        if (!NativeMethods.GetWindowRect(hwnd, out NativeMethods.RECT rect)) return null;
+        if (!NativeMethods.GetClientRect(hwnd, out NativeMethods.RECT rect)) return null;
 
         int width = rect.Right - rect.Left;
         int height = rect.Bottom - rect.Top;
-        return width <= 0 || height <= 0 ? null : (rect.Left, rect.Top, width, height);
+        if (width <= 0 || height <= 0) return null;
+
+        var origin = new NativeMethods.POINT { X = 0, Y = 0 };
+        if (!NativeMethods.ClientToScreen(hwnd, ref origin)) return null;
+
+        return (origin.X, origin.Y, width, height);
     }
 
     private static (int X, int Y, int Width, int Height)? GetMonitorRect(int index)
@@ -163,6 +172,13 @@ public sealed class Win32AnchorTracker : IAnchorTracker
         }
 
         [StructLayout(LayoutKind.Sequential)]
+        internal struct POINT
+        {
+            internal int X;
+            internal int Y;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
         internal struct MONITORINFO
         {
             internal int cbSize;
@@ -192,7 +208,11 @@ public sealed class Win32AnchorTracker : IAnchorTracker
 
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
-        internal static extern bool GetWindowRect(nint hWnd, out RECT rect);
+        internal static extern bool GetClientRect(nint hWnd, out RECT rect);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool ClientToScreen(nint hWnd, ref POINT point);
 
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
