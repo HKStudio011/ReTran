@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace ReTran_App.Services.Setup;
 
 /// <summary>
@@ -21,11 +23,12 @@ public enum OcrFlavor
 
 /// <summary>
 /// One display adapter as seen by the system: display name, discrete flag, and driver version in the
-/// raw form the source supplies it (WMI gives NVIDIA's D3D/INF form "NN.0.B.TTTT" — see
+/// raw form the source supplies it (WMI gives NVIDIA's INF form "DDI.0.BRANCH.TTTT", where the BRANCH
+/// segment carries the product family — see
 /// <see cref="SystemCheck.TryGetNvidiaProductVersion"/> for the mapping to NVIDIA's product-version form).
 /// Một display adapter hệ thống nhìn thấy: tên hiển thị, cờ card rời, phiên bản driver ở dạng thô mà
-/// nguồn cung cấp (WMI trả dạng D3D/INF "NN.0.B.TTTT" của NVIDIA — xem
-/// <see cref="SystemCheck.TryGetNvidiaProductVersion"/> để biết cách ánh xạ về dạng product version).
+/// nguồn cung cấp (WMI trả dạng INF của NVIDIA "DDI.0.BRANCH.TTTT", trong đó segment BRANCH mang họ sản
+/// phẩm — xem <see cref="SystemCheck.TryGetNvidiaProductVersion"/> để biết cách ánh xạ về dạng product version).
 /// </summary>
 /// <param name="Name">
 /// Adapter display name, e.g. "NVIDIA GeForce RTX 5060 Ti".
@@ -129,12 +132,15 @@ public static class SystemCheck
 
     /// <summary>
     /// Hosts setup must reach over HTTPS: PyPI, the PaddlePaddle wheel index, and GitHub (uv downloads
-    /// its managed CPython from python-build-standalone releases there, spec §5.7).
+    /// its managed CPython from python-build-standalone releases there, spec §5.7). Published as a
+    /// read-only view so callers cannot mutate the shared probe list.
     /// Các host setup phải tới được qua HTTPS: PyPI, index wheel PaddlePaddle, và GitHub (uv tải
-    /// CPython managed từ python-build-standalone releases ở đó, spec §5.7).
+    /// CPython managed từ python-build-standalone releases ở đó, spec §5.7). Publish dưới dạng read-only
+    /// view để caller không sửa được danh sách probe chia sẻ chung.
     /// </summary>
-    public static readonly string[] NetworkProbeHosts = { "pypi.org", "www.paddlepaddle.org.cn", "github.com" };
-    // Host model của paddlex xác nhận khi implement (spec §10) — thêm vào array lúc đó.
+    public static IReadOnlyList<string> NetworkProbeHosts { get; } =
+        ["pypi.org", "www.paddlepaddle.org.cn", "github.com"];
+    // Host model của paddlex xác nhận khi implement (spec §10) — thêm vào danh sách này lúc đó.
 
     // Bậc thang wheel paddlepaddle-gpu 3.4.x (chỉ có wheel CUDA 12.6/12.9/13.0 — không có 12.7/12.8),
     // chọn wheel CAO NHẤT mà driver hỗ trợ ĐẦY ĐỦ. Nguồn: CUDA Toolkit Release Notes — Table 3 (GA
@@ -152,6 +158,16 @@ public static class SystemCheck
     private const int MinDriverForCu129 = 57_602; // 576.02 — CUDA 12.9 GA
     private const int MinDriverForCu126 = 56_076; // 560.76 — CUDA 12.6 GA
 
+    // Hạng wheel khi phải chọn giữa nhiều adapter NVIDIA: theo SỐ PHIÊN BẢN CUDA (12.6 → 126 …), không so
+    // sánh ordinal nhãn "cuXXX" — nhãn ngắn hơn ("cu99") hay dài hơn ("cu10x") đều làm phép so sánh chuỗi
+    // sai. Thêm nấc mới: thêm một nhãn + một hạng, không phụ thuộc cách đặt tên.
+    // Wheel rank when several NVIDIA adapters compete: by CUDA VERSION NUMBER (12.6 → 126 …), never by
+    // string.CompareOrdinal on the "cuXXX" label — a shorter ("cu99") or longer ("cu10x") label breaks
+    // ordinal comparison. Adding a rung: add a label plus a rank, independent of the naming scheme.
+    private const int Cuda130Rank = 130; // "cu130"
+    private const int Cuda129Rank = 129; // "cu129"
+    private const int Cuda126Rank = 126; // "cu126"
+
     private const long BytesPerGb = 1024L * 1024 * 1024;
 
     private static bool NameContains(string name, string token) =>
@@ -160,12 +176,17 @@ public static class SystemCheck
     /// <summary>
     /// Runs the check gates in order: x64 OS → uv.exe present → flavor + CUDA wheel from the adapters
     /// (NVIDIA ladder wins over AMD/iGPU notices) → disk floor for that flavor → an HTTPS probe of every
-    /// <see cref="NetworkProbeHosts"/> entry. The arch gate reads
-    /// <see cref="Environment.Is64BitOperatingSystem"/> directly (not injectable).
+    /// <see cref="NetworkProbeHosts"/> entry. The arch gate reads <see cref="RuntimeInformation.OSArchitecture"/>
+    /// through the injectable <paramref name="osArchitecture"/> seam (same pattern as
+    /// <paramref name="fileExists"/>): the app ships an x64-only uv.exe and x64-only paddle wheels, so an
+    /// ARM64 Windows machine — which runs Win32 code fine via emulation — must still be sent to the CPU
+    /// path / fail the gate rather than assume a 32-bit OS.
     /// Chạy các cổng check theo thứ tự: OS x64 → uv.exe có mặt → flavor + wheel CUDA từ adapter (bậc
     /// thang NVIDIA thắng notice AMD/iGPU) → ngưỡng đĩa theo flavor đó → probe HTTPS từng host trong
-    /// <see cref="NetworkProbeHosts"/>. Cổng arch đọc trực tiếp
-    /// <see cref="Environment.Is64BitOperatingSystem"/> (không inject được).
+    /// <see cref="NetworkProbeHosts"/>. Cổng arch đọc <see cref="RuntimeInformation.OSArchitecture"/> qua
+    /// seam inject được <paramref name="osArchitecture"/> (cùng pattern với <paramref name="fileExists"/>):
+    /// app phát hành uv.exe chỉ bản x64 và wheel paddle chỉ bản x64, nên máy Windows ARM64 — vẫn chạy code
+    /// Win32 bình thường nhờ emulation — vẫn phải bị cổng arch chặn, thay vì bị gán là "Windows 32-bit".
     /// </summary>
     /// <param name="adapters">
     /// Display-adapter inventory. / Danh sách display adapter.
@@ -183,6 +204,14 @@ public static class SystemCheck
     /// Probe tồn tại file cho uv.exe và python của venv; mặc định là <see cref="File.Exists"/>; inject
     /// được để cổng uv unit-test được (uv.exe thật cũng được copy vào output của test).
     /// </param>
+    /// <param name="osArchitecture">
+    /// OS architecture the arch gate tests against <see cref="Architecture.X64"/>; defaults to
+    /// <see cref="RuntimeInformation.OSArchitecture"/> and is injectable so the ARM64/X86 branch is
+    /// unit-testable. Optional, so every existing call site keeps compiling.
+    /// Kiến trúc OS mà cổng arch so với <see cref="Architecture.X64"/>; mặc định là
+    /// <see cref="RuntimeInformation.OSArchitecture"/> và inject được để nhánh ARM64/X86 unit-test được.
+    /// Optional nên mọi call site đang có vẫn compile.
+    /// </param>
     /// <returns>
     /// The decision (Flavor, CudaWheel, Notice) when every gate passes; otherwise Ok=false with
     /// FailureReason naming the failed gate.
@@ -193,20 +222,29 @@ public static class SystemCheck
         IVideoAdapterSource adapters,
         Func<string, long> diskFreeBytes,
         Func<string, bool> isHostReachable,
-        Func<string, bool>? fileExists = null)
+        Func<string, bool>? fileExists = null,
+        Func<Architecture>? osArchitecture = null)
     {
         ArgumentNullException.ThrowIfNull(adapters);
         ArgumentNullException.ThrowIfNull(diskFreeBytes);
         ArgumentNullException.ThrowIfNull(isHostReachable);
         fileExists ??= File.Exists;
+        osArchitecture ??= static () => RuntimeInformation.OSArchitecture;
 
         bool uvExePresent = fileExists(SetupPaths.UvExe);
         bool venvPresent = fileExists(SetupPaths.VenvPythonExe);
 
-        if (!Environment.Is64BitOperatingSystem)
+        // Không dùng Environment.Is64BitOperatingSystem: máy ARM64 trả true (Win32-on-ARM) nhưng uv.exe
+        // đi kèm + wheel paddle chỉ có bản x64. Thông báo cũng không được nói "Windows 32-bit".
+        // Environment.Is64BitOperatingSystem is deliberately not used: an ARM64 machine reports true
+        // (Win32-on-ARM) while the bundled uv.exe and the paddle wheels are x64-only. The message must
+        // not claim "Windows 32-bit" either.
+        Architecture architecture = osArchitecture();
+        if (architecture != Architecture.X64)
         {
             return Fail(OcrFlavor.Cpu,
-                "ReTran yêu cầu Windows 64-bit (x64); máy này đang chạy Windows 32-bit.",
+                $"ReTran yêu cầu Windows chạy trên nền x64; kiến trúc OS của máy này là '{architecture}' — " +
+                "uv.exe đi kèm và wheel paddle chỉ có bản x64.",
                 uvExePresent, venvPresent);
         }
 
@@ -251,32 +289,47 @@ public static class SystemCheck
         => new(false, flavor, null, reason, uvExePresent, venvPresent, CudaWheel: null);
 
     /// <summary>
-    /// Flavor decision (spec §3.5, §5.7): the highest CUDA wheel fully supported by any NVIDIA adapter's
-    /// driver → GPU flavor with that wheel; NVIDIA present but no adapter qualifies (old or unreadable
-    /// driver) → CPU + "driver chưa đủ mới" notice; discrete AMD → CPU + the spec's AMD notice; nothing
-    /// else matches → CPU + a light notice that never says "card AMD".
+    /// Flavor decision (spec §3.5, §5.7): the highest CUDA wheel fully supported by the driver of any
+    /// DISCRETE NVIDIA adapter → GPU flavor with that wheel; a discrete NVIDIA adapter present but none
+    /// qualifies (old or unreadable driver) → CPU + "driver chưa đủ mới" notice; discrete AMD → CPU + the
+    /// spec's AMD notice; nothing else matches → CPU + a light notice that never says "card AMD".
     /// Quyết định flavor (spec §3.5, §5.7): wheel CUDA cao nhất được hỗ trợ ĐẦY ĐỦ bởi driver của bất kỳ
-    /// adapter NVIDIA nào → GPU flavor kèm wheel đó; có NVIDIA nhưng không adapter nào đạt (driver cũ
-    /// hoặc không đọc được) → CPU + notice "driver chưa đủ mới"; AMD rời → CPU + notice AMD đúng spec;
+    /// adapter NVIDIA RỜI nào → GPU flavor kèm wheel đó; có NVIDIA rời nhưng không adapter nào đạt (driver
+    /// cũ hoặc không đọc được) → CPU + notice "driver chưa đủ mới"; AMD rời → CPU + notice AMD đúng spec;
     /// còn lại → CPU + notice nhẹ, tuyệt đối không nhắc "card AMD".
     /// </summary>
     private static (OcrFlavor Flavor, string? Notice, string? CudaWheel) DecideFlavor(
         IReadOnlyList<VideoAdapterInfo> adapters)
     {
-        bool nvidiaPresent = false;
+        bool nvidiaDiscretePresent = false;
         bool amdDiscrete = false;
         string? bestWheel = null;
+        int bestWheelRank = 0;
 
         foreach (VideoAdapterInfo adapter in adapters)
         {
-            if (NameContains(adapter.Name, "NVIDIA"))
+            // Spec §3.5 chỉ xét NVIDIA RỜI, đối xứng với nhánh AMD bên dưới: adapter iGPU đời cũ hoặc
+            // adapter ảo đặt tên "NVIDIA …" không được chọn flavor GPU. GIỚI HẠN đã biết: IsDiscrete đến
+            // từ heuristic đặt tên VideoAdapterSource.IsDiscreteName, nên adapter data-center/pro không
+            // mang token GeForce/Quadro/Tesla/NVS (vd "NVIDIA T4") bị coi là không rời và rớt xuống CPU —
+            // hướng fail-safe (không bao giờ cài wheel mà driver máy đó không chạy nổi).
+            // Spec §3.5 considers a DISCRETE NVIDIA only, symmetric with the AMD branch below: an old iGPU
+            // or a virtual adapter named "NVIDIA …" must not pick the GPU flavor. KNOWN LIMITATION:
+            // IsDiscrete comes from the name heuristic VideoAdapterSource.IsDiscreteName, so a
+            // data-center/pro adapter without a GeForce/Quadro/Tesla/NVS token (e.g. "NVIDIA T4") counts
+            // as non-discrete and falls back to CPU — the fail-safe direction (it never installs a wheel
+            // that machine's driver cannot run).
+            if (adapter.IsDiscrete && NameContains(adapter.Name, "NVIDIA"))
             {
-                nvidiaPresent = true;
+                nvidiaDiscretePresent = true;
                 string? wheel = CudaWheelForAdapter(adapter);
-                // Optimus/nhiều card NVIDIA: giữ wheel cao nhất (so sánh ordinal "cu126" < "cu129" < "cu130").
-                if (string.CompareOrdinal(bestWheel, wheel) < 0)
+                int rank = WheelRank(wheel);
+                // Optimus/nhiều card NVIDIA: giữ wheel có hạng CAO NHẤT (rank số nguyên, không so nhãn).
+                // Optimus / several NVIDIA cards: keep the HIGHEST-ranked wheel (integer rank, not labels).
+                if (rank > bestWheelRank)
                 {
                     bestWheel = wheel;
+                    bestWheelRank = rank;
                 }
             }
             else if (adapter.IsDiscrete && (NameContains(adapter.Name, "Radeon") || NameContains(adapter.Name, "AMD")))
@@ -290,7 +343,7 @@ public static class SystemCheck
             return (OcrFlavor.Gpu, null, bestWheel);
         }
 
-        if (nvidiaPresent)
+        if (nvidiaDiscretePresent)
         {
             return (OcrFlavor.Cpu,
                 $"Driver NVIDIA hiện tại chưa đủ mới để dùng bản GPU (cần tối thiểu {FormatMinDriver()} " +
@@ -312,6 +365,24 @@ public static class SystemCheck
         => TryGetNvidiaProductVersion(adapter.DriverVersion, out var productVersion)
             ? CudaWheelForDriverVersion(productVersion.Major, productVersion.Minor)
             : null;
+
+    /// <summary>
+    /// Integer rank of a CUDA wheel label, used to pick the best wheel across several NVIDIA adapters
+    /// (R43): rank = the CUDA version number ("cu130" → 130, "cu129" → 129, "cu126" → 126), so ordering
+    /// never depends on how the label string compares. Must stay in sync with the labels returned by
+    /// <see cref="CudaWheelForDriverVersion"/>; null or an unlisted label ranks 0 and never wins.
+    /// Hạng nguyên của nhãn wheel CUDA, dùng để chọn wheel tốt nhất giữa nhiều adapter NVIDIA (R43):
+    /// rank = số phiên bản CUDA ("cu130" → 130, "cu129" → 129, "cu126" → 126), nên thứ tự không bao giờ
+    /// phụ thuộc cách so sánh chuỗi nhãn. Phải khớp với các nhãn mà <see cref="CudaWheelForDriverVersion"/>
+    /// trả về; null hoặc nhãn chưa khai báo có hạng 0 và không bao giờ thắng.
+    /// </summary>
+    private static int WheelRank(string? wheel) => wheel switch
+    {
+        "cu130" => Cuda130Rank,
+        "cu129" => Cuda129Rank,
+        "cu126" => Cuda126Rank,
+        _ => 0,
+    };
 
     /// <summary>
     /// Maps an NVIDIA Windows product driver version (major + two-digit minor, e.g. 576 and 02 for
@@ -356,20 +427,32 @@ public static class SystemCheck
     }
 
     /// <summary>
-    /// Maps NVIDIA's WMI/D3D driver version ("NN.0.B.TTTT") to NVIDIA's product-version space
-    /// (major, two-digit minor): D3D major 30/31/32 cover the product 4xx/5xx/6xx series, and TTTT
-    /// encodes (productMajor % 100) * 100 + productMinor. Verified against the dev machine on
-    /// 2026-11-05: WMI "32.0.16.1742" == nvidia-smi driver_version 617.42; note the brief's "nvdrv.dll"
-    /// does not exist on modern NVIDIA installs, so WMI is the source. Returns false for null,
-    /// non-numeric, or D3D majors outside 30–32 (pre-CUDA-12 branches) — callers treat that as "no
-    /// CUDA support", conservatively choosing CPU with a notice.
-    /// Ánh xạ driver version NVIDIA dạng WMI/D3D ("NN.0.B.TTTT") sang không gian product version của
-    /// NVIDIA (major, minor đúng 2 chữ số): D3D major 30/31/32 tương ứng seri sản phẩm 4xx/5xx/6xx, còn
-    /// TTTT mã hóa (productMajor % 100) * 100 + productMinor. Đã kiểm chứng trên máy dev ngày
-    /// 2026-11-05: WMI "32.0.16.1742" == nvidia-smi driver_version 617.42; lưu ý file "nvdrv.dll" mà
-    /// brief nhắc KHÔNG tồn tại trên bản cài NVIDIA hiện đại, nên WMI là nguồn. Trả false khi null,
-    /// không phải số, hoặc D3D major ngoài khoảng 30–32 (họ tiền CUDA 12) — caller coi là "không hỗ trợ
-    /// CUDA", an toàn chọn CPU kèm notice.
+    /// Maps NVIDIA's WMI/INF driver version ("DDI.0.BRANCH.TTTT") to NVIDIA's product-version space
+    /// (major, two-digit minor). The PRODUCT FAMILY comes from the third segment — the driver branch:
+    /// 14 → 4xx, 15 → 5xx, 16 → 6xx — while TTTT encodes (productMajor % 100) * 100 + productMinor.
+    /// The first segment (DDI/INF major) carries NO product information and must never gate the
+    /// decision: branch 15 ships under DDI major 31 ("31.0.15.3699" = 536.99) AND under DDI major 32
+    /// ("32.0.15.6094" = 560.94), and branch 14 ships under DDI major 27 ("27.21.14.5609" = 456.09).
+    /// Measured on the dev machine: 2026-11-06 WMI "32.0.16.2114" ↔ nvidia-smi driver_version 621.14 and
+    /// 2026-11-05 WMI "32.0.16.1742" ↔ nvidia-smi 617.42 — the hundreds digit follows the 16 branch, not
+    /// the DDI major. Deriving the base from the DDI major (the behaviour before Task 10) turned 560.94
+    /// into a non-existent 660.94 and made the wizard install cu130 on a machine whose driver only
+    /// reaches cu126. Any other branch (e.g. 13 or 17) is refused, as are null, non-numeric and
+    /// out-of-guard tails — callers treat that as "no CUDA support" and conservatively choose CPU with a
+    /// notice. "nvdrv.dll", named by the old brief, does not exist on modern NVIDIA installs, so WMI is
+    /// the source.
+    /// Ánh xạ driver version NVIDIA dạng WMI/INF ("DDI.0.BRANCH.TTTT") sang không gian product version
+    /// của NVIDIA (major, minor đúng 2 chữ số). HỌ SẢN PHẨM đến từ segment thứ ba — branch driver:
+    /// 14 ⇒ 4xx, 15 ⇒ 5xx, 16 ⇒ 6xx — còn TTTT mã hóa (productMajor % 100) * 100 + productMinor. Segment
+    /// đầu (DDI/INF major) KHÔNG mang thông tin sản phẩm và không bao giờ được gate: branch 15 chạy dưới
+    /// DDI major 31 ("31.0.15.3699" = 536.99) LẪN 32 ("32.0.15.6094" = 560.94), còn branch 14 chạy dưới
+    /// DDI major 27 ("27.21.14.5609" = 456.09). Đo trên máy dev: 2026-11-06 WMI "32.0.16.2114" ↔
+    /// nvidia-smi driver_version 621.14 và 2026-11-05 WMI "32.0.16.1742" ↔ nvidia-smi 617.42 — số trăm đi
+    /// theo branch 16 chứ không theo DDI major. Suy base từ DDI major (cách làm trước Task 10) biến 560.94
+    /// thành 660.94 không tồn tại và khiến wizard cài cu130 trên máy mà driver chỉ tới nổi cu126. Mọi
+    /// branch khác (vd 13 hay 17) bị từ chối, cùng với null, chuỗi không phải số và tail ngoài guard —
+    /// caller coi là "không hỗ trợ CUDA", an toàn chọn CPU kèm notice. File "nvdrv.dll" brief cũ nhắc
+    /// KHÔNG tồn tại trên bản cài NVIDIA hiện đại, nên WMI là nguồn.
     /// </summary>
     /// <param name="wmiDriverVersion">
     /// Raw WMI DriverVersion string. / Chuỗi WMI DriverVersion thô.
@@ -393,12 +476,22 @@ public static class SystemCheck
             return false;
         }
 
-        if (!int.TryParse(segments[0], out int d3dMajor) || !int.TryParse(segments[^1], out int tail))
+        // segments[0] (DDI major) chỉ được parse như guard format — nó không còn là nguồn số trăm.
+        // segments[0] (DDI major) is parsed only as a format guard — it is no longer the product base.
+        if (!int.TryParse(segments[0], out _) || !int.TryParse(segments[2], out int branch)
+            || !int.TryParse(segments[^1], out int tail))
         {
             return false;
         }
 
-        int productBase = d3dMajor switch { 30 => 400, 31 => 500, 32 => 600, _ => -1 };
+        // Số trăm của product version nằm ở BRANCH (segment thứ ba), không phải DDI major: branch 15
+        // chạy dưới cả DDI 31 ("31.0.15.3699" = 536.99) lẫn 32 ("32.0.15.6094" = 560.94), branch 14 chạy
+        // dưới DDI 27 ("27.21.14.5609" = 456.09). Xem doc comment ở trên cho chứng cứ đo thật.
+        // The product version's hundreds digit comes from the BRANCH (third segment), never the DDI
+        // major: branch 15 ships under DDI 31 ("31.0.15.3699" = 536.99) AND 32 ("32.0.15.6094" = 560.94),
+        // and branch 14 ships under DDI 27 ("27.21.14.5609" = 456.09). Measured datapoints are in the
+        // doc comment above.
+        int productBase = branch switch { 14 => 400, 15 => 500, 16 => 600, _ => -1 };
         if (productBase < 0 || tail is < 0 or > 9999)
         {
             return false;
