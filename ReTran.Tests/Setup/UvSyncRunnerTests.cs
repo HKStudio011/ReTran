@@ -223,18 +223,24 @@ public class UvSyncRunnerTests : IDisposable
     [Fact]
     public void ApplyFlavor_GpuUnknownWheel_TreatedAsCu129()
     {
-        // File đang ở cu126 (không còn pin cudnn) + wheel lạ ⇒ xử lý như cu129: index quay về cu129;
-        // rule chỉ BỎ pin cudnn (cu126/cu130) nên pin không được thêm lại — hành vi đã chốt.
-        // File currently at cu126 (cudnn pin dropped) + an unknown wheel ⇒ behave as cu129: the index
-        // returns to cu129; the rule only DROPS the cudnn pin (cu126/cu130), so it is not re-added.
+        // File đang ở cu126 (đã mất pin cudnn) + wheel lạ ⇒ xử lý như cu129. Đích cu129 CÓ pin cudnn, nên
+        // apply phải dựng lại cả index lẫn pin: kết quả chỉ phụ thuộc flavor/variant yêu cầu, không phụ thuộc
+        // biến thể trước đó của file (R54 canonical). Trước R54 ở đây pin cudnn vẫn thiếu — chính là lỗi
+        // CPU→GPU / cu126→cu129 install sai wheel.
+        // File currently at cu126 (cudnn pin dropped) + an unlisted wheel ⇒ behave as cu129. The cu129 target
+        // HAS the cudnn pin, so the apply rebuilds both the index and the pin: the result depends only on the
+        // requested flavor/variant, not on the file's previous variant (R54 canonical). Before R54 the cudnn
+        // pin stayed missing here — the very defect that installed the wrong wheel on CPU→GPU and
+        // cu126→cu129 transitions.
         UvSyncRunner.ApplyFlavorToPyproject(OcrFlavor.Gpu, "cu126", _pyproject);
         UvSyncRunner.ApplyFlavorToPyproject(OcrFlavor.Gpu, "cu123", _pyproject);
 
         string text = Norm(File.ReadAllText(_pyproject));
+        Assert.Equal(LfFile(PyprojectHead), text);
         Assert.Contains("name = \"paddle-cu129\"", text);
         Assert.Contains("https://www.paddlepaddle.org.cn/packages/stable/cu129/", text);
         Assert.Contains("paddlepaddle-gpu = { index = \"paddle-cu129\" }", text);
-        Assert.DoesNotContain("nvidia-cudnn-cu12", text);
+        Assert.Contains("nvidia-cudnn-cu12", text);
         Assert.Contains("paddlepaddle-gpu==3.4.0", text);
     }
 
@@ -267,6 +273,143 @@ public class UvSyncRunnerTests : IDisposable
             $"BOM bị mất: {Convert.ToHexString(bytes.AsSpan(0, 3))}");
         Assert.DoesNotContain((byte)'\r', bytes);
         Assert.Equal(LfFile(PyprojectCpuExpected), Norm(Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3)));
+    }
+
+    // ── R54: apply là canonical — nội dung đích không phụ thuộc flavor trước đó ────────────────────
+
+    [Fact]
+    public void ApplyFlavor_CpuThenGpuCu126_EqualsShippedThenCu126()
+    {
+        // Regression chính: apply CPU xoá pin GPU + cả 2 section uv; nếu apply cu126 sau đó chỉ sửa cái
+        // đang tồn tại thì file còn lại KHÔNG còn dependency GPU lẫn index ⇒ uv sync cài môi trường CPU
+        // trong khi setup.json ghi Gpu/cu126. Apply phải dựng lại đủ, ra đúng byte như đi thẳng
+        // từ file đi kèm sang cu126.
+        // The headline regression: the CPU apply drops the GPU pin and both uv sections; a cu126 apply that
+        // only edits what is still there leaves a file with NO GPU dependency and NO index ⇒ uv sync builds
+        // a CPU environment while setup.json records Gpu/cu126. The apply must rebuild what is missing and
+        // produce the same bytes as going straight from the shipped file to cu126.
+        byte[] direct = ApplySequence((OcrFlavor.Gpu, "cu126"));
+        byte[] viaCpu = ApplySequence((OcrFlavor.Cpu, null), (OcrFlavor.Gpu, "cu126"));
+
+        Assert.Equal(direct, viaCpu);
+        string text = Text(viaCpu);
+        Assert.Equal(LfFile(ExpectedVariant("cu126")), text);
+        // Guard chuỗi CPU→GPU cụ thể mà wizard đi (spec §5.4 "user đổi card").
+        Assert.Contains("paddlepaddle-gpu==3.4.0", text);
+        Assert.DoesNotContain("nvidia-cudnn-cu12", text);
+        Assert.Contains("name = \"paddle-cu126\"", text);
+    }
+
+    [Fact]
+    public void ApplyFlavor_CpuThenGpuCu129_RestoresTheShippedFileByteForByte()
+    {
+        // Đường repair/updater: updater ghi đè pyproject đi kèm (cu129) rồi wizard áp lại flavor; nếu máy
+        // từng bị hạ xuống CPU, apply cu129 phải dựng lại từng byte của file đi kèm.
+        // Updater/repair path: the updater restores the shipped (cu129) pyproject and the wizard re-applies
+        // the flavor; on a machine that was dropped to CPU, the cu129 apply must rebuild the shipped file
+        // byte for byte.
+        byte[] shipped = WriteSeqFile(Head(crlf: true));
+        byte[] restored = ApplySequence((OcrFlavor.Cpu, null), (OcrFlavor.Gpu, "cu129"));
+
+        Assert.Equal(shipped, restored);
+        Assert.Equal(LfFile(PyprojectHead), Text(restored));
+    }
+
+    [Fact]
+    public void ApplyFlavor_GpuVariantSwitch_Cu126ToCu130ToCu126()
+    {
+        // Đổi wheel qua lại phải hội tụ về cùng một nội dung, và pin cudnn chỉ có ở cu129.
+        // Switching wheels back and forth must converge on one content, and the cudnn pin belongs to
+        // cu129 only.
+        byte[] expected = ApplySequence((OcrFlavor.Gpu, "cu126"));
+        byte[] switched = ApplySequence((OcrFlavor.Gpu, "cu126"), (OcrFlavor.Gpu, "cu130"), (OcrFlavor.Gpu, "cu126"));
+        Assert.Equal(expected, switched);
+
+        string cu130 = Text(ApplySequence((OcrFlavor.Gpu, "cu126"), (OcrFlavor.Gpu, "cu130")));
+        Assert.Equal(LfFile(ExpectedVariant("cu130")), cu130);
+        Assert.DoesNotContain("nvidia-cudnn-cu12", cu130);
+
+        string cu126 = Text(switched);
+        Assert.DoesNotContain("nvidia-cudnn-cu12", cu126);
+        Assert.Contains("name = \"paddle-cu126\"", cu126);
+
+        // cu129 là biến thể duy nhất có pin cudnn — quay lại cu129 phải thêm lại nó.
+        // cu129 is the only variant with the cudnn pin — returning to cu129 must add it back.
+        string backTo129 = Text(ApplySequence((OcrFlavor.Gpu, "cu130"), (OcrFlavor.Gpu, "cu129")));
+        Assert.Contains("\"nvidia-cudnn-cu12==9.9.0.52\",", backTo129);
+        Assert.Equal(LfFile(PyprojectHead), backTo129);
+    }
+
+    [Fact]
+    public void ApplyFlavor_GpuAfterCpu_KeepsGpuDependencyAndIndexSections()
+    {
+        // Kiểm NỘI DUNG (không chỉ "file đã đổi"): dependency GPU, khối index với url đúng, và entry
+        // sources phải có mặt, đúng thứ tự canonical của file đi kèm.
+        // Assert CONTENT (not merely "the file changed"): the GPU dependency, the index block with the
+        // right url, and the sources entry must be present, in the shipped file's canonical order.
+        UvSyncRunner.ApplyFlavorToPyproject(OcrFlavor.Cpu, cudaWheel: null, _pyproject);
+        Assert.DoesNotContain("paddlepaddle-gpu", File.ReadAllText(_pyproject));
+
+        UvSyncRunner.ApplyFlavorToPyproject(OcrFlavor.Gpu, "cu129", _pyproject);
+
+        string text = File.ReadAllText(_pyproject);
+        Assert.Contains("\"paddlepaddle-gpu==3.4.0\",", text);
+        Assert.Contains("\"nvidia-cudnn-cu12==9.9.0.52\",", text);
+        Assert.Contains("[[tool.uv.index]]", text);
+        Assert.Contains("name = \"paddle-cu129\"", text);
+        Assert.Contains("url = \"https://www.paddlepaddle.org.cn/packages/stable/cu129/\"", text);
+        Assert.Contains("explicit = true", text);
+        Assert.Contains("[tool.uv.sources]", text);
+        Assert.Contains("paddlepaddle-gpu = { index = \"paddle-cu129\" }", text);
+
+        // Thứ tự canonical: paddleocr → gpu → cudnn → pillow; index trước sources.
+        int paddleocr = text.IndexOf("\"paddleocr", StringComparison.Ordinal);
+        int gpu = text.IndexOf("\"paddlepaddle-gpu", StringComparison.Ordinal);
+        int cudnn = text.IndexOf("\"nvidia-cudnn-cu12", StringComparison.Ordinal);
+        int pillow = text.IndexOf("\"pillow", StringComparison.Ordinal);
+        Assert.True(paddleocr < gpu && gpu < cudnn && cudnn < pillow,
+            $"thứ tự dependency không canonical: paddleocr={paddleocr} gpu={gpu} cudnn={cudnn} pillow={pillow}");
+        Assert.True(text.IndexOf("[[tool.uv.index]]", StringComparison.Ordinal)
+                    < text.IndexOf("[tool.uv.sources]", StringComparison.Ordinal));
+
+        // Phần còn lại của file không được đụng tới.
+        foreach (string keep in new[]
+                 {
+                     "# numpy<2.4: forced by paddlex>=3.7.0 (required by paddleocr>=3.7.0);",
+                     "\"numpy>=1.24,<2.4\",", "\"pillow>=12.3.0\",", "[build-system]",
+                     "[tool.hatch.build.targets.wheel]", "[dependency-groups]", "\"pytest>=9.1.1\",",
+                     "[tool.pytest.ini_options]", "testpaths = [\"tests\"]",
+                 })
+        {
+            Assert.Contains(keep, text);
+        }
+        AssertCrlfPreserved(_pyproject);
+    }
+
+    [Theory]
+    [InlineData(OcrFlavor.Cpu, null)]
+    [InlineData(OcrFlavor.Gpu, "cu126")]
+    [InlineData(OcrFlavor.Gpu, "cu129")]
+    [InlineData(OcrFlavor.Gpu, "cu130")]
+    public void ApplyFlavor_Idempotent_ForEveryFlavorAndVariant(OcrFlavor flavor, string? wheel)
+    {
+        // Mọi tổ hợp flavor/variant: áp nhiều lần từ file đi kèm không đổi thêm byte nào, và đi đường vòng
+        // (qua flavor/variant khác) rồi áp lại cũng ra đúng cùng nội dung — tính canonical của R54.
+        // Every flavor/variant combination: re-applying on the shipped file adds no bytes, and taking a
+        // detour through another flavor/variant then re-applying lands on the same content — R54's
+        // canonicality claim.
+        byte[] once = ApplySequence((flavor, wheel));
+        byte[] twice = ApplySequence((flavor, wheel), (flavor, wheel));
+        byte[] thrice = ApplySequence((flavor, wheel), (flavor, wheel), (flavor, wheel));
+        Assert.Equal(once, twice);
+        Assert.Equal(twice, thrice);
+
+        (OcrFlavor, string?)[] detour = flavor == OcrFlavor.Cpu
+            ? [(OcrFlavor.Gpu, "cu126"), (flavor, wheel)]
+            : [(OcrFlavor.Cpu, null), (flavor, wheel), (flavor, wheel),
+               (OcrFlavor.Gpu, "cu130"), (flavor, wheel)];
+        byte[] viaDetour = ApplySequence(detour);
+        Assert.Equal(once, viaDetour);
     }
 
     // ── SyncAsync ─────────────────────────────────────────────────────────────────────────────────
@@ -351,39 +494,114 @@ public class UvSyncRunnerTests : IDisposable
         Assert.Null(runner.LastOutputTail);
     }
 
-    // ── InstalledPaddleFlavorAsync ────────────────────────────────────────────────────────────────
+    // ── InstalledPaddleFlavorAsync (R55: dò bằng exit code, không parse output) ────────────────────
 
     [Fact]
-    public async Task InstalledPaddleFlavor_ParsesGpuCpuAndNone()
+    public async Task InstalledPaddleFlavor_GpuInstalled_ReturnsGpuAndSkipsCpuProbe()
     {
         var fake = new FakeProcessRunner();
         var runner = new UvSyncRunner(fake, UvExe, _ocrDir);
 
-        fake.Results.Enqueue((0, "Package          Version\n" +
-                                 "---------------- -------\n" +
-                                 "numpy            2.3.2\n" +
-                                 "paddleocr        3.7.0\n" +
-                                 "paddlepaddle-gpu 3.4.0\n" +
-                                 "pillow           12.3.0\n"));
+        fake.Results.Enqueue((0, "Name: paddlepaddle-gpu\nVersion: 3.4.0\n"));
         Assert.Equal(OcrFlavor.Gpu, await runner.InstalledPaddleFlavorAsync(TestContext.Current.CancellationToken));
 
-        fake.Results.Enqueue((0, "Package  Version\npaddlepaddle 3.4.0\npillow 12.3.0\n"));
+        Call probe = Assert.Single(fake.Calls);
+        Assert.Equal(new[] { "pip", "show", "paddlepaddle-gpu" }, probe.Args);
+        Assert.Equal(_ocrDir, probe.WorkingDir);
+        AssertUvEnv(probe);
+        // Probe thành công ⇒ không để lại tail cũ cho màn hình lỗi.
+        Assert.Null(runner.LastOutputTail);
+    }
+
+    [Fact]
+    public async Task InstalledPaddleFlavor_OnlyCpuInstalled_ReturnsCpu()
+    {
+        var fake = new FakeProcessRunner();
+        var runner = new UvSyncRunner(fake, UvExe, _ocrDir);
+
+        // uv trả exit ≠ 0 khi package không có trong venv (đo thật với uv 0.13.7: exit 1 +
+        // "warning: Package(s) not found for: paddlepaddle-gpu").
+        // uv exits non-zero when the package is not in the venv (measured with uv 0.13.7: exit 1 plus
+        // "warning: Package(s) not found for: paddlepaddle-gpu").
+        fake.Results.Enqueue((1, "warning: Package(s) not found for: paddlepaddle-gpu"));
+        fake.Results.Enqueue((0, "Name: paddlepaddle\nVersion: 3.4.0\n"));
+
         Assert.Equal(OcrFlavor.Cpu, await runner.InstalledPaddleFlavorAsync(TestContext.Current.CancellationToken));
 
-        fake.Results.Enqueue((0, ""));
-        Assert.Null(await runner.InstalledPaddleFlavorAsync(TestContext.Current.CancellationToken));
-
-        // uv fail (venv chưa có) ⇒ null, không được đoán flavor.
-        fake.Results.Enqueue((2, "error: no virtualenv found"));
-        Assert.Null(await runner.InstalledPaddleFlavorAsync(TestContext.Current.CancellationToken));
-
-        Assert.Equal(4, fake.Calls.Count);
-        Assert.Equal(new[] { "pip", "list" }, fake.Calls[0].Args);
+        Assert.Equal(2, fake.Calls.Count);
+        Assert.Equal(new[] { "pip", "show", "paddlepaddle-gpu" }, fake.Calls[0].Args);
+        Assert.Equal(new[] { "pip", "show", "paddlepaddle" }, fake.Calls[1].Args);
         foreach (Call call in fake.Calls)
         {
+            Assert.Equal(UvExe, call.FileName);
             Assert.Equal(_ocrDir, call.WorkingDir);
             AssertUvEnv(call);
         }
+        Assert.Null(runner.LastOutputTail);
+    }
+
+    [Fact]
+    public async Task InstalledPaddleFlavor_NeitherInstalled_ReturnsNull()
+    {
+        var fake = new FakeProcessRunner();
+        var runner = new UvSyncRunner(fake, UvExe, _ocrDir);
+
+        fake.Results.Enqueue((1, "warning: Package(s) not found for: paddlepaddle-gpu"));
+        fake.Results.Enqueue((1, "warning: Package(s) not found for: paddlepaddle"));
+
+        Assert.Null(await runner.InstalledPaddleFlavorAsync(TestContext.Current.CancellationToken));
+
+        Assert.Equal(2, fake.Calls.Count);
+        // Không paddle nào ⇒ caller coi như chưa cài và chạy lại sync.
+        Assert.Null(runner.LastOutputTail);
+    }
+
+    [Fact]
+    public async Task InstalledPaddleFlavor_UvFails_ReturnsNull_AndLeavesLastOutputTailAlone()
+    {
+        var fake = new FakeProcessRunner();
+        var runner = new UvSyncRunner(fake, UvExe, _ocrDir);
+
+        // venv chưa có / uv.exe bị AV làm hỏng ⇒ exit ≠ 0 (uv báo "Package(s) not found" với exit 1 cho cả
+        // hai trường hợp, đo thật với uv 0.13.7) ⇒ null, không được ném, và không được đoán flavor.
+        // Probe không được đụng LastOutputTail: tail của lệnh sync fail trước đó là thứ màn hình lỗi phải
+        // hiển thị, wizard dò flavor trước khi retry.
+        // Measured with uv 0.13.7: a missing package AND a missing venv both give "Package(s) not found"
+        // with exit 1 ⇒ null, and the probe must not throw or guess a flavor. The probe must also leave
+        // LastOutputTail alone: the tail of the earlier failed sync is what the error screen shows, and the
+        // wizard probes the flavor before it retries.
+        const string syncTail = "error: request to pypi.org/simple failed (proxy refused connection)";
+        fake.Results.Enqueue((1, syncTail));
+        Assert.Equal(1, await runner.SyncAsync(OcrFlavor.Gpu, "cu129", TestContext.Current.CancellationToken));
+        Assert.Equal(syncTail, runner.LastOutputTail);
+
+        fake.Results.Enqueue((1, "warning: Package(s) not found for: paddlepaddle-gpu"));
+        fake.Results.Enqueue((1, "warning: Package(s) not found for: paddlepaddle"));
+        Assert.Null(await runner.InstalledPaddleFlavorAsync(TestContext.Current.CancellationToken));
+
+        Assert.Equal(syncTail, runner.LastOutputTail);
+        Assert.Equal(3, fake.Calls.Count);
+    }
+
+    [Fact]
+    public async Task InstalledPaddleFlavor_TruncatedOutput_StillDetectsFromExitCode()
+    {
+        // Lý do R55: ProcessRunner chỉ giữ ~8 KB CUỐI của output, và danh sách package xếp theo bảng chữ
+        // cái ⇒ dòng paddlepaddle* có thể bị cắt mất giữa. Detection chỉ dựa vào exit code nên output
+        // rỗng vẫn ra flavor đúng.
+        // Why R55 exists: ProcessRunner keeps only the last ~8 KB of output and package lists are
+        // alphabetical ⇒ the paddlepaddle* lines can be cut out in the middle. Detection reads exit codes
+        // only, so even an output window without those lines still yields the right flavor.
+        var fake = new FakeProcessRunner();
+        var runner = new UvSyncRunner(fake, UvExe, _ocrDir);
+
+        string tailWithoutPaddle = new string('x', 8 * 1024) + "\nzope.interface 7.2.1\n";
+        fake.Results.Enqueue((0, tailWithoutPaddle));
+        Assert.Equal(OcrFlavor.Gpu, await runner.InstalledPaddleFlavorAsync(TestContext.Current.CancellationToken));
+
+        fake.Results.Enqueue((1, tailWithoutPaddle));
+        fake.Results.Enqueue((0, tailWithoutPaddle));
+        Assert.Equal(OcrFlavor.Cpu, await runner.InstalledPaddleFlavorAsync(TestContext.Current.CancellationToken));
     }
 
     // ── Ctor fallback (R47: default là null, thân ctor lấy giá trị SetupPaths) ─────────────────────
@@ -426,6 +644,43 @@ public class UvSyncRunnerTests : IDisposable
             .Replace("stable/cu129/", $"stable/{variant}/", StringComparison.Ordinal)
             .Replace("index = \"paddle-cu129\"", $"index = \"paddle-{variant}\"", StringComparison.Ordinal)
             .Replace("    \"nvidia-cudnn-cu12==9.9.0.52\",\n", "", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Writes <paramref name="content"/> to its own file in this test's temp tree and returns the bytes on
+    /// disk — the same writer the fixture uses, so the comparison has no BOM/encoding surprises.
+    /// Ghi <paramref name="content"/> ra file riêng trong cây temp của test và trả byte trên đĩa — dùng
+    /// đúng writer như fixture nên phép so sánh không dính BOM/encoding.
+    /// </summary>
+    private byte[] WriteSeqFile(string content)
+    {
+        string path = Path.Combine(_dir, $"seq-{Guid.NewGuid():N}.toml");
+        File.WriteAllText(path, content);
+        return File.ReadAllBytes(path);
+    }
+
+    /// <summary>
+    /// Applies a flavor/wheel sequence to a fresh copy of the HEAD fixture in its own file and returns the
+    /// resulting bytes, so every canonicality case is independent of the shared fixture file.
+    /// Áp một chuỗi flavor/wheel lên bản copy của fixture HEAD trong file riêng và trả byte kết quả, để mỗi
+    /// case canonical không phụ thuộc file fixture dùng chung.
+    /// </summary>
+    private byte[] ApplySequence(params (OcrFlavor Flavor, string? Wheel)[] applies)
+    {
+        string path = Path.Combine(_dir, $"seq-{Guid.NewGuid():N}.toml");
+        File.WriteAllText(path, Head(crlf: true));
+        foreach ((OcrFlavor flavor, string? wheel) in applies)
+        {
+            UvSyncRunner.ApplyFlavorToPyproject(flavor, wheel, path);
+        }
+
+        return File.ReadAllBytes(path);
+    }
+
+    /// <summary>
+    /// Result bytes as normalized LF file text — the shape the fixture constants are compared in.
+    /// Byte kết quả dưới dạng text file LF đã chuẩn hoá — hình dạng để so với các constant fixture.
+    /// </summary>
+    private static string Text(byte[] bytes) => Norm(Encoding.UTF8.GetString(bytes));
 
     private void WriteHead(bool crlf)
         => File.WriteAllText(_pyproject, Head(crlf));
