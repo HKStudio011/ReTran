@@ -203,7 +203,7 @@ public class SystemCheckTests
     [Fact]
     public void Cpu_WhenNonDiscreteNvidiaHasNewDriver_ButDiscreteNvidiaDriverIsOld()
     {
-        // Adapter ảo tên "NVIDIA …" driver 621.14 + card NVIDIA rời driver 536.99 → không được借 wheel
+        // Adapter ảo tên "NVIDIA …" driver 621.14 + card NVIDIA rời driver 536.99 → không được mượn wheel
         // của adapter ảo: CPU + notice driver.
         // Virtual "NVIDIA …" adapter on 621.14 + a discrete NVIDIA card on 536.99: the virtual adapter's
         // wheel must not leak in → CPU + the driver notice.
