@@ -1,0 +1,948 @@
+<!doctype html>
+<html lang="vi" data-theme="dark" data-accent="amber">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="dark light" />
+<title>ReTran — Control deck (mockup v2)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+/* ReTran UI v2 — "signal deck": petrol console, broadcast tally (amber), OCR data (teal). */
+:root{
+  --ui:"Be Vietnam Pro","Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
+  --mono:"IBM Plex Mono","Cascadia Mono",Consolas,monospace;
+  --page:#0A191C; --panel:#0E2327; --panel2:#10292D; --well:#0A1C20; --raised:#153135;
+  --line:rgba(170,208,201,.13); --line2:rgba(170,208,201,.26);
+  --text:#EFEAD9; --dim:#94A9A5; --faint:#5F7471;
+  --tally:#FFB020; --tally-ink:#1B1204; --tally-soft:rgba(255,176,32,.12);
+  --data:#4FD8C4; --danger:#FF6A5C;
+  --r1:3px; --r2:7px; --r3:12px; --pad:20px;
+  color-scheme:dark;
+}
+html[data-accent="jade"]{--tally:#37D6A8;--tally-soft:rgba(55,214,168,.12);--tally-ink:#03130F}
+html[data-accent="coral"]{--tally:#FF7A59;--tally-soft:rgba(255,122,89,.13);--tally-ink:#1C0A05}
+html[data-theme="light"]{
+  --page:#E2E8E3; --panel:#FBFCFA; --panel2:#FFFFFF; --well:#E6ECE7; --raised:#FFFFFF;
+  --line:rgba(10,40,38,.15); --line2:rgba(10,40,38,.30);
+  --text:#07201E; --dim:#3D5956; --faint:#5C7673;
+  --tally:#A85F00; --tally-ink:#FFF8EC; --tally-soft:rgba(168,95,0,.10);
+  --data:#0A7565; --danger:#B9362A; color-scheme:light;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; background:var(--page); color:var(--text);
+  font-family:var(--ui); font-size:13.5px; line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3,p,ol,ul{margin:0;padding:0}
+ol,ul{list-style:none}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer;background:none;border:0}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.dim{color:var(--dim)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+:focus-visible{outline:2px solid var(--tally);outline-offset:2px;border-radius:2px}
+
+/* ---------- shell ---------- */
+.app{min-height:100%;display:grid;grid-template-rows:auto 1fr auto}
+.topbar{
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  padding:0 var(--pad); min-height:56px;
+  background:linear-gradient(180deg,var(--panel2),var(--panel));
+  border-bottom:1px solid var(--line);
+}
+.brand{display:flex;align-items:center;gap:10px;min-width:0}
+.brand-mark{position:relative;width:16px;height:16px;border-radius:4px;border:1px solid var(--line2);background:var(--well);display:grid;place-items:center}
+.brand-mark i{width:6px;height:6px;border-radius:50%;background:var(--faint);transition:background .2s,box-shadow .2s}
+.is-live .brand-mark{border-color:color-mix(in srgb,var(--tally) 55%,transparent);background:var(--tally-soft)}
+.is-live .brand-mark i{background:var(--tally);animation:lamp 2.6s ease-in-out infinite}
+.brand-name{font-weight:600;font-size:15px;letter-spacing:-.01em}
+.brand-sub{font-size:11px;color:var(--faint);padding-left:12px;margin-left:2px;border-left:1px solid var(--line);white-space:nowrap}
+.top-right{margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;gap:7px;height:26px;padding:0 10px;border-radius:99px;border:1px solid var(--line);background:var(--well);color:var(--dim);font-size:11.5px;font-weight:500}
+.chip .lamp{width:6px;height:6px;border-radius:50%;background:var(--faint)}
+.chip.live{border-color:color-mix(in srgb,var(--tally) 40%,transparent);background:var(--tally-soft);color:var(--tally)}
+.chip.live .lamp{background:var(--tally);animation:lamp 2.6s ease-in-out infinite}
+html[data-theme="light"] .chip.live{color:#8A4F00}
+html[data-accent="jade"] .chip.live{color:#087A60}
+html[data-accent="coral"] .chip.live{color:#B4452B}
+html[data-theme="light"][data-accent="amber"] .chip.live{color:#8A4F00}
+.ver{font-size:11px;color:var(--faint)}
+.icon-btn{width:30px;height:30px;border:1px solid var(--line);border-radius:var(--r2);background:var(--well);display:grid;place-items:center;color:var(--dim);transition:color .15s,border-color .15s,background .15s}
+.icon-btn:hover{color:var(--text);border-color:var(--line2);background:var(--panel2)}
+.icon-btn svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+html[data-theme="dark"] .i-moon{display:none}
+html[data-theme="light"] .i-sun{display:none}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:34px;padding:0 14px;border-radius:var(--r2);border:1px solid var(--line2);background:var(--panel2);color:var(--text);font-size:13px;font-weight:500;transition:border-color .15s,background .15s,transform .06s}
+.btn:hover{border-color:color-mix(in srgb,var(--text) 40%,transparent)}
+.btn:active{transform:translateY(1px)}
+.btn svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.btn-primary{background:var(--tally);border-color:var(--tally);color:var(--tally-ink);font-weight:600}
+.btn-primary:hover{background:color-mix(in srgb,var(--tally) 88%,white);border-color:color-mix(in srgb,var(--tally) 88%,white)}
+.btn-primary .sq{width:8px;height:8px;border-radius:1px;background:currentColor;opacity:.85}
+.btn-ghost{background:transparent;border-color:transparent;color:var(--dim)}
+.btn-ghost:hover{color:var(--text);background:var(--well);border-color:var(--line)}
+.mini{height:24px;padding:0 9px;font-size:11px;border-radius:var(--r1)}
+
+/* ---------- stage ---------- */
+.stage{display:grid;grid-template-columns:minmax(0,1fr) 336px;gap:var(--gap);padding:var(--gap);align-items:start;max-width:1560px;width:100%;margin:0 auto}
+.main{display:grid;gap:var(--gap);min-width:0}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r3)}
+.monitor{background:var(--panel);border:1px solid var(--line2);border-radius:var(--r3);overflow:hidden}
+.monitor-bar{display:flex;align-items:center;gap:12px;height:32px;padding:0 14px;border-bottom:1px solid var(--line);background:var(--panel2);font-size:11px;color:var(--dim)}
+.monitor-bar .plate{display:inline-flex;align-items:center;gap:7px;font-size:11px;color:var(--dim)}
+.monitor-bar .plate b{font-weight:500;color:var(--text)}
+.monitor-bar .sep{width:1px;height:12px;background:var(--line)}
+.monitor-bar .dir{margin-left:auto;color:var(--data);letter-spacing:.02em}
+.frame{position:relative;aspect-ratio:16/9;max-height:calc(100dvh - 266px);background:#060F11;overflow:hidden;isolation:isolate}
+.frame .corner{position:absolute;width:14px;height:14px;border:1px solid var(--line2);z-index:6;pointer-events:none}
+.frame .c1{top:8px;left:8px;border-right:0;border-bottom:0}
+.frame .c2{top:8px;right:8px;border-left:0;border-bottom:0}
+.frame .c3{bottom:8px;left:8px;border-right:0;border-top:0}
+.frame .c4{bottom:8px;right:8px;border-left:0;border-top:0}
+.live-layer,.idle-layer{position:absolute;inset:0}
+.scene{display:block;width:100%;height:100%}
+.annot{position:absolute;inset:0;width:100%;height:100%}
+.scan{position:absolute;left:0;right:0;top:-24%;height:20%;z-index:5;pointer-events:none;
+  background:linear-gradient(180deg,transparent,color-mix(in srgb,var(--data) 22%,transparent),transparent);
+  opacity:0;mix-blend-mode:screen}
+.is-live .scan{animation:sweep 1.15s cubic-bezier(.3,.6,.3,1) .12s 1 both}
+.grain{position:absolute;inset:0;z-index:4;pointer-events:none;opacity:.5;
+  background:repeating-linear-gradient(180deg,rgba(0,0,0,.22) 0 1px,transparent 1px 3px);
+  mix-blend-mode:multiply}
+.vignette{position:absolute;inset:0;z-index:3;pointer-events:none;background:radial-gradient(120% 90% at 50% 45%,transparent 45%,rgba(0,0,0,.55) 100%)}
+.idle-layer{display:grid;place-items:center;z-index:2;background:
+  radial-gradient(80% 70% at 50% 40%,var(--panel2),var(--page));text-align:center;padding:24px}
+.idle-layer .slate{max-width:360px;display:grid;justify-items:center;gap:8px}
+.idle-layer .slate .glyph{width:44px;height:44px;border:1px solid var(--line2);border-radius:50%;display:grid;place-items:center;color:var(--dim);margin-bottom:4px}
+.idle-layer .slate .glyph svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.4;stroke-linecap:round}
+.idle-layer .t{font-size:15px;font-weight:600}
+.idle-layer .h{font-size:12.5px;color:var(--dim);max-width:34ch}
+.idle-layer .kbd-hint{margin-top:4px;font-size:11px;color:var(--faint)}
+.idle-layer .slate-start{margin-top:10px;height:34px;padding:0 16px;background:transparent;border-color:color-mix(in srgb,var(--tally) 55%,transparent);color:var(--tally)}
+.idle-layer .slate-start:hover{background:var(--tally-soft);border-color:var(--tally)}
+.idle-layer .slate-start .ico-play{width:0;height:0;border-left:8px solid currentColor;border-top:5px solid transparent;border-bottom:5px solid transparent;margin-left:1px}
+.live-layer{opacity:0;visibility:hidden;transition:opacity .35s ease}
+.is-live .live-layer{opacity:1;visibility:visible}
+.is-live .idle-layer{opacity:0;visibility:hidden;transition:opacity .25s ease}
+
+/* svg scene + annotation */
+.scene .sky{fill:url(#sky)}
+.scene .stars circle{fill:#EFEAD9}
+.scene .ridge-far{fill:#0E252B}
+.scene .ridge-mid{fill:#0B1F24}
+.scene .pine{fill:#091A1F}
+.scene .pine.b{fill:#0C2228}
+.scene .ground{fill:#071418}
+.scene .cabin-wall{fill:#1B1510}
+.scene .cabin-roof{fill:#251B14}
+.scene .cabin-window{fill:#FFC46B}
+.scene .warm{fill:#FFB020}
+.scene .jp{font-family:"Yu Gothic UI","Meiryo","Noto Sans JP",sans-serif}
+.scene .hud{font-family:var(--mono);fill:#EFEAD9}
+.scene .hud-dim{font-family:var(--mono);fill:#EFEAD9;opacity:.62}
+.scene .quest-box{fill:rgba(6,13,15,.62);stroke:rgba(239,234,217,.16)}
+.scene .quest-head{fill:#E7C07A}
+.scene .dlg-box{fill:rgba(5,11,13,.74);stroke:rgba(239,234,217,.16)}
+.scene .dlg-name{fill:#0A1416}
+.scene .dlg-name-bg{fill:#E7C07A}
+.scene .slot{fill:rgba(5,11,13,.5);stroke:rgba(239,234,217,.2)}
+.scene .hp{fill:#B8453A}.scene .mp{fill:#3C74B8}
+.scene .bar-bg{fill:rgba(4,10,12,.6);stroke:rgba(239,234,217,.22)}
+.annot-step{opacity:0}
+.is-live .annot-step{animation:pillIn .42s cubic-bezier(.2,.7,.2,1) both;animation-delay:calc(var(--i)*70ms + 260ms)}
+.a-pill{fill:rgba(5,12,14,.86);stroke:rgba(239,234,217,.16);stroke-width:1}
+.a-text{font-family:var(--ui);fill:#F3EEDD;font-size:17px;font-weight:500}
+.a-conf{font-family:var(--mono);fill:var(--data);font-size:10px;opacity:.9}
+.a-tick{fill:none;stroke:#4FD8C4;stroke-width:1.6;stroke-linecap:square;opacity:.95}
+.a-leader{stroke:var(--data);stroke-width:1;opacity:.35;fill:none}
+@keyframes pillIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+@keyframes sweep{0%{opacity:0;transform:translateY(0)}12%{opacity:1}100%{opacity:0;transform:translateY(760%)}}
+@keyframes lamp{0%,100%{box-shadow:0 0 0 0 color-mix(in srgb,var(--tally) 55%,transparent)}55%{box-shadow:0 0 0 5px transparent}}
+
+/* ---------- transport ---------- */
+.transport{display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap;padding:11px 12px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r3)}
+.field{display:grid;gap:5px;min-width:0}
+.field>.lbl{font-size:11px;color:var(--dim);letter-spacing:.02em}
+.field-row{display:flex;align-items:center;gap:6px}
+.seg{display:inline-flex;gap:2px;padding:2px;background:var(--well);border:1px solid var(--line);border-radius:var(--r2)}
+.seg button{height:26px;padding:0 10px;border-radius:4px;font-size:12px;color:var(--dim);white-space:nowrap}
+.seg button:hover{color:var(--text)}
+.seg button[aria-pressed="true"]{background:var(--raised);color:var(--text);box-shadow:inset 0 0 0 1px var(--line2)}
+.select{position:relative;min-width:0}
+.select select{appearance:none;-webkit-appearance:none;height:34px;width:100%;padding:0 30px 0 11px;border-radius:var(--r2);border:1px solid var(--line);background:var(--well);color:var(--text);font-size:12.5px;text-overflow:ellipsis}
+.select select:hover{border-color:var(--line2)}
+.select>:is(svg){position:absolute;right:9px;top:50%;translate:0 -50%;width:13px;height:13px;pointer-events:none;fill:none;stroke:var(--dim);stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+#sourceSelect{min-width:212px}
+#dstSelect{min-width:148px}
+.transport .action{margin-left:auto;display:grid;gap:5px;justify-items:end}
+.transport .action .hint{font-size:11px;color:var(--faint)}
+.btn-run{height:40px;min-width:132px;font-size:14px;letter-spacing:.01em}
+.btn-run .ico-stop{width:8px;height:8px;background:currentColor;border-radius:1px}
+.btn-run .ico-play{width:0;height:0;border-left:8px solid currentColor;border-top:5px solid transparent;border-bottom:5px solid transparent;margin-left:1px}
+
+/* ---------- overlay strip ---------- */
+.strip{display:flex;align-items:center;gap:18px;flex-wrap:wrap;padding:13px 14px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r3)}
+.strip .head{display:grid;gap:2px;min-width:196px}
+.strip .head .t{font-size:13px;font-weight:600}
+.strip .head .s{font-size:11.5px;color:var(--dim)}
+.vr{width:1px;align-self:stretch;background:var(--line)}
+.strip .note{flex:1 1 240px;font-size:11.5px;color:var(--faint);text-align:right}
+.switch{position:relative;width:38px;height:22px;border-radius:99px;border:1px solid var(--line2);background:var(--well);transition:background .18s,border-color .18s;flex:none}
+.switch .knob{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--dim);transition:translate .18s,background .18s}
+.switch[aria-checked="true"]{background:var(--tally-soft);border-color:color-mix(in srgb,var(--tally) 55%,transparent)}
+.switch[aria-checked="true"] .knob{translate:16px 0;background:var(--tally)}
+
+/* ---------- rail ---------- */
+.rail{display:grid;gap:var(--gap);align-content:start}
+.rail-panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r3);overflow:hidden}
+.rail-head{display:flex;align-items:baseline;gap:8px;padding:13px 14px 11px;border-bottom:1px solid var(--line)}
+.rail-head h2{font-size:12.5px;font-weight:600;letter-spacing:.01em}
+.rail-head .sub{margin-left:auto;font-size:10.5px;color:var(--faint)}
+.chain{padding:6px 14px 8px}
+.step{position:relative;display:grid;grid-template-columns:22px minmax(0,1fr);gap:10px;padding:9px 0}
+.step:not(:last-child)::after{content:"";position:absolute;left:6px;top:32px;bottom:-2px;width:1px;background:var(--line)}
+.step .idx{font-family:var(--mono);font-size:10px;color:var(--faint);padding-top:2px}
+.step .body{min-width:0;display:grid;gap:3px}
+.step .row{display:flex;align-items:center;gap:8px}
+.step .name{font-size:12.5px;font-weight:500}
+.step .lamp{width:5px;height:5px;border-radius:50%;background:var(--faint);flex:none;margin-left:auto}
+.is-live .step .lamp{background:var(--data);box-shadow:0 0 0 3px color-mix(in srgb,var(--data) 14%,transparent)}
+.step .read{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10.5px;color:var(--dim);min-height:16px}
+.step .read .dot{color:var(--faint)}
+.rail-sec{border-top:1px solid var(--line);padding:12px 14px;display:grid;gap:8px}
+.sec-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.sec-head h3{font-size:12px;font-weight:600}
+.sec-sub{font-size:11px;color:var(--dim);margin-top:-4px}
+.rail-sec .field{gap:4px}
+.rail-sec .lbl{font-size:10.5px;color:var(--faint)}
+.rail-sec .select select{height:30px;font-size:12px}
+.rail-sec .seg button{height:24px;padding:0 8px;font-size:11.5px}
+.rail-sec .note{font-size:10.5px;line-height:1.5;color:var(--faint)}
+.device{display:flex;align-items:center;gap:8px;padding:7px 9px;border:1px solid var(--line);border-radius:var(--r1);background:var(--well)}
+.device .mono{font-size:11.5px;color:var(--text)}
+.copy{margin-left:auto;height:22px;padding:0 8px;font-size:10.5px;border:1px solid var(--line);border-radius:3px;color:var(--dim);background:var(--panel2);white-space:nowrap}
+.copy:hover{color:var(--text);border-color:var(--line2)}
+
+/* ---------- status line ---------- */
+.statusline{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-height:30px;padding:0 var(--pad);margin-top:auto;border-top:1px solid var(--line);background:var(--panel);font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+.statusline .dot{width:5px;height:5px;border-radius:50%;background:var(--data)}
+.statusline .dot.idle{background:var(--faint)}
+.statusline .grow{flex:1}
+.statusline .kv b{font-weight:400;color:var(--dim)}
+
+/* ---------- settings sheet ---------- */
+.backdrop{position:fixed;inset:0;z-index:40;background:rgba(2,7,8,.55);backdrop-filter:blur(2px);opacity:0;visibility:hidden;transition:opacity .25s,visibility .25s}
+.backdrop.open{opacity:1;visibility:visible}
+.sheet{position:fixed;z-index:50;top:0;right:0;height:100%;width:min(430px,94vw);display:grid;grid-template-rows:auto 1fr auto;
+  background:var(--panel);border-left:1px solid var(--line2);translate:102% 0;transition:translate .28s cubic-bezier(.3,.7,.2,1)}
+.sheet.open{translate:0 0}
+.sheet:focus{outline:none}
+.sheet-head{display:flex;align-items:center;gap:10px;padding:15px 18px;border-bottom:1px solid var(--line)}
+.sheet-head h2{font-size:14px;font-weight:600}
+.sheet-head .icon-btn{margin-left:auto}
+.sheet-body{overflow:auto;padding:6px 18px 18px}
+.sect{padding:15px 0;border-bottom:1px solid var(--line)}
+.sect:last-child{border-bottom:0}
+.sect h3{font-size:11px;font-weight:500;color:var(--dim);letter-spacing:.02em;margin-bottom:10px}
+.srow{display:grid;gap:5px;margin-bottom:11px}
+.srow:last-child{margin-bottom:0}
+.srow>span{font-size:11.5px;color:var(--dim)}
+.srow .select select{height:32px}
+.hint{font-size:11px;color:var(--faint)}
+input[type=text]{height:32px;width:100%;padding:0 10px;border-radius:var(--r2);border:1px solid var(--line);background:var(--well);color:var(--text);font-size:12.5px}
+input[type=text]:disabled{color:var(--faint);cursor:not-allowed}
+.swatches{display:flex;gap:8px}
+.swatch{width:28px;height:28px;border-radius:50%;border:1px solid var(--line2);position:relative}
+.swatch [aria-pressed="true"]{outline:2px solid var(--text);outline-offset:2px}
+.swatch.s-amber{background:#FFB020}.swatch.s-jade{background:#37D6A8}.swatch.s-coral{background:#FF7A59}
+.swatch[aria-pressed="true"]::after{content:"";position:absolute;inset:0;border-radius:50%;box-shadow:0 0 0 2px var(--panel),0 0 0 3px var(--text)}
+.sheet-foot{display:flex;align-items:center;gap:10px;padding:13px 18px;border-top:1px solid var(--line);background:var(--panel2)}
+.sheet-foot .btn-primary{height:36px}
+
+/* ---------- toasts ---------- */
+.toasts{position:fixed;right:20px;bottom:44px;z-index:70;display:grid;gap:8px;justify-items:end}
+.toast{display:flex;align-items:center;gap:8px;max-width:340px;padding:9px 13px;border-radius:var(--r2);border:1px solid var(--line2);border-left:2px solid var(--tally);background:var(--raised);color:var(--text);font-size:12.5px;box-shadow:0 8px 24px rgba(0,0,0,.28);animation:toastIn .22s cubic-bezier(.2,.7,.2,1) both}
+.toast.err{border-left-color:var(--danger)}
+@keyframes toastIn{from{opacity:0;translate:0 6px}to{opacity:1;translate:0 0}}
+
+/* ---------- responsive ---------- */
+@media (max-width:1240px){.stage{grid-template-columns:minmax(0,1fr) 304px;--pad:16px}.strip .note{text-align:left;flex-basis:100%}}
+@media (max-width:1040px){.brand-sub{display:none}.stage{grid-template-columns:1fr}.rail{grid-template-columns:1fr}}
+@media (max-width:760px){
+  .stage{--pad:12px;--gap:10px}
+  .ver{display:none}
+  .rail{grid-template-columns:1fr}
+  .transport{align-items:stretch}
+  .transport .action{margin-left:0;justify-items:stretch;width:100%}
+  .btn-run{width:100%}
+  .strip .vr{display:none}
+  .statusline{display:none}
+  .topbar{padding-top:8px;padding-bottom:8px}
+}
+@media (max-width:520px){
+  .topbar{padding:8px 12px;row-gap:8px}
+  #langBtn{display:none}
+  .top-right{gap:6px}
+  .chip span.txt{display:none}
+  .brand-sub,.ver{display:none}
+  #openSettings span{display:none}
+  #sourceSelect{min-width:0;width:100%}.field{width:100%}
+  .stage{padding:10px}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.001ms !important;animation-delay:0ms !important;transition-duration:.001ms !important}
+}
+</style>
+</head>
+<body>
+<div class="app is-live" id="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"><i></i></span>
+      <span class="brand-name">ReTran</span>
+      <span class="brand-sub mono" id="brandSub">Màn hình 0 · 1920×1080</span>
+    </div>
+    <div class="top-right">
+      <span class="chip live" id="chipLive"><span class="lamp"></span><span class="txt" data-i18n="live">Đang phát</span></span>
+      <span class="chip" id="chipIdle" style="display:none"><span class="lamp"></span><span class="txt" data-i18n="stopped">Đang dừng</span></span>
+      <button class="btn mini" id="langBtn" title="Ngôn ngữ giao diện">VI</button>
+      <button class="icon-btn" id="themeBtn" title="Sáng / Tối" aria-label="Sáng / Tối">
+        <svg class="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z"/></svg>
+        <svg class="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+      </button>
+      <button class="btn btn-ghost" id="openSettings">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.14.38.4.7.75.94"/></svg>
+        <span data-i18n="settings">Cài đặt</span>
+      </button>
+      <span class="ver mono">v0.4.2</span>
+    </div>
+  </header>
+
+  <main class="stage">
+    <section class="main">
+      <div class="monitor">
+        <div class="monitor-bar">
+          <span class="plate"><b data-i18n="preview">Xem trước</b></span>
+          <span class="sep"></span>
+          <span class="mono">1280×720</span>
+          <span class="mono" id="monFps">10,0 fps</span><span class="mono" id="monBoxes">63 box</span>
+          <span class="dir mono">JP → VI</span>
+        </div>
+        <div class="frame" id="frame">
+          <div class="idle-layer" id="idleLayer">
+            <div class="slate">
+              <span class="glyph"><svg viewBox="0 0 24 24"><path d="M3 7h4l2-3h6l2 3h4v12H3z"/><path d="M8 13a4 4 0 1 0 8 0 4 4 0 1 0-8 0"/></svg></span>
+              <p class="t" data-i18n="noFrame">Chưa có khung hình</p>
+              <p class="h" id="slateHint">Bấm Bắt đầu để nhận khung hình từ Màn hình 0.</p>
+              <button class="btn slate-start" id="slateStart"><span class="ico-play"></span><span data-i18n="startCapture">Bắt đầu chụp</span></button>
+              <p class="kbd-hint mono">Idle · 0 fps</p>
+            </div>
+          </div>
+
+          <div class="live-layer" id="liveLayer">
+            <svg class="scene" viewBox="0 0 1280 720" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Khung hình game giả lập: làng đêm, hộp thoại và bảng nhiệm vụ tiếng Nhật đã được dịch">
+              <defs>
+                <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0" stop-color="#1B3B43"/><stop offset=".55" stop-color="#122A31"/><stop offset="1" stop-color="#0A1A20"/>
+                </linearGradient>
+                <radialGradient id="moonGlow"><stop offset="0" stop-color="#E9DFC2" stop-opacity=".28"/><stop offset="1" stop-color="#E9DFC2" stop-opacity="0"/></radialGradient>
+                <radialGradient id="warmGlow"><stop offset="0" stop-color="#FFB020" stop-opacity=".35"/><stop offset="1" stop-color="#FFB020" stop-opacity="0"/></radialGradient>
+                <linearGradient id="groundG" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0A1B20"/><stop offset="1" stop-color="#050F12"/></linearGradient>
+              </defs>
+              <rect width="1280" height="720" fill="url(#sky)"/>
+              <g class="stars" opacity=".8">
+                <circle cx="120" cy="86" r="1.1" opacity=".4"/><circle cx="238" cy="140" r=".9" opacity=".28"/><circle cx="332" cy="64" r="1.3" opacity=".5"/>
+                <circle cx="470" cy="118" r=".8" opacity=".3"/><circle cx="588" cy="58" r="1" opacity=".35"/><circle cx="676" cy="152" r="1.2" opacity=".4"/>
+                <circle cx="764" cy="82" r=".9" opacity=".3"/><circle cx="872" cy="126" r="1.1" opacity=".45"/><circle cx="1102" cy="72" r="1" opacity=".35"/>
+                <circle cx="1180" cy="166" r="1.3" opacity=".4"/><circle cx="540" cy="196" r=".8" opacity=".25"/><circle cx="960" cy="212" r=".9" opacity=".3"/>
+              </g>
+              <circle cx="1016" cy="150" r="132" fill="url(#moonGlow)"/>
+              <circle cx="1016" cy="150" r="42" fill="#E8DFC6" opacity=".92"/>
+              <circle cx="1004" cy="140" r="7" fill="#D8CFB4" opacity=".5"/><circle cx="1028" cy="162" r="5" fill="#D8CFB4" opacity=".4"/>
+              <path d="M0,452 L86,398 L158,436 L246,372 L338,430 L420,390 L512,440 L612,404 L700,446 L812,398 L900,438 L1000,400 L1104,444 L1190,412 L1280,450 L1280,720 L0,720 Z" class="ridge-far"/>
+              <path d="M0,486 L92,448 L186,478 L286,438 L392,482 L488,452 L596,492 L700,460 L806,496 L918,462 L1020,498 L1120,470 L1210,500 L1280,478 L1280,720 L0,720 Z" class="ridge-mid"/>
+              <g class="pine">
+                <path d="M96,474 L110,414 L124,474 Z"/><path d="M128,486 L146,408 L164,486 Z"/><path d="M166,478 L180,424 L194,478 Z"/>
+                <path d="M446,488 L462,420 L478,488 Z"/><path d="M482,496 L500,414 L518,496 Z"/><path d="M522,486 L536,432 L550,486 Z"/>
+                <path d="M1122,492 L1140,418 L1158,492 Z"/><path d="M1160,500 L1178,420 L1196,500 Z"/><path d="M1198,490 L1212,436 L1226,490 Z"/>
+              </g>
+              <g class="pine b">
+                <path d="M812,500 L828,432 L844,500 Z"/><path d="M846,508 L864,424 L882,508 Z"/><path d="M886,498 L900,446 L914,498 Z"/>
+                <path d="M0,512 L16,444 L32,512 Z"/><path d="M34,520 L52,436 L70,520 Z"/><path d="M74,510 L88,458 L102,510 Z"/>
+              </g>
+              <ellipse cx="648" cy="452" rx="540" ry="16" fill="#BFE3DE" opacity=".05"/><path d="M498,508 C560,496 700,494 812,506 L860,720 L430,720 Z" fill="#0B2A31" opacity=".7"/><g fill="#DDE9DE" opacity=".07"><ellipse cx="628" cy="520" rx="70" ry="2"/><ellipse cx="700" cy="534" rx="46" ry="1.6"/><ellipse cx="590" cy="546" rx="38" ry="1.4"/></g>
+              <rect y="470" width="1280" height="250" fill="url(#groundG)"/>
+              <g fill="none" stroke="#16363C" stroke-linecap="round" opacity=".85">
+                <path d="M556,498 Q668,510 782,496" stroke-width="5"/>
+                <path d="M556,472 Q668,484 782,470" stroke-width="2"/>
+                <path d="M570,472 v40 M606,476 v40 M642,479 v40 M678,480 v40 M714,478 v40 M750,475 v40" stroke-width="1.6"/>
+                <path d="M570,472 l36,32 M606,476 l36,31 M642,479 l36,30 M678,480 l36,28 M714,478 l36,24" stroke-width="1" opacity=".55"/>
+              </g>
+              <ellipse cx="300" cy="512" rx="120" ry="40" fill="url(#warmGlow)" opacity=".55"/>
+              <g>
+                <rect x="232" y="446" width="132" height="72" class="cabin-wall"/>
+                <path d="M218,448 L298,404 L378,448 Z" class="cabin-roof"/>
+                <rect x="348" y="408" width="12" height="26" fill="#1E1712"/>
+                <rect x="256" y="466" width="30" height="24" class="cabin-window"/>
+                <path d="M271,466 V490 M256,478 H286" stroke="#3A2A18" stroke-width="2"/>
+                <rect x="314" y="474" width="22" height="44" fill="#120E0A"/>
+                <g fill="#FFB020" opacity=".07"><circle cx="372" cy="392" r="9"/><circle cx="386" cy="370" r="13"/><circle cx="398" cy="344" r="16"/></g>
+              </g>
+              <path d="M0,520 C220,512 420,536 640,528 C860,520 1080,540 1280,524 L1280,560 L0,560 Z" fill="#08161A" opacity=".7"/>
+              <path d="M478,720 C520,660 560,620 620,596 C650,584 664,566 668,548 L690,548 C686,572 668,592 640,608 C596,634 566,668 540,720 Z" fill="#0C2026" opacity=".55"/>
+
+              <!-- game HUD -->
+              <g class="hud">
+                <text x="48" y="50" font-size="10.5" opacity=".8">HP 82/100</text>
+                <rect x="48" y="58" width="204" height="8" rx="2" class="bar-bg"/><rect x="49" y="59" width="166" height="6" rx="1.5" class="hp"/>
+                <text x="48" y="88" font-size="10.5" opacity=".8">MP 41/60</text>
+                <rect x="48" y="96" width="204" height="8" rx="2" class="bar-bg"/><rect x="49" y="97" width="112" height="6" rx="1.5" class="mp"/>
+                <text x="1214" y="44" font-size="10" text-anchor="middle" opacity=".55">N</text>
+                <circle cx="1214" cy="86" r="30" fill="rgba(4,10,12,.32)" stroke="rgba(239,234,217,.28)"/>
+                <path d="M1214,60 V68 M1214,104 V112 M1188,86 H1196 M1232,86 H1240" stroke="rgba(239,234,217,.35)"/>
+                <path d="M1214,72 L1220,92 L1214,88 L1208,92 Z" fill="#E7C07A" opacity=".85"/>
+              </g>
+
+              <!-- quest panel -->
+              <g>
+                <rect x="872" y="196" width="344" height="190" rx="2" class="quest-box"/>
+                <text x="896" y="228" font-size="15" class="jp quest-head" letter-spacing="2">依頼</text>
+                <path d="M896,240 H1192" stroke="rgba(231,192,122,.28)"/>
+                <g class="jp" fill="#E9E2CE" font-size="19" opacity=".92">
+                  <text x="896" y="266">古い橋を渡って</text>
+                  <text x="896" y="308">森の奥へ進め</text>
+                  <text x="896" y="350">鍵を見つけろ</text>
+                </g>
+              </g>
+
+              <!-- dialogue -->
+              <g>
+                <rect x="196" y="532" width="118" height="30" rx="2" class="dlg-name-bg"/>
+                <text x="214" y="553" font-size="16" class="jp dlg-name">旅人</text>
+                <rect x="196" y="556" width="740" height="126" rx="2" class="dlg-box"/>
+                <g class="jp" fill="#E9E2CE" font-size="21" opacity=".92">
+                  <text x="228" y="608">この森には近づくな。</text>
+                  <text x="228" y="650">月が出る前に戻るんだ。</text><path d="M896,660 l14,0 l-7,9 Z" fill="#E7C07A" opacity=".5"/>
+                </g>
+              </g>
+
+              <!-- hotbar -->
+              <g class="hud">
+                <rect x="972" y="628" width="44" height="44" rx="3" class="slot"/><text x="980" y="642" font-size="9" opacity=".5">1</text>
+                <path d="M986,660 L1002,644 M984,646 L992,654" stroke="#CFC7B2" stroke-width="2" opacity=".7"/>
+                <rect x="1024" y="628" width="44" height="44" rx="3" class="slot"/><text x="1032" y="642" font-size="9" opacity=".5">2</text>
+                <circle cx="1046" cy="652" r="7" fill="#7EC8A6" opacity=".55"/><rect x="1044" y="644" width="4" height="5" fill="#CFC7B2" opacity=".6"/>
+                <rect x="1076" y="628" width="44" height="44" rx="3" class="slot"/><text x="1084" y="642" font-size="9" opacity=".5">3</text>
+                <path d="M1092,662 C1094,646 1104,644 1106,650 C1108,656 1100,660 1092,662 Z" fill="#E7C07A" opacity=".5"/>
+                <rect x="1128" y="628" width="44" height="44" rx="3" class="slot"/><text x="1136" y="642" font-size="9" opacity=".5">4</text>
+                <circle cx="1150" cy="652" r="7" fill="none" stroke="#CFC7B2" stroke-width="1.5" opacity=".45"/>
+              </g>
+            </svg>
+
+            <svg class="annot" viewBox="0 0 1280 720" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+              <g class="annot-step" style="--i:0">
+                <path class="a-tick" d="M883,242 h7 M883,242 v7 M1059,242 h-7 M1059,242 v7 M883,280 h7 M883,280 v-7 M1059,280 h-7 M1059,280 v-7"/>
+                <rect class="a-pill" x="887" y="246" width="172" height="30" rx="3"/>
+                <text class="a-text" x="898" y="267">Băng qua cây cầu cũ</text>
+              </g>
+              <g class="annot-step" style="--i:1">
+                <path class="a-tick" d="M883,284 h7 M883,284 v7 M1021,284 h-7 M1021,284 v7 M883,322 h7 M883,322 v-7 M1021,322 h-7 M1021,322 v-7"/>
+                <rect class="a-pill" x="887" y="288" width="134" height="30" rx="3"/>
+                <text class="a-text" x="898" y="309">Đi sâu vào rừng</text>
+              </g>
+              <g class="annot-step" style="--i:2">
+                <path class="a-tick" d="M883,326 h7 M883,326 v7 M1007,326 h-7 M1007,326 v7 M883,364 h7 M883,364 v-7 M1007,364 h-7 M1007,364 v-7"/>
+                <rect class="a-pill" x="887" y="330" width="120" height="30" rx="3"/>
+                <text class="a-text" x="898" y="351">Tìm chìa khóa</text>
+              </g>
+              <g class="annot-step" style="--i:3">
+                <path class="a-tick" d="M212,579 h7 M212,579 v7 M450,579 h-7 M450,579 v7 M212,618 h7 M212,618 v-7 M450,618 h-7 M450,618 v-7"/>
+                <rect class="a-pill" x="216" y="583" width="234" height="31" rx="3"/>
+                <text class="a-text" x="227" y="605">Đừng đến gần khu rừng này.</text>
+              </g>
+              <g class="annot-step" style="--i:4">
+                <path class="a-tick" d="M212,621 h7 M212,621 v7 M492,621 h-7 M492,621 v7 M212,660 h7 M212,660 v-7 M492,660 h-7 M492,660 v-7"/>
+                <rect class="a-pill" x="216" y="625" width="276" height="31" rx="3"/>
+                <text class="a-text" x="227" y="647">Hãy quay về trước khi trăng lên.</text>
+              </g>
+            </svg>
+            <div class="grain"></div>
+            <div class="vignette"></div>
+            <div class="scan"></div>
+          </div>
+          <span class="corner c1"></span><span class="corner c2"></span><span class="corner c3"></span><span class="corner c4"></span>
+        </div>
+      </div>
+      <div class="transport">
+        <div class="field">
+          <span class="lbl" data-i18n="source">Nguồn</span>
+          <div class="field-row">
+            <div class="seg" role="group" aria-label="Nguồn">
+              <button id="srcScreen" aria-pressed="true" data-i18n="screen">Màn hình</button>
+              <button id="srcWindow" aria-pressed="false" data-i18n="window">Cửa sổ</button>
+            </div>
+            <div class="select">
+              <select id="sourceSelect" aria-label="Chọn nguồn"></select>
+              <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+            </div>
+            <button class="icon-btn" id="refreshBtn" title="Làm mới danh sách" aria-label="Làm mới danh sách">
+              <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="field">
+          <span class="lbl" data-i18n="translateTo">Dịch sang</span>
+          <div class="select">
+            <select id="dstSelect" aria-label="Dịch sang">
+              <option value="vi">Tiếng Việt</option><option value="en">English</option>
+              <option value="ja">日本語</option><option value="ko">한국어</option><option value="zh">中文</option>
+            </select>
+            <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+          </div>
+        </div>
+        <div class="action">
+          <button class="btn btn-run" id="runBtn"><span class="ico-stop"></span><span id="runLabel">Dừng</span></button>
+          <span class="hint" id="runHint">Đang chụp Màn hình 0 — bấm Dừng để đổi nguồn</span>
+        </div>
+      </div>
+
+    </section>
+
+    <aside class="rail">
+      <div class="rail-panel">
+        <div class="rail-head"><h2 data-i18n="chain">Chuỗi tín hiệu</h2><span class="sub mono">PP-OCR · Google</span></div>
+        <ol class="chain">
+          <li class="step">
+            <span class="idx">01</span>
+            <div class="body">
+              <div class="row"><span class="name" data-i18n="s1">Chụp</span><span class="lamp"></span></div>
+              <div class="read"><span id="r1src">Màn hình 0</span><span class="dot">·</span><span id="r1fps">10,0 fps</span><span class="dot">·</span><span>DXGI</span></div>
+            </div>
+          </li>
+          <li class="step">
+            <span class="idx">02</span>
+            <div class="body">
+              <div class="row"><span class="name" data-i18n="s2">Nhận chữ</span><span class="lamp"></span></div>
+              <div class="read"><span>PP-OCR mobile</span><span class="dot">·</span><span id="r2box">63 box</span></div>
+            </div>
+          </li>
+          <li class="step">
+            <span class="idx">03</span>
+            <div class="body">
+              <div class="row"><span class="name" data-i18n="s3">Dịch</span><span class="lamp"></span></div>
+              <div class="read"><span>Google</span><span class="dot">·</span><span id="r3dir">JP → VI</span><span class="dot">·</span><span id="r3lines">171 dòng</span></div>
+            </div>
+          </li>
+          <li class="step">
+            <span class="idx">04</span>
+            <div class="body">
+              <div class="row"><span class="name" data-i18n="s4">Camera ảo</span><span class="lamp"></span></div>
+              <div class="read"><span id="r4dev">ReTran Camera</span><span class="dot">·</span><span id="r4fps">9,8 fps</span><span class="dot">·</span><span>YUY2</span></div>
+            </div>
+          </li>
+        </ol>
+
+        <section class="rail-sec">
+          <div class="sec-head">
+            <h3 data-i18n="overlayTitle">Lớp phủ trên game</h3>
+            <button class="switch" id="ovSwitch" role="switch" aria-checked="true" aria-label="Bật lớp phủ"><span class="knob"></span></button>
+          </div>
+          <p class="sec-sub" data-i18n="overlaySub">Hiện trên nguồn đang chụp</p>
+          <div class="field">
+            <span class="lbl" data-i18n="mode">Chế độ</span>
+            <div class="select">
+              <select id="ovMode">
+                <option value="sub" data-i18n="modeSub">Phủ lên chữ gốc</option>
+                <option value="panel" data-i18n="modePanel">Bảng góc màn hình</option>
+              </select>
+              <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+            </div>
+          </div>
+          <div class="field">
+            <span class="lbl" data-i18n="fontSize">Cỡ chữ</span>
+            <div class="seg" id="fontSeg">
+              <button aria-pressed="false" data-i18n="small">Nhỏ</button>
+              <button aria-pressed="true" data-i18n="medium">Trung bình</button>
+              <button aria-pressed="false" data-i18n="large">Lớn</button>
+            </div>
+          </div>
+          <p class="note" data-i18n="fsNote">Fullscreen độc quyền không hiện được lớp phủ — chạy borderless.</p>
+        </section>
+
+        <section class="rail-sec">
+          <div class="sec-head"><h3 data-i18n="s4">Camera ảo</h3></div>
+          <div class="device">
+            <span class="mono">ReTran Camera</span>
+            <button class="copy" id="copyCam" data-i18n="copy">Sao chép</button>
+          </div>
+          <p class="note" data-i18n="camHint">Chọn thiết bị này trong OBS, Zoom hoặc Discord.</p>
+          <p class="note" data-i18n="railNote">Camera giữ khung cuối khi bấm Dừng; thoát app thì OBS thấy đen.</p>
+        </section>
+      </div>
+    </aside>
+  </main>
+  <footer class="statusline">
+    <span class="dot" id="stDot"></span>
+    <span id="stText">Core ổn định · Hàng đợi OCR 0 · Camera đang phát</span>
+    <span class="grow"></span>
+    <span class="kv">RAM <b>1,9 GB</b></span>
+    <span class="kv">GPU <b>362 MB</b></span>
+    <span class="kv">Windows</span>
+  </footer>
+</div>
+<div class="backdrop" id="backdrop"></div>
+<aside class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle" tabindex="-1">
+  <div class="sheet-head">
+    <h2 id="sheetTitle" data-i18n="settings">Cài đặt</h2>
+    <button class="icon-btn" id="closeSheet" aria-label="Đóng">
+      <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>
+    </button>
+  </div>
+  <div class="sheet-body">
+    <section class="sect">
+      <h3 data-i18n="secProvider">Nhà cung cấp dịch</h3>
+      <div class="srow">
+        <span data-i18n="provider">Nhà cung cấp</span>
+        <div class="select">
+          <select id="providerSel">
+            <option value="google" data-i18n="providerGoogle">Google (web, không cần key)</option>
+            <option value="deepl" disabled>DeepL — sắp có</option>
+            <option value="llm" disabled>LLM (OpenAI-compatible) — sắp có</option>
+          </select>
+          <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+        </div>
+      </div>
+      <div class="srow">
+        <span data-i18n="apiKey">API key</span>
+        <input type="text" id="apiKey" disabled value="Không cần cho Google web" />
+      </div>
+    </section>
+    <section class="sect">
+      <h3 data-i18n="secLang">Ngôn ngữ</h3>
+      <div class="srow">
+        <span data-i18n="srcLang">Ngôn ngữ gốc</span>
+        <div class="select">
+          <select id="srcLangSel">
+            <option value="auto" data-i18n="auto">Tự động (auto)</option>
+            <option value="ja">日本語</option><option value="en">English</option><option value="ko">한국어</option><option value="zh">中文</option>
+          </select>
+          <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+        </div>
+      </div>
+      <div class="srow">
+        <span data-i18n="dstLang">Ngôn ngữ đích</span>
+        <div class="select">
+          <select id="dstLangSel">
+            <option value="vi">Tiếng Việt</option><option value="en">English</option><option value="ja">日本語</option><option value="ko">한국어</option><option value="zh">中文</option>
+          </select>
+          <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+        </div>
+      </div>
+      <p class="hint" data-i18n="langNote">Áp dụng cho lần bắt đầu kế tiếp — không dịch lại giữa phiên đang chạy.</p>
+    </section>
+    <section class="sect">
+      <h3 data-i18n="secLook">Giao diện</h3>
+      <div class="srow">
+        <span data-i18n="theme">Chế độ</span>
+        <div class="seg" id="themeSeg">
+          <button data-theme-set="light" data-i18n="light">Sáng</button>
+          <button data-theme-set="dark" data-i18n="dark">Tối</button>
+          <button data-theme-set="system" data-i18n="system">Hệ thống</button>
+        </div>
+      </div>
+      <div class="srow">
+        <span data-i18n="accent">Màu nhấn</span>
+        <div class="swatches">
+          <button class="swatch s-amber" data-accent-set="amber" aria-label="Hổ phách" aria-pressed="true"></button>
+          <button class="swatch s-jade" data-accent-set="jade" aria-label="Ngọc" aria-pressed="false"></button>
+          <button class="swatch s-coral" data-accent-set="coral" aria-label="San hô" aria-pressed="false"></button>
+        </div>
+      </div>
+      <div class="srow">
+        <span data-i18n="uiLang">Ngôn ngữ giao diện</span>
+        <div class="seg" id="uiLangSeg">
+          <button data-lang-set="vi" aria-pressed="true">Tiếng Việt</button>
+          <button data-lang-set="en" aria-pressed="false">English</button>
+        </div>
+      </div>
+    </section>
+    <section class="sect">
+      <h3 data-i18n="secUpdate">Cập nhật</h3>
+      <div class="field-row">
+        <span class="hint mono">v0.4.2</span>
+        <button class="btn mini" id="checkBtn" data-i18n="checkUpdates">Kiểm tra cập nhật</button>
+      </div>
+    </section>
+  </div>
+  <div class="sheet-foot">
+    <button class="btn btn-primary" id="saveBtn" data-i18n="save">Lưu cài đặt</button>
+    <span class="hint" id="saveHint"></span>
+  </div>
+</aside>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+
+<script>
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const app = $('#app');
+
+  const T = {
+    vi: {
+      settings: 'Cài đặt', preview: 'Xem trước', noFrame: 'Chưa có khung hình',
+      live: 'Đang phát', stopped: 'Đang dừng', startCapture: 'Bắt đầu chụp',
+      hintTmpl: 'Bấm Bắt đầu để nhận khung hình từ {0}.',
+      source: 'Nguồn', screen: 'Màn hình', window: 'Cửa sổ', translateTo: 'Dịch sang',
+      start: 'Bắt đầu', stop: 'Dừng',
+      runHintIdle: 'Nguồn áp dụng cho lần bắt đầu kế tiếp',
+      runHintLive: 'Đang chụp {0} — bấm Dừng để đổi nguồn',
+      refresh: 'Làm mới danh sách',
+      overlayTitle: 'Lớp phủ trên game', overlaySub: 'Hiện trên nguồn đang chụp', mode: 'Chế độ',
+      modeSub: 'Phủ lên chữ gốc', modePanel: 'Bảng góc màn hình', fontSize: 'Cỡ chữ',
+      small: 'Nhỏ', medium: 'Trung bình', large: 'Lớn',
+      fsNote: 'Fullscreen độc quyền không hiện được lớp phủ — chạy borderless.',
+      chain: 'Chuỗi tín hiệu', s1: 'Chụp', s2: 'Nhận chữ', s3: 'Dịch', s4: 'Camera ảo', copy: 'Sao chép',
+      railNote: 'Camera giữ khung cuối khi bấm Dừng; thoát app thì OBS thấy đen.',
+      camHint: 'Chọn thiết bị này trong OBS, Zoom hoặc Discord.',
+      stIdle: 'Core ổn định · OCR sẵn sàng · Nguồn áp dụng cho lần bắt đầu kế tiếp',
+      stLive: 'Core ổn định · Hàng đợi OCR 0 · Camera đang phát',
+      secProvider: 'Nhà cung cấp dịch', provider: 'Nhà cung cấp',
+      providerGoogle: 'Google (web, không cần key)', apiKey: 'API key', apiKeyVal: 'Không cần cho Google web',
+      secLang: 'Ngôn ngữ', srcLang: 'Ngôn ngữ gốc', dstLang: 'Ngôn ngữ đích', auto: 'Tự động (auto)',
+      langNote: 'Áp dụng cho lần bắt đầu kế tiếp — không dịch lại giữa phiên đang chạy.',
+      secLook: 'Giao diện', theme: 'Chế độ', light: 'Sáng', dark: 'Tối', system: 'Hệ thống',
+      accent: 'Màu nhấn', uiLang: 'Ngôn ngữ giao diện', secUpdate: 'Cập nhật', checkUpdates: 'Kiểm tra cập nhật', save: 'Lưu cài đặt',
+      toastSaved: 'Đã lưu cài đặt.', toastCopied: 'Đã sao chép “ReTran Camera”.',
+      toastRefreshed: 'Đã làm mới danh sách nguồn.', toastLatest: 'Bạn đang dùng bản mới nhất.'
+    },
+    en: {
+      settings: 'Settings', preview: 'Preview', noFrame: 'No frame yet',
+      live: 'Live', stopped: 'Stopped', startCapture: 'Start capture',
+      hintTmpl: 'Press Start to receive frames from {0}.',
+      source: 'Source', screen: 'Screen', window: 'Window', translateTo: 'Translate to',
+      start: 'Start', stop: 'Stop',
+      runHintIdle: 'The source applies to the next start',
+      runHintLive: 'Capturing {0} — press Stop to change source',
+      refresh: 'Refresh list',
+      overlayTitle: 'Game overlay', overlaySub: 'Show over the captured source', mode: 'Mode',
+      modeSub: 'Over the original text', modePanel: 'Corner panel', fontSize: 'Size',
+      small: 'Small', medium: 'Medium', large: 'Large',
+      fsNote: 'Exclusive fullscreen cannot show the overlay — run borderless.',
+      chain: 'Signal chain', s1: 'Capture', s2: 'Text detection', s3: 'Translation', s4: 'Virtual camera', copy: 'Copy',
+      railNote: 'The camera holds the last frame on Stop; quitting the app makes OBS see black.',
+      camHint: 'Pick this device in OBS, Zoom or Discord.',
+      stIdle: 'Core healthy · OCR ready · Source applies to the next start',
+      stLive: 'Core healthy · OCR queue 0 · Camera live',
+      secProvider: 'Translation provider', provider: 'Provider',
+      providerGoogle: 'Google (web, no key needed)', apiKey: 'API key', apiKeyVal: 'Not needed for Google web',
+      secLang: 'Languages', srcLang: 'Source language', dstLang: 'Target language', auto: 'Auto',
+      langNote: 'Applies to the next start — no re-translation mid-session.',
+      secLook: 'Appearance', theme: 'Theme', light: 'Light', dark: 'Dark', system: 'System',
+      accent: 'Accent', uiLang: 'Interface language', secUpdate: 'Updates', checkUpdates: 'Check for updates', save: 'Save settings',
+      toastSaved: 'Settings saved.', toastCopied: 'Copied “ReTran Camera”.',
+      toastRefreshed: 'Source list refreshed.', toastLatest: 'You are on the latest version.'
+    }
+  };
+
+  const SOURCES = {
+    screen: [
+      { v: '0', vi: 'Màn hình — Monitor 0', en: 'Screen — Monitor 0', shortVi: 'Màn hình 0', shortEn: 'Screen 0', res: '1920×1080', fps: 10, box: 63, line: 171, cam: 9.8 },
+      { v: '1', vi: 'Màn hình — Monitor 1', en: 'Screen — Monitor 1', shortVi: 'Màn hình 1', shortEn: 'Screen 1', res: '2560×1440', fps: 10, box: 78, line: 212, cam: 9.8 }
+    ],
+    window: [
+      { v: '0x1a2b3c', vi: 'Cửa sổ — Apex Legends (r5apex.exe)', en: 'Window — Apex Legends (r5apex.exe)', shortVi: 'Apex Legends', shortEn: 'Apex Legends', res: '2560×1440', fps: 9.6, box: 54, line: 96, cam: 9.6 },
+      { v: '0x9f0e1', vi: 'Cửa sổ — Discord (Discord.exe)', en: 'Window — Discord (Discord.exe)', shortVi: 'Discord', shortEn: 'Discord', res: '1280×720', fps: 4, box: 12, line: 34, cam: 4 }
+    ]
+  };
+
+  const LANG_TAG = { vi: 'VI', en: 'EN', ja: 'JA', ko: 'KO', zh: 'ZH' };
+  const params = new URLSearchParams(location.search);
+  const state = { lang: params.get('lang') === 'en' ? 'en' : 'vi', theme: params.get('theme') === 'light' ? 'light' : 'dark', accent: 'amber', live: params.get('live') !== '0', mode: 'screen', idx: { screen: 0, window: 0 }, ov: true };
+  const t = (k) => (T[state.lang][k] ?? k);
+  const src = () => SOURCES[state.mode][state.idx[state.mode]];
+  const short = () => (state.lang === 'vi' ? src().shortVi : src().shortEn);
+  const num = (n, digits = 0) => {
+    const s = Number(n).toFixed(digits);
+    return state.lang === 'vi' ? s.replace('.', ',') : s;
+  };
+  let tele = { fps: 10, box: 63, line: 171, cam: 9.8 };
+
+  const el = {};
+  ['chipLive','chipIdle','langBtn','themeBtn','brandSub','monFps','monBoxes','idleLayer','liveLayer','slateHint',
+   'srcScreen','srcWindow','sourceSelect','refreshBtn','dstSelect','runBtn','runLabel','runHint','ovSwitch','ovMode','fontSeg',
+   'r1src','r1fps','r2box','r3dir','r3lines','r4fps','copyCam','railNote','fsNote','stDot','stText',
+   'backdrop','sheet','closeSheet','openSettings','providerSel','apiKey','saveBtn','saveHint','checkBtn','themeSeg','uiLangSeg'].forEach(id => el[id] = document.getElementById(id));
+
+  function toast(msg, kind = '') {
+    const box = $('#toasts');
+    const d = document.createElement('div');
+    d.className = 'toast ' + kind;
+    d.textContent = msg;
+    box.appendChild(d);
+    while (box.children.length > 3) box.firstElementChild.remove();
+    setTimeout(() => d.remove(), 3200);
+  }
+
+  function applyI18n() {
+    document.documentElement.lang = state.lang;
+    $$('[data-i18n]').forEach(n => { n.textContent = t(n.dataset.i18n); });
+    el.langBtn.textContent = state.lang.toUpperCase();
+    $$('#uiLangSeg [data-lang-set]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.langSet === state.lang)));
+    if (el.providerSel.value === 'google') el.apiKey.value = t('apiKeyVal');
+  }
+
+  function renderSources() {
+    const list = SOURCES[state.mode];
+    el.sourceSelect.innerHTML = '';
+    list.forEach((s, i) => {
+      const o = document.createElement('option');
+      o.value = s.v;
+      o.textContent = state.lang === 'vi' ? s.vi : s.en;
+      o.selected = i === state.idx[state.mode];
+      el.sourceSelect.appendChild(o);
+    });
+    el.srcScreen.setAttribute('aria-pressed', String(state.mode === 'screen'));
+    el.srcWindow.setAttribute('aria-pressed', String(state.mode === 'window'));
+    el.r1src.textContent = short();
+    el.brandSub.textContent = `${short()} · ${src().res}`;
+    el.slateHint.textContent = t('hintTmpl').replace('{0}', short());
+    el.runHint.textContent = (state.live ? t('runHintLive') : t('runHintIdle')).replace('{0}', short());
+  }
+
+  function renderTelemetry(instant = false) {
+    const s = src();
+    if (!instant) {
+      tele.fps = Math.max(3, s.fps + (Math.random() - 0.5) * 0.6);
+      tele.box = Math.max(0, Math.round(s.box + (Math.random() - 0.5) * 6));
+      tele.line = Math.max(0, Math.round(s.line + (Math.random() - 0.5) * 5));
+      tele.cam = Math.max(3, s.cam + (Math.random() - 0.5) * 0.3);
+    } else {
+      tele = { fps: s.fps, box: s.box, line: s.line, cam: s.cam };
+    }
+    el.monFps.textContent = state.live ? `${num(tele.fps, 1)} fps` : '—';
+    el.monBoxes.textContent = state.live ? `${tele.box} box` : '—';
+    el.r1fps.textContent = state.live ? `${num(tele.fps, 1)} fps` : '—';
+    el.r2box.textContent = state.live ? `${tele.box} box` : '—';
+    el.r3lines.textContent = state.live ? `${tele.line} ${state.lang === 'vi' ? 'dòng' : 'lines'}` : '—';
+    el.r4fps.textContent = state.live ? `${num(tele.cam, 1)} fps` : '—';
+    el.r3dir.textContent = `JP → ${LANG_TAG[el.dstSelect.value] || 'VI'}`;
+    el.stText.textContent = state.live ? t('stLive') : t('stIdle');
+    el.stDot.classList.toggle('idle', !state.live);
+  }
+
+  function setLive(v) {
+    state.live = v;
+    app.classList.toggle('is-live', v);
+    el.chipLive.style.display = v ? 'inline-flex' : 'none';
+    el.chipIdle.style.display = v ? 'none' : 'inline-flex';
+    el.runBtn.classList.toggle('btn-primary', !v);
+    el.runBtn.innerHTML = `<span class="${v ? 'ico-stop' : 'ico-play'}"></span><span id="runLabel">${v ? t('stop') : t('start')}</span>`;
+    el.runLabel = document.getElementById('runLabel');
+    el.runHint.textContent = (v ? t('runHintLive') : t('runHintIdle')).replace('{0}', short());
+    el.r1src.textContent = short();
+    renderTelemetry(true);
+  }
+
+  function resolveTheme() {
+    if (state.theme !== 'system') return state.theme;
+    return matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  }
+  function applyTheme() {
+    const resolved = resolveTheme();
+    document.documentElement.dataset.theme = resolved;
+    $$('#themeSeg [data-theme-set]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.themeSet === state.theme)));
+  }
+  function applyAccent() {
+    document.documentElement.dataset.accent = state.accent;
+    $$('.swatch').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.accentSet === state.accent)));
+  }
+
+  // --- events ---
+  el.runBtn.addEventListener('click', () => setLive(!state.live));
+  el.srcScreen.addEventListener('click', () => { state.mode = 'screen'; renderSources(); renderTelemetry(true); });
+  el.srcWindow.addEventListener('click', () => { state.mode = 'window'; renderSources(); renderTelemetry(true); });
+  el.sourceSelect.addEventListener('change', () => {
+    state.idx[state.mode] = SOURCES[state.mode].findIndex(s => s.v === el.sourceSelect.value);
+    renderSources(); renderTelemetry(true);
+  });
+  el.refreshBtn.addEventListener('click', () => { renderSources(); toast(t('toastRefreshed')); });
+  el.dstSelect.addEventListener('change', () => renderTelemetry(true));
+  el.ovSwitch.addEventListener('click', () => {
+    state.ov = !state.ov;
+    el.ovSwitch.setAttribute('aria-checked', String(state.ov));
+  });
+  el.fontSeg.addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    [...el.fontSeg.children].forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+  });
+  el.copyCam.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText('ReTran Camera'); } catch { /* mockup: clipboard may be blocked */ }
+    toast(t('toastCopied'));
+  });
+  el.themeBtn.addEventListener('click', () => { state.theme = resolveTheme() === 'dark' ? 'light' : 'dark'; applyTheme(); });
+  document.addEventListener('click', (e) => {
+    const th = e.target.closest('[data-theme-set]');
+    if (th) { state.theme = th.dataset.themeSet; applyTheme(); }
+    const ac = e.target.closest('[data-accent-set]');
+    if (ac) { state.accent = ac.dataset.accentSet; applyAccent(); }
+    const lg = e.target.closest('[data-lang-set]');
+    if (lg && lg.dataset.langSet !== state.lang) {
+      state.lang = lg.dataset.langSet;
+      applyI18n(); renderSources(); renderTelemetry(true); setLive(state.live);
+    }
+  });
+  el.langBtn.addEventListener('click', () => {
+    state.lang = state.lang === 'vi' ? 'en' : 'vi';
+    applyI18n(); renderSources(); renderTelemetry(true); setLive(state.live);
+  });
+
+  // settings sheet
+  let lastFocus = null;
+  function openSheet() {
+    lastFocus = document.activeElement;
+    el.backdrop.classList.add('open'); el.sheet.classList.add('open');
+    el.sheet.focus();
+  }
+  function closeSheet() {
+    el.backdrop.classList.remove('open'); el.sheet.classList.remove('open');
+    if (lastFocus) lastFocus.focus();
+  }
+  el.openSettings.addEventListener('click', openSheet);
+  el.closeSheet.addEventListener('click', closeSheet);
+  el.backdrop.addEventListener('click', closeSheet);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && el.sheet.classList.contains('open')) closeSheet();
+  });
+  el.saveBtn.addEventListener('click', () => {
+    el.saveHint.textContent = t('toastSaved');
+    toast(t('toastSaved'));
+    setTimeout(() => { el.saveHint.textContent = ''; }, 3200);
+  });
+  el.checkBtn.addEventListener('click', () => {
+    el.checkBtn.disabled = true;
+    const label = el.checkBtn.textContent;
+    el.checkBtn.textContent = '…';
+    setTimeout(() => {
+      el.checkBtn.disabled = false; el.checkBtn.textContent = t('checkUpdates');
+      toast(t('toastLatest'));
+    }, 900);
+  });
+
+  matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => { if (state.theme === 'system') applyTheme(); });
+
+  // --- init ---
+  applyTheme(); applyAccent(); applyI18n(); renderSources(); setLive(state.live);
+  document.getElementById('slateStart').addEventListener('click', () => setLive(true));
+  if (params.get('sheet') === '1') openSheet();
+
+  setInterval(() => { if (state.live) { renderTelemetry(); } }, 1600);
+})();
+</script>
+</body>
+</html>
