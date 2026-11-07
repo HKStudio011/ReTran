@@ -94,9 +94,10 @@ audit" + "Measured: what the GPU OCR path actually loads"). Phần này **thay t
   `cpython-install-managed-3.13.18-windows-x86_64-msvc`). Hệ quả cho wizard: một lần sync fail có thể để lại
   trạng thái **không còn venv**, nên bước retry của Setup phải là sync lại toàn bộ chứ không phải "sửa tiếp".
 
-- **Sàn disk (§10 spec):** GPU **8 GB** (đo: venv 3,96 GB = paddle 1.727 MB + cudnn 1.058 MB + cublas 736 MB +
-  nvrtc 178 MB; wheel GPU 869 MB + cudnn 768 MB + cublas 553 MB + nvrtc 76 MB), CPU **2 GB** (wheel paddle CPU
-  **105,5 MB**).
+- **Sàn disk (§10 spec):** GPU **8 GB** (đo sau re-lock Task 11b/11d: venv **3,73 GB** = paddle ~1.73 GB +
+  cudnn ~1.06 GB + cublas ~0.74 GB; lock ship kèm **không** cài nvrtc — OCR GPU thật đo chạy được không có nó;
+  tải về: wheel GPU 869 MB + cudnn 768 MB + cublas 553 MB), CPU **2 GB** (wheel paddle CPU **105,5 MB**, venv
+  tạm đo **0,67 GB**).
 - **Test flavor CPU mà không phá `.venv` dev:** đặt `UV_PROJECT_ENVIRONMENT=<venv tạm>` khi test (worktree dùng
   junction `.venv` vào checkout chính — tuyệt đối không `uv sync --group cpu` vào `.venv` thật).
 
