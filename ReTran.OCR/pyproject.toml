@@ -8,8 +8,6 @@ dependencies = [
     # newer numpy would make the PP-OCRv6 stack unresolvable.
     "numpy>=1.24,<2.4",
     "paddleocr>=3.7.0",
-    "paddlepaddle-gpu==3.4.0",
-    "nvidia-cudnn-cu12==9.9.0.52",
     "pillow>=12.3.0",
 ]
 
@@ -20,19 +18,49 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/retran_core"]
 
+# Sidecar flavour = dependency-group selection (Amendment A2 of the 2026-11-04 merge plan).
+# The app NEVER edits this file: `uv sync --no-default-groups --group gpu|cpu --frozen`
+# picks the flavour out of the committed, shipped uv.lock.
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+]
+gpu = [
+    # The Windows paddle wheel bundles no CUDA runtime/cuDNN (measured RECORD: 12 .dll in
+    # paddle/libs, cudnn/cublas only appear as dynload headers), so both are pinned here.
+    # cublas is pinned to exactly what paddlepaddle-gpu 3.4.0 declares; paddle's own nvidia
+    # requirements carry linux-only markers, so uv installs none of them on Windows.
+    "paddlepaddle-gpu==3.4.0",
+    "nvidia-cudnn-cu12==9.9.0.52",
+    "nvidia-cublas-cu12==12.9.0.13",
+]
+cpu = [
+    # paddlepaddle 3.4.0 exists only on the paddle index stable/cpu channel (PyPI caps at 3.3.1
+    # for cp313/win_amd64), hence the paddle-cpu index + source below.
+    "paddlepaddle==3.4.0",
 ]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
 
+[tool.uv]
+# gpu/cpu install different distributions that both provide the `paddle` module, so they must
+# never be resolved into one environment.
+conflicts = [[{ group = "gpu" }, { group = "cpu" }]]
+# Dev machines keep the old `uv sync` / `uv run pytest` behaviour (GPU sidecar + tests).
+default-groups = ["dev", "gpu"]
+
 [[tool.uv.index]]
 name = "paddle-cu129"
 url = "https://www.paddlepaddle.org.cn/packages/stable/cu129/"
 explicit = true
 
+[[tool.uv.index]]
+name = "paddle-cpu"
+url = "https://www.paddlepaddle.org.cn/packages/stable/cpu/"
+explicit = true
+
 [tool.uv.sources]
 paddlepaddle-gpu = { index = "paddle-cu129" }
+paddlepaddle = { index = "paddle-cpu" }
