@@ -2,7 +2,12 @@
 name = "retran-core"
 version = "0.1.0"
 description = ""
-requires-python = ">=3.13"
+# Pinned to the exact cp313 ABI line, NOT ">=3.13" (measured 2026-11-07, Task 11b): with
+# UV_PYTHON_PREFERENCE=only-managed uv resolves the NEWEST managed interpreter matching the spec (3.14.9 on
+# this machine), every paddle 3.4.0 wheel for win_amd64 is cp313-only, and uv REMOVES the existing .venv
+# before failing the install (exit 2). `requires-python` is the only interpreter source the app ships, so a
+# wider spec means the setup wizard deletes the user's working venv and then fails.
+requires-python = "==3.13.*"
 dependencies = [
     # numpy<2.4: forced by paddlex>=3.7.0 (required by paddleocr>=3.7.0);
     # newer numpy would make the PP-OCRv6 stack unresolvable.

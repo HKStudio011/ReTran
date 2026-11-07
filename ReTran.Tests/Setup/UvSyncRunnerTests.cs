@@ -35,6 +35,16 @@ public class UvSyncRunnerTests : IDisposable
     private const string UvExe = @"C:\retran-test-fake\runtimes\win-x64\uv.exe";
 
     /// <summary>
+    /// The only admissible <c>requires-python</c> in the shipped <c>pyproject.toml</c>: the exact cp313 ABI
+    /// line every paddle 3.4.0 wheel carries (R59). Any wider spec — e.g. <c>&gt;=3.13</c> — lets uv pick a
+    /// managed CPython 3.14, and uv deletes the project environment before it fails the install.
+    /// Giá trị <c>requires-python</c> duy nhất được chấp nhận trong <c>pyproject.toml</c> ship kèm: đúng dòng
+    /// ABI cp313 mà mọi wheel paddle 3.4.0 mang (R59). Mọi spec rộng hơn — vd <c>&gt;=3.13</c> — cho phép uv
+    /// chọn managed CPython 3.14, và uv xóa project environment TRƯỚC khi nó fail bước cài.
+    /// </summary>
+    private const string PinnedPythonRequirement = "==3.13.*";
+
+    /// <summary>
     /// A <c>pyproject.toml> in the shape the app shipped BEFORE Amendment A2 — the GPU pins inside
     /// <c>[project].dependencies</c>, one paddle index, and no gpu/cpu dependency groups. That is exactly
     /// the file the retired rewrite machine used to edit, so it is the fixture for the new contract: a
@@ -381,6 +391,36 @@ public class UvSyncRunnerTests : IDisposable
     }
 
     [Fact]
+    public void Packaging_PythonRequirementIsPinnedTo313()
+    {
+        // R59 (đo 2026-11-07, Task 11b + sandbox Task 11d): ">=3.13" KHÔNG an toàn. Với
+        // UV_PYTHON_PREFERENCE=only-managed uv lấy interpreter managed MỚI NHẤT thoả spec — 3.14.9 trên máy
+        // dev đã cài sẵn, và trên máy sạch nó TỰ TẢI bản mới nhất lúc đó (đo: cpython-3.15.2) — rồi in
+        // "Removed virtual environment at: .venv" TRƯỚC khi fail: mọi wheel paddle 3.4.0 chỉ có ABI cp313
+        // ⇒ exit 2. Trên máy user đó là venv đang chạy bị xóa; ở worktree .venv là junction nên hỏng cả venv
+        // GPU của checkout chính. Interpreter chỉ được chọn từ pyproject (một nguồn sự thật, ship kèm lock),
+        // nên giá trị duy nhất đúng là đúng ABI mà mọi wheel paddle mang.
+        // R59 (measured 2026-11-07, Task 11b + Task 11d sandbox): ">=3.13" is NOT safe. With
+        // UV_PYTHON_PREFERENCE=only-managed uv takes the NEWEST managed interpreter satisfying the spec —
+        // 3.14.9 on a dev box that already has it, and on a clean machine it DOWNLOADS the then-newest one
+        // (measured: cpython-3.15.2) — and prints "Removed virtual environment at: .venv" BEFORE it fails:
+        // every paddle 3.4.0 wheel is cp313-only ⇒ exit 2. On a user box that deletes the running venv; in a
+        // worktree .venv is a junction, so the main checkout's GPU venv dies too. The interpreter may only
+        // come from pyproject (the single shipped source of truth), so the one correct value is exactly the
+        // ABI every paddle wheel ships.
+        string? toml = RepoPyprojectOrNull();
+        if (toml is null) return;
+
+        string requiresPython = ScalarValue(SectionLines(toml, "[project]"), "requires-python");
+        Assert.True(
+            requiresPython == PinnedPythonRequirement,
+            $"requires-python = \"{requiresPython}\" — phải ĐÚNG BẰNG \"{PinnedPythonRequirement}\": uv chọn "
+            + "interpreter managed mới nhất thoả spec (đo thật: CPython 3.14.9), mọi wheel paddle 3.4.0 chỉ "
+            + "có ABI cp313, và uv XÓA .venv hiện có trước khi fail exit 2 ⇒ nới lại \">=\" là wizard hủy "
+            + "venv của user rồi mới báo lỗi (task 11b).");
+    }
+
+    [Fact]
     public void Packaging_ToolUv_DeclaresConflictsDefaultGroupsAndTwoIndexes()
     {
         string? toml = RepoPyprojectOrNull();
@@ -485,6 +525,26 @@ public class UvSyncRunnerTests : IDisposable
         }
 
         return lines;
+    }
+
+    /// <summary>
+    /// Quoted value of a single-line <c>key = "value"</c> inside a section; "" when the key is absent.
+    /// Giá trị có dấu bao của một dòng <c>key = "value"</c> duy nhất trong một section; "" khi file thiếu key.
+    /// </summary>
+    private static string ScalarValue(List<string> sectionLines, string key)
+    {
+        foreach (string raw in sectionLines)
+        {
+            string trimmed = raw.Trim();
+            if (trimmed.StartsWith("#", StringComparison.Ordinal)) continue;
+
+            int equals = trimmed.IndexOf('=');
+            if (equals < 0 || trimmed[..equals].Trim() != key) continue;
+
+            return Quoted(trimmed) ?? string.Empty;
+        }
+
+        return string.Empty;
     }
 
     /// <summary>
