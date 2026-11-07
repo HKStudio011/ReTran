@@ -70,13 +70,30 @@ audit" + "Measured: what the GPU OCR path actually loads"). Phần này **thay t
   `CanonicalizeGpuPyproject`, `IsPyprojectVariantOfHead`, `ReadPyprojectCurrent`, `ReadPyprojectHead` + các test
   of chúng. Giữ phát hiện flavor theo **R55** (`uv pip show`, exit code), map `paddlepaddle-gpu`→`Gpu`,
   `paddlepaddle`→`Cpu`.
-- **`SystemCheck`:** một nấc GPU duy nhất — **driver ≥ 576.02** (sàn CUDA 12.9 trên Windows, `57_602`) **và
-  CC ≥ 7.5** (điền rule cho seam R17) → GPU; còn lại CPU. `CudaWheel` còn `Cu129`/`None`. Fixture cũ mong
-  `cu126`/`cu130` (545.00, 560.76, 570.00, 580.00, `32.0.15.6094`) ⇒ nay mong **CPU + notice**.
+- **`SystemCheck`:** một nấc GPU duy nhất — **driver ≥ 576.02** (sàn CUDA 12.9 trên Windows, `57_602`) → GPU
+  (`CudaWheel = "cu129"`); còn lại CPU. `MinDriverForCu130`/`MinDriverForCu126` + nhãn `cu130`/`cu126` bị xoá.
+  `MinFreeBytesCpu`: 5 GB → **2 GB** (đo: wheel paddle CPU 105,5 MB). `FormatMinDriver()` phải in ra **576.02**
+  (notice cũ đangquote 560.76). Fixture cũ mong `cu126`/`cu130` (545.00, 560.76, 570.00, 580.00,
+  `32.0.15.6094`) ⇒ nay mong **CPU + notice** (hoặc `cu129` nếu driver ≥ 576.02).
+  **Cửa compute capability KHÔNG nằm ở `SystemCheck`**: WMI `Win32_VideoController` không lộ CC, và suy CC từ
+  tên card là bịa số liệu (vi phạm ràng buộc "không bịa hành vi"). Số đo thật duy nhất có được là từ chính
+  sidecar sau khi cài (`paddle.device.get_device_capability()`, đo trên máy này = `(12, 0)`), nên rule
+  **CC ≥ 7.5** (fatbin trong wheel cu129: sm_75/80/86/89/120) nằm ở **bước xác minh sidecar của Setup
+  (Task 12)**: nếu GPU không chạy được model, Setup báo "card không được bản GPU hỗ trợ" và cho user chọn lại
+  sang bản CPU (chạy lại Setup). `SystemCheck` giữ seam `osArchitecture` (x64) như cũ, không thêm gate giả.
   Notice (chữ tiếng Việt trong modal, không chặn): driver < 576.02 →
   "Driver NVIDIA … cũ hơn 576.02 — Setup sẽ cài bản CPU. Cập nhật driver rồi chạy lại Setup để dùng GPU.";
-  CC < 7.5 → "Card đồ hoạ (compute capability x.y) không được PaddlePaddle 3.4.0 hỗ trợ — Setup sẽ cài bản CPU.";
-  venv đang mang flavor khác flavor sẽ cài → notice nêu rõ flavour hiện tại/flavour mới + sẽ tải lại (~GB).
+  Task 12 thêm notice khi venv đang mang flavor khác flavor sẽ cài (nêu flavour hiện tại/flavour mới + sẽ tải lại).
+- **Cửa phiên bản CPython (R59, đo 2026-11-07 qua Task 11b):** `requires-python = "==3.13.*"` (KHÔNG dùng
+  `>=3.13`). Với `UV_PYTHON_PREFERENCE=only-managed`, uv 0.13.7 chọn managed **mới nhất** thoả spec — trên máy dev
+  là **3.14.9** — rồi **XOÁ `ReTran.OCR\.venv` hiện có** (`.venv\Lib\site-packages\paddle.libs\*.dll` là bản
+  cp313-only ⇒ `uv sync` exit 2 vì mọi wheel paddle chỉ có ABI cp313). Trên worktree, `.venv` là junction nên hành
+  vi đó **hủy luôn venv GPU của checkout chính** (đã xảy ra, đã khôi phục bằng `--python 3.13`). Vì vậy version
+  Python phải ghim cứng trong `pyproject.toml` (một nguồn sự thật, đã ship kèm), không truyền `--python` từ code,
+  và `uv sync` trên máy sạch sẽ **tự tải** CPython 3.13 managed từ python-build-standalone (đã đo:
+  `cpython-install-managed-3.13.18-windows-x86_64-msvc`). Hệ quả cho wizard: một lần sync fail có thể để lại
+  trạng thái **không còn venv**, nên bước retry của Setup phải là sync lại toàn bộ chứ không phải "sửa tiếp".
+
 - **Sàn disk (§10 spec):** GPU **8 GB** (đo: venv 3,96 GB = paddle 1.727 MB + cudnn 1.058 MB + cublas 736 MB +
   nvrtc 178 MB; wheel GPU 869 MB + cudnn 768 MB + cublas 553 MB + nvrtc 76 MB), CPU **2 GB** (wheel paddle CPU
   **105,5 MB**).
