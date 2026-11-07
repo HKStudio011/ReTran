@@ -1,26 +1,21 @@
-using System.Text;
-
 namespace ReTran_App.Services.Setup;
 
 /// <summary>
 /// Installs the OCR sidecar environment for the wheel flavor <see cref="SystemCheck"/> picked (spec §4
-/// step 3, §5.7): rewrites <c>ReTran.OCR/pyproject.toml</c> so it pins the wheel the machine can actually
-/// run, drives <c>uv sync</c> (plus the CPU wheel install on the CPU path), and reports which paddle wheel
-/// ended up installed.
-/// Cài môi trường sidecar OCR theo flavor wheel mà <see cref="SystemCheck"/> chọn (spec §4 bước 3, §5.7):
-/// rewrite <c>ReTran.OCR/pyproject.toml</c> để pin đúng wheel mà máy chạy được, chạy <c>uv sync</c> (kèm
-/// lệnh cài wheel CPU trên nhánh CPU), và báo wheel paddle nào đã cài xong.
+/// step 3, §5.7) by selecting a dependency GROUP of the sidecar tree: exactly one
+/// <c>uv sync --no-default-groups --group gpu|cpu --frozen</c> per install. Under Amendment A2 of the
+/// 2026-11-04 merge plan the app never edits <c>ReTran.OCR/pyproject.toml</c> — that file ships in one
+/// canonical shape holding both flavors, and the shipped <c>uv.lock</c> carries both paddle
+/// distributions, so the resolution this team measured is precisely what the user's machine installs.
+/// Cài môi trường sidecar OCR theo flavor wheel mà <see cref="SystemCheck"/> chọn (spec §4 bước 3, §5.7)
+/// bằng cách chọn một dependency GROUP của cây sidecar: mỗi lần cài đúng một lệnh
+/// <c>uv sync --no-default-groups --group gpu|cpu --frozen</c>. Theo Amendment A2 của plan merge
+/// 2026-11-04, app không bao giờ sửa <c>ReTran.OCR/pyproject.toml</c> — file đó ship ở một hình dạng chuẩn
+/// duy nhất chứa cả hai flavor, và <c>uv.lock</c> đi kèm mang cả hai distribution paddle, nên bản resolve
+/// đã đo chính là thứ được cài trên máy user.
 /// </summary>
 public sealed class UvSyncRunner
 {
-    /// <summary>
-    /// Requirement <c>uv pip install</c> adds after <c>uv sync</c> on the CPU path: the CPU-only paddle
-    /// wheel, the same 3.4.0 line as the GPU pin it replaces in pyproject.toml.
-    /// Requirement mà <c>uv pip install</c> chạy sau <c>uv sync</c> trên nhánh CPU: wheel paddle bản CPU,
-    /// đúng bản 3.4.0 như pin GPU mà nó thay thế trong pyproject.toml.
-    /// </summary>
-    public const string CpuPaddleRequirement = "paddlepaddle==3.4.0";
-
     /// <summary>
     /// Environment variable every uv invocation gets, pinned to <see cref="UvPythonPreferenceValue"/>: the
     /// wizard must never pick up a stray system Python (spec §5.7 — uv provisions its own managed CPython).
@@ -37,36 +32,21 @@ public sealed class UvSyncRunner
 
     private const string PyprojectFileName = "pyproject.toml";
 
-    // Variant khi cudaWheel null hoặc không có trong danh sách: pyproject HEAD pin cu129, nên cu129 là mặc
-    // định trung thực nhất (SystemCheck chỉ phát hành "cu130"/"cu129"/"cu126").
-    // Variant used when cudaWheel is null or unlisted: the HEAD pyproject pins cu129, so cu129 is the most
-    // faithful default (SystemCheck only ever emits "cu130"/"cu129"/"cu126").
-    private const string DefaultCudaWheel = "cu129";
+    // Tên hai dependency-group của sidecar trong pyproject + lock (Amendment A2). `--no-default-groups`
+    // loại group `dev` (pytest) ra khỏi cài đặt của user; `conflicts` trong [tool.uv] khiến uv từ chối
+    // cài gpu và cpu cùng lúc, nên không bao giờ có chuyện wheel CPU chồng lên môi trường GPU đang chạy.
+    // The sidecar's two dependency-group names in the pyproject and lock (Amendment A2).
+    // `--no-default-groups` keeps the `dev` group (pytest) out of the user's install; `conflicts` in
+    // [tool.uv] makes uv refuse gpu and cpu together, so a CPU wheel can never layer onto a running GPU
+    // environment.
+    private const string GpuGroup = "gpu";
+    private const string CpuGroup = "cpu";
 
-    private const string PaddleIndexNamePrefix = "paddle-";
-    private const string PaddleIndexUrlBase = "https://www.paddlepaddle.org.cn/packages/stable/";
+    // Package name of each wheel flavor — InstalledPaddleFlavorAsync probes exactly these two with
+    // `uv pip show`. / Tên package của mỗi flavor wheel — InstalledPaddleFlavorAsync dò đúng hai tên này
+    // bằng `uv pip show`.
     private const string GpuWheelPackage = "paddlepaddle-gpu";
-    private const string CudnnPackage = "nvidia-cudnn-cu12";
     private const string PaddlePackage = "paddlepaddle";
-
-    // Hai pin GPU mà bản apply phải DỰNG LẠI khi flavor quay về GPU (file dạng CPU đã bị xoá chúng): đúng
-    // nội dung file đi kèm, cùng dòng version với CpuPaddleRequirement.
-    // The two GPU pins the apply must RE-CREATE when the flavor goes back to GPU (a CPU-form file has them
-    // removed): exactly what the shipped file has, same version line as CpuPaddleRequirement.
-    private const string GpuWheelPin = "paddlepaddle-gpu==3.4.0";
-    private const string CudnnPin = "nvidia-cudnn-cu12==9.9.0.52";
-
-    // Entry dependency đứng ngay trước 2 pin GPU trong file đi kèm — anchor để chèn lại chúng đúng thứ tự
-    // canonical (numpy → paddleocr → paddlepaddle-gpu → nvidia-cudnn-cu12 → pillow).
-    // The dependency entry that precedes the GPU pins in the shipped file — the anchor that re-inserts them
-    // in canonical order (numpy → paddleocr → paddlepaddle-gpu → nvidia-cudnn-cu12 → pillow).
-    private const string GpuPinAnchorPackage = "paddleocr";
-
-    // Tên section TOML đã biết trong file này; [[tool.uv.index]] là array-of-tables (2 cặp ngoặc).
-    // Known TOML section names in this file; [[tool.uv.index]] is an array-of-tables (two bracket pairs).
-    private const string ProjectHeader = "[project]";
-    private const string ToolUvIndexHeader = "[[tool.uv.index]]";
-    private const string ToolUvSourcesHeader = "[tool.uv.sources]";
 
     private readonly IProcessRunner _runner;
     private readonly string _uvExe;
@@ -93,9 +73,9 @@ public sealed class UvSyncRunner
     /// <see langword="null"/> để lấy <see cref="SetupPaths.UvExe"/>.
     /// </param>
     /// <param name="ocrDir">
-    /// Sidecar tree holding <c>pyproject.toml</c> and <c>.venv</c>, or <see langword="null"/> for
-    /// <see cref="SetupPaths.OcrDir"/>. / Cây sidecar chứa <c>pyproject.toml</c> và <c>.venv</c>, hoặc
-    /// <see langword="null"/> để lấy <see cref="SetupPaths.OcrDir"/>.
+    /// Sidecar tree holding <c>pyproject.toml</c>, <c>uv.lock</c> and <c>.venv</c>, or
+    /// <see langword="null"/> for <see cref="SetupPaths.OcrDir"/>. / Cây sidecar chứa <c>pyproject.toml</c>,
+    /// <c>uv.lock</c> và <c>.venv</c>, hoặc <see langword="null"/> để lấy <see cref="SetupPaths.OcrDir"/>.
     /// </param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="runner"/> is null. / <paramref name="runner"/> null.
@@ -109,8 +89,12 @@ public sealed class UvSyncRunner
     }
 
     /// <summary>
-    /// The <c>pyproject.toml</c> this instance rewrites: <c>&lt;ocrDir&gt;\pyproject.toml</c>.
-    /// File <c>pyproject.toml</c> mà instance này rewrite: <c>&lt;ocrDir&gt;\pyproject.toml</c>.
+    /// The sidecar <c>pyproject.toml</c> that sits beside the <c>.venv</c> this instance syncs:
+    /// <c>&lt;ocrDir&gt;\pyproject.toml</c>. The runner never reads or writes it (Amendment A2) — the path
+    /// exists so a caller can show or check the file, and so tests can prove it stays byte-identical.
+    /// File <c>pyproject.toml</c> của sidecar nằm cạnh <c>.venv</c> mà instance này sync:
+    /// <c>&lt;ocrDir&gt;\pyproject.toml</c>. Runner không đọc hay ghi file đó (Amendment A2) — đường dẫn
+    /// tồn tại để caller hiển thị/kiểm tra file, và để test chứng minh nó không đổi một byte nào.
     /// </summary>
     public string PyprojectPath => Path.Combine(_ocrDir, PyprojectFileName);
 
@@ -130,120 +114,66 @@ public sealed class UvSyncRunner
     public string? LastOutputTail { get; private set; }
 
     /// <summary>
-    /// Rewrites <paramref name="pyprojectPath"/> into the ONE target shape for this flavor + CUDA variant
-    /// (spec §5.7, ruling R54 2026-11-06): the result depends only on the requested flavor, never on which
-    /// flavor the file happened to be in before. Line/section text surgery, not a TOML parse: the file is
-    /// small and its format is fixed by this repo.
-    /// Rewrite <paramref name="pyprojectPath"/> về ĐÚNG một hình dạng đích cho flavor + biến thể CUDA (spec
-    /// §5.7, ruling R54 2026-11-06): kết quả chỉ phụ thuộc flavor được yêu cầu, không phụ thuộc flavor trước
-    /// đó của file. Thao tác text theo dòng/section, không parse TOML: file nhỏ và format đã repo cố định.
-    /// <list type="bullet">
-    /// <item>CPU: không còn dòng dependency <c>paddlepaddle-gpu</c> / <c>nvidia-cudnn-cu12</c> và không còn
-    /// section <c>[[tool.uv.index]]</c> / <c>[tool.uv.sources]</c>; mọi dependency và section khác nguyên
-    /// vẹn. Wheel CPU do <see cref="SyncAsync"/> cài, không pin ở đây.</item>
-    /// <item>GPU: pin <c>paddlepaddle-gpu==3.4.0</c> phải có, kèm <c>nvidia-cudnn-cu12==9.9.0.52</c> chỉ với
-    /// cu129 (cu126/cu130 để wheel paddle tự kéo cudnn đúng bản), và phần cuối file mang
-    /// <c>[[tool.uv.index]]</c> (<c>name</c>/<c>url</c> = <c>paddle-&lt;variant&gt;</c>, <c>explicit = true</c>)
-    /// rồi <c>[tool.uv.sources]</c> trỏ package đó về index. Những gì thiếu được THÊM — pin chèn vào mảng
-    /// <c>dependencies</c> theo đúng thứ tự file đi kèm, section nối vào cuối file — còn những gì đã có được
-    /// trỏ lại, nên chuyển CPU→GPU (hay cu126→cu129) mà wizard áp trước mọi lần sync sẽ dựng lại đủ.</item>
-    /// </list>
-    /// Idempotent and quiet: the write is skipped when the content already matches, line endings and the
-    /// UTF-8 BOM state are preserved, and the cu129 target equals the shipped file, so that case leaves the
-    /// repo file byte-identical.
-    /// Idempotent và im lặng: không ghi khi nội dung đã khớp, giữ nguyên line ending và trạng thái BOM UTF-8,
-    /// và đích cu129 đúng bằng file đi kèm, nên trường hợp đó để file repo y hệt từng byte.
+    /// Runs the one uv command this flavor needs:
+    /// <c>sync --no-default-groups --group gpu|cpu --frozen</c> in <see cref="SetupPaths.OcrDir"/> (or the
+    /// injected ocr dir) with <c>UV_PYTHON_PREFERENCE=only-managed</c> and no other flags. The group names
+    /// come from the sidecar's <c>[dependency-groups]</c>; <c>--no-default-groups</c> drops the
+    /// <c>dev</c>/<c>gpu</c> defaults a dev machine uses, and <c>--frozen</c> installs the shipped
+    /// <c>uv.lock</c> as-is instead of re-resolving it, which is what keeps a user's install identical to
+    /// the set that was performance-measured.
+    /// Chạy đúng một lệnh uv mà flavor này cần: <c>sync --no-default-groups --group gpu|cpu --frozen</c>
+    /// trong <see cref="SetupPaths.OcrDir"/> (hoặc ocr dir được inject) với
+    /// <c>UV_PYTHON_PREFERENCE=only-managed</c> và không thêm cờ nào. Tên group lấy từ
+    /// <c>[dependency-groups]</c> của sidecar; <c>--no-default-groups</c> bỏ các group mặc định
+    /// <c>dev</c>/<c>gpu</c> mà máy dev dùng, còn <c>--frozen</c> cài đúng <c>uv.lock</c> đi kèm thay vì
+    /// resolve lại — đó là cách giữ bản cài trên máy user giống hệt bộ đã đo perf.
     /// </summary>
+    /// <remarks>
+    /// No <c>pyproject.toml</c> I/O, and no extra <c>uv pip install</c> step: the CPU wheel lives in the
+    /// <c>cpu</c> group of the same lock, so both flavors are one command apart. uv refuses to resolve the
+    /// two groups into one environment (<c>conflicts</c> in <c>[tool.uv]</c>), so switching flavors on a
+    /// machine that already has the other wheel re-installs cleanly rather than mixing them.
+    /// Không có I/O <c>pyproject.toml</c>, và không thêm bước <c>uv pip install</c>: wheel CPU nằm trong
+    /// group <c>cpu</c> của cùng lock đó, nên hai flavor chỉ cách nhau một lệnh. uv từ chối resolve hai
+    /// group vào cùng một môi trường (<c>conflicts</c> trong <c>[tool.uv]</c>), nên đổi flavor trên máy đã
+    /// có wheel kia sẽ cài lại sạch chứ không trộn lẫn.
+    /// </remarks>
     /// <param name="flavor">
-    /// Wheel flavor to prepare. / Flavor wheel cần chuẩn bị.
-    /// </param>
-    /// <param name="cudaWheel">
-    /// CUDA variant label ("cu130"/"cu129"/"cu126"), ignored on the CPU path. <see langword="null"/> or an
-    /// unlisted label means cu129 — the variant the HEAD pyproject already pins.
-    /// Nhãn biến thể CUDA ("cu130"/"cu129"/"cu126"), bỏ qua trên nhánh CPU. <see langword="null"/> hoặc nhãn
-    /// không có trong danh sách ⇒ hiểu là cu129 — biến thể mà pyproject HEAD đang pin.
-    /// </param>
-    /// <param name="pyprojectPath">
-    /// File to rewrite in place. / File được rewrite tại chỗ.
-    /// </param>
-    /// <exception cref="ArgumentException">
-    /// <paramref name="pyprojectPath"/> is empty. / <paramref name="pyprojectPath"/> rỗng.
-    /// </exception>
-    /// <exception cref="FileNotFoundException">
-    /// The file does not exist — the wizard ships the sidecar tree beside the app, so a missing file means a
-    /// broken install, not a flavor waiting to be created. / File không tồn tại — wizard đi kèm cây sidecar
-    /// cạnh app, nên file thiếu là cài đặt hỏng, không phải flavor cần tạo.
-    /// </exception>
-    public static void ApplyFlavorToPyproject(OcrFlavor flavor, string? cudaWheel, string pyprojectPath)
-    {
-        ArgumentException.ThrowIfNullOrEmpty(pyprojectPath);
-
-        byte[] raw = File.ReadAllBytes(pyprojectPath);
-        bool hasBom = raw.Length >= 3 && raw[0] == 0xEF && raw[1] == 0xBB && raw[2] == 0xBF;
-        int offset = hasBom ? 3 : 0;
-        string original = Encoding.UTF8.GetString(raw, offset, raw.Length - offset);
-
-        string updated = RewritePyproject(original, flavor, cudaWheel);
-        if (string.Equals(original, updated, StringComparison.Ordinal))
-        {
-            // Không ghi: giữ nguyên từng byte (kể cả line ending và BOM) cho tới khi nội dung thật đổi.
-            // No write: every byte (line endings and BOM included) stays put until the content differs.
-            return;
-        }
-
-        File.WriteAllText(pyprojectPath, updated, new UTF8Encoding(hasBom));
-    }
-
-    /// <summary>
-    /// Applies the flavor to <see cref="PyprojectPath"/> then runs uv. GPU: exactly one <c>uv sync</c>. CPU:
-    /// <c>uv sync</c> then <c>uv pip install paddlepaddle==3.4.0</c>, in that order — sync resolves the
-    /// CPU-only dependency set, then the CPU wheel is installed on top. Every command runs in
-    /// <see cref="SetupPaths.OcrDir"/> (or the injected ocr dir) with
-    /// <c>UV_PYTHON_PREFERENCE=only-managed</c> and no other flags.
-    /// Áp flavor vào <see cref="PyprojectPath"/> rồi chạy uv. GPU: đúng một lệnh <c>uv sync</c>. CPU:
-    /// <c>uv sync</c> rồi <c>uv pip install paddlepaddle==3.4.0</c>, đúng thứ tự — sync resolve bộ dependency
-    /// chỉ-CPU, sau đó wheel CPU được cài chồng lên. Mọi lệnh chạy trong <see cref="SetupPaths.OcrDir"/> (hoặc
-    /// ocr dir được inject) với <c>UV_PYTHON_PREFERENCE=only-managed</c> và không thêm cờ nào.
-    /// </summary>
-    /// <param name="flavor">
-    /// Wheel flavor from <see cref="SystemCheckResult.Flavor"/>. / Flavor wheel từ <see cref="SystemCheckResult.Flavor"/>.
-    /// </param>
-    /// <param name="cudaWheel">
-    /// CUDA variant from <see cref="SystemCheckResult.CudaWheel"/>; null means cu129. / Biến thể CUDA từ
-    /// <see cref="SystemCheckResult.CudaWheel"/>; null ⇒ cu129.
+    /// Wheel flavor from <see cref="SystemCheckResult.Flavor"/>. / Flavor wheel từ
+    /// <see cref="SystemCheckResult.Flavor"/>.
     /// </param>
     /// <param name="ct">
     /// Cancellation token forwarded to the process runner; cancelling kills uv. / Token hủy chuyển cho process
     /// runner; hủy sẽ kill uv.
     /// </param>
     /// <returns>
-    /// <c>0</c> when every command succeeded, otherwise the exit code of the FIRST failing command — its
-    /// output is left in <see cref="LastOutputTail"/> for the retry/error UI (Review Focus #4). Commands after
-    /// the failure are not run.
-    /// <c>0</c> khi mọi lệnh thành công, ngược lại là exit code của lệnh FAIL ĐẦU TIÊN — output của lệnh đó
-    /// được giữ trong <see cref="LastOutputTail"/> cho UI retry/lỗi (Review Focus #4). Lệnh sau lỗi không chạy.
+    /// <c>0</c> when the command succeeded, otherwise its exit code — its output is left in
+    /// <see cref="LastOutputTail"/> for the retry/error UI (Review Focus #4).
+    /// <c>0</c> khi lệnh thành công, ngược lại là exit code của lệnh đó — output của nó được giữ trong
+    /// <see cref="LastOutputTail"/> cho UI retry/lỗi (Review Focus #4).
     /// </returns>
-    public async Task<int> SyncAsync(OcrFlavor flavor, string? cudaWheel, CancellationToken ct)
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="flavor"/> has no dependency-group name — the runner refuses to guess which wheel to
+    /// install. / <paramref name="flavor"/> không có tên dependency-group — runner không đoán wheel nào để cài.
+    /// </exception>
+    public async Task<int> SyncAsync(OcrFlavor flavor, CancellationToken ct)
     {
-        ApplyFlavorToPyproject(flavor, cudaWheel, PyprojectPath);
         LastOutputTail = null;
 
-        (int syncExit, string syncTail) = await _runner
-            .RunAsync(_uvExe, ["sync"], _ocrDir, BuildUvEnvironment(), ct)
-            .ConfigureAwait(false);
-        if (syncExit != 0)
+        string group = flavor switch
         {
-            LastOutputTail = syncTail;
-            return syncExit;
-        }
+            OcrFlavor.Gpu => GpuGroup,
+            OcrFlavor.Cpu => CpuGroup,
+            _ => throw new ArgumentOutOfRangeException(nameof(flavor), flavor,
+                "OcrFlavor không có dependency-group paddle tương ứng."),
+        };
 
-        if (flavor != OcrFlavor.Cpu) return 0;
-
-        (int pipExit, string pipTail) = await _runner
-            .RunAsync(_uvExe, ["pip", "install", CpuPaddleRequirement], _ocrDir, BuildUvEnvironment(), ct)
+        (int syncExit, string syncTail) = await _runner
+            .RunAsync(_uvExe, ["sync", "--no-default-groups", "--group", group, "--frozen"],
+                _ocrDir, BuildUvEnvironment(), ct)
             .ConfigureAwait(false);
-        if (pipExit != 0) LastOutputTail = pipTail;
-        return pipExit;
+        if (syncExit != 0) LastOutputTail = syncTail;
+        return syncExit;
     }
 
     /// <summary>
@@ -298,402 +228,4 @@ public sealed class UvSyncRunner
     /// </summary>
     private static Dictionary<string, string> BuildUvEnvironment() =>
         new() { [UvPythonPreferenceVariable] = UvPythonPreferenceValue };
-
-    /// <summary>
-    /// Line-level rewrite of the whole file into the flavor's target shape. Splits on newlines, remembers the
-    /// dominant newline (CRLF wins when present) and whether the file ended with one, edits line by line, then
-    /// re-joins — that is what keeps an unchanged cu129 file byte-identical. <paramref name="sectionOf"/> runs
-    /// parallel to the kept lines and carries the section each line sits in; that is what lets the GPU path
-    /// insert what an earlier CPU path removed (pins inside <c>[project]</c>, uv sections at the tail).
-    /// Rewrite ở mức dòng cho cả file theo hình dạng đích của flavor. Tách theo xuống dòng, nhớ kiểu xuống dòng
-    /// chủ đạo (có CRLF là CRLF) và việc file có kết thúc bằng xuống dòng hay không, sửa từng dòng rồi ghép lại
-    /// — đó là cách giữ file cu129 không đổi ở mức byte. <paramref name="sectionOf"/> song song với các dòng
-    /// được giữ và mang tên section của từng dòng; nhờ đó nhánh GPU chèn lại được những gì nhánh CPU trước đó
-    /// đã bỏ (pin trong <c>[project]</c>, section uv ở cuối file).
-    /// </summary>
-    private static string RewritePyproject(string text, OcrFlavor flavor, string? cudaWheel)
-    {
-        string newline = text.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
-        string[] split = text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n').Split('\n');
-        // Phần tử cuối rỗng ⇒ file kết thúc bằng xuống dòng; giữ lại chi tiết đó khi ghép.
-        // The last element is empty when the file ends with a newline; that detail is kept on rejoin.
-        bool endsWithNewline = split.Length > 1 && split[^1].Length == 0;
-        int bodyCount = split.Length - (endsWithNewline ? 1 : 0);
-
-        string? variant = flavor == OcrFlavor.Gpu ? NormalizeWheel(cudaWheel) : null;
-        bool dropUvSections = flavor == OcrFlavor.Cpu;
-
-        var output = new List<string>(split.Length);
-        var sectionOf = new List<string>(split.Length);
-        string section = string.Empty;
-        for (int i = 0; i < bodyCount; i++)
-        {
-            string trimmed = split[i].Trim();
-
-            if (IsSectionHeader(trimmed))
-            {
-                section = trimmed;
-                if (dropUvSections && (section == ToolUvIndexHeader || section == ToolUvSourcesHeader))
-                {
-                    // Bỏ cả dòng trống phân cách ngay trước section để file CPU không còn rác cuối.
-                    // Drop the blank separator line right before the section so the CPU file has no junk tail.
-                    while (output.Count > 0 && output[^1].Trim().Length == 0)
-                    {
-                        output.RemoveAt(output.Count - 1);
-                        sectionOf.RemoveAt(sectionOf.Count - 1);
-                    }
-
-                    while (i + 1 < bodyCount && !IsSectionHeader(split[i + 1].Trim())) i++;
-                    continue;
-                }
-            }
-
-            if (IsGpuPinLine(trimmed, section, flavor, variant)) continue;
-
-            output.Add(RewriteSectionLine(split[i], trimmed, section, variant));
-            sectionOf.Add(section);
-        }
-
-        if (variant is not null)
-        {
-            InsertMissingGpuPins(output, sectionOf, variant);
-            AppendMissingUvSections(output, sectionOf, variant);
-        }
-
-        return string.Join(newline, output) + (endsWithNewline ? newline : string.Empty);
-    }
-
-    /// <summary>
-    /// Re-creates the GPU pins a previous CPU apply removed, at the position the shipped file keeps them:
-    /// <c>paddlepaddle-gpu</c> right after <see cref="GpuPinAnchorPackage"/>, and
-    /// <c>nvidia-cudnn-cu12</c> right after that pin — the cudnn line only for
-    /// <see cref="DefaultCudaWheel"/>. Without this the CPU→GPU path would sync a file with NO GPU
-    /// dependency, i.e. a CPU environment recorded as GPU (R54).
-    /// Dựng lại các pin GPU mà bản apply CPU trước đó đã xoá, đúng vị trí file đi kèm:
-    /// <c>paddlepaddle-gpu</c> ngay sau <see cref="GpuPinAnchorPackage"/>, và <c>nvidia-cudnn-cu12</c> ngay
-    /// sau pin đó — dòng cudnn chỉ có với <see cref="DefaultCudaWheel"/>. Không có bước này thì nhánh
-    /// CPU→GPU sẽ sync một file KHÔNG còn dependency GPU nào, tức môi trường CPU bị ghi nhận là GPU (R54).
-    /// </summary>
-    private static void InsertMissingGpuPins(List<string> output, List<string> sectionOf, string variant)
-    {
-        int gpuAt = IndexOfPin(output, sectionOf, GpuWheelPackage);
-        int cudnnAt = IndexOfPin(output, sectionOf, CudnnPackage);
-        bool addCudnn = variant == DefaultCudaWheel && cudnnAt < 0;
-
-        if (gpuAt < 0)
-        {
-            int at = PinInsertionIndex(output, sectionOf);
-            // Không còn mảng dependencies nhiều dòng để chèn ⇒ để nguyên phần file đã dựng.
-            // No multi-line dependency array left to insert into ⇒ keep the rest of the rebuilt file as is.
-            if (at < 0) return;
-
-            InsertPin(output, sectionOf, at, GpuWheelPin);
-            if (addCudnn) InsertPin(output, sectionOf, at + 1, CudnnPin);
-            return;
-        }
-
-        if (addCudnn) InsertPin(output, sectionOf, gpuAt + 1, CudnnPin);
-    }
-
-    /// <summary>
-    /// Index that the GPU pin block goes at: just after the anchor entry the shipped file puts before it, or
-    /// at the end of the <c>dependencies</c> array when that anchor is gone; -1 when the file has no
-    /// multi-line dependency array to insert into.
-    /// Vị trí khối pin GPU được chèn vào: ngay sau entry anchor mà file đi kèm đặt trước nó, hoặc cuối mảng
-    /// <c>dependencies</c> khi anchor đã biến; -1 khi file không còn mảng dependency nhiều dòng để chèn.
-    /// </summary>
-    private static int PinInsertionIndex(List<string> output, List<string> sectionOf)
-    {
-        int anchor = IndexOfPin(output, sectionOf, GpuPinAnchorPackage);
-        if (anchor >= 0) return anchor + 1;
-
-        for (int i = 0; i < output.Count; i++)
-        {
-            if (sectionOf[i] != ProjectHeader) continue;
-            if (!output[i].Trim().StartsWith("dependencies", StringComparison.OrdinalIgnoreCase)) continue;
-
-            for (int j = i + 1; j < output.Count && sectionOf[j] == ProjectHeader; j++)
-            {
-                if (output[j].Trim() == "]") return j;
-            }
-
-            return -1;
-        }
-
-        return -1;
-    }
-
-    /// <summary>
-    /// Inserts one dependency entry with the 4-space indent the shipped file uses for its entries.
-    /// Chèn một entry dependency với indent 4 khoảng trắng giống file đi kèm.
-    /// </summary>
-    private static void InsertPin(List<string> output, List<string> sectionOf, int index, string pin)
-    {
-        output.Insert(index, $"    \"{pin}\",");
-        sectionOf.Insert(index, ProjectHeader);
-    }
-
-    /// <summary>
-    /// Adds back the uv blocks the shipped file carries when this file lost them (the CPU apply removes both):
-    /// an index entry for <c>paddle-&lt;variant&gt;</c> with <c>explicit = true</c>, then a sources entry
-    /// pointing <c>paddlepaddle-gpu</c> at that index, appended in the shipped file's tail layout. Blocks that
-    /// are still there are not duplicated — <see cref="RewriteSectionLine"/> has just repointed their values —
-    /// so an index the user added themselves survives, and a sources section that lost only its paddle entry
-    /// gets that entry back at the end of the section.
-    /// Thêm lại các section uv mà file đi kèm có, khi file này đã mất (bản apply CPU xoá cả hai): entry index
-    /// cho <c>paddle-&lt;variant&gt;</c> kèm <c>explicit = true</c>, rồi entry sources trỏ
-    /// <c>paddlepaddle-gpu</c> về index đó, nối vào cuối file đúng bố cục file đi kèm. Section còn đó thì không
-    /// bị nhân đôi — <see cref="RewriteSectionLine"/> vừa trỏ lại giá trị của chúng — nên index do user tự thêm
-    /// vẫn còn, và section sources chỉ mất entry paddle sẽ được trả lại entry ngay cuối section đó.
-    /// </summary>
-    private static void AppendMissingUvSections(List<string> output, List<string> sectionOf, string variant)
-    {
-        string indexName = PaddleIndexNamePrefix + variant;
-
-        if (!HasPaddleIndexEntry(output, sectionOf))
-        {
-            AppendSeparator(output, sectionOf);
-            AddSectionLine(output, sectionOf, ToolUvIndexHeader, ToolUvIndexHeader);
-            AddSectionLine(output, sectionOf, ToolUvIndexHeader, $"name = \"{indexName}\"");
-            AddSectionLine(output, sectionOf, ToolUvIndexHeader, $"url = \"{PaddleIndexUrlBase}{variant}/\"");
-            AddSectionLine(output, sectionOf, ToolUvIndexHeader, "explicit = true");
-        }
-
-        if (HasGpuSourceEntry(output, sectionOf)) return;
-
-        string entry = $"{GpuWheelPackage} = {{ index = \"{indexName}\" }}";
-        int sourcesAt = LastIndexOfSection(output, sectionOf, ToolUvSourcesHeader);
-        if (sourcesAt >= 0)
-        {
-            output.Insert(sourcesAt + 1, entry);
-            sectionOf.Insert(sourcesAt + 1, ToolUvSourcesHeader);
-            return;
-        }
-
-        AppendSeparator(output, sectionOf);
-        AddSectionLine(output, sectionOf, ToolUvSourcesHeader, ToolUvSourcesHeader);
-        AddSectionLine(output, sectionOf, ToolUvSourcesHeader, entry);
-    }
-
-    /// <summary>
-    /// Blank line between two appended sections, skipped when the file is empty or its last line is already
-    /// blank — that keeps the shipped file's single blank separator.
-    /// Dòng trống ngăn giữa hai section vừa nối, bỏ qua khi file rỗng hoặc dòng cuối đã trống — giữ đúng một
-    /// dòng trống phân cách như file đi kèm.
-    /// </summary>
-    private static void AppendSeparator(List<string> output, List<string> sectionOf)
-    {
-        if (output.Count > 0 && output[^1].Trim().Length != 0)
-        {
-            output.Add(string.Empty);
-            sectionOf.Add(string.Empty);
-        }
-    }
-
-    /// <summary>Appends one line and records which section it belongs to.</summary>
-    private static void AddSectionLine(List<string> output, List<string> sectionOf, string section, string line)
-    {
-        output.Add(line);
-        sectionOf.Add(section);
-    }
-
-    /// <summary>
-    /// Index of the first <c>[project]</c> dependency entry for <paramref name="packageName"/>, -1 when the
-    /// file has none.
-    /// Chỉ mục entry dependency đầu tiên trong <c>[project]</c> cho <paramref name="packageName"/>, -1 khi file
-    /// không có.
-    /// </summary>
-    private static int IndexOfPin(List<string> output, List<string> sectionOf, string packageName)
-    {
-        for (int i = 0; i < output.Count; i++)
-        {
-            if (sectionOf[i] == ProjectHeader && IsDependencyLine(output[i].Trim(), packageName)) return i;
-        }
-
-        return -1;
-    }
-
-    /// <summary>
-    /// True when an index entry already points at the paddle package index (by name or by url).
-    /// True khi đã có entry index trỏ vào index package paddle (xét theo name hoặc url).
-    /// </summary>
-    private static bool HasPaddleIndexEntry(List<string> output, List<string> sectionOf)
-    {
-        for (int i = 0; i < output.Count; i++)
-        {
-            if (sectionOf[i] != ToolUvIndexHeader) continue;
-
-            string trimmed = output[i].Trim();
-            if (trimmed.StartsWith("name", StringComparison.OrdinalIgnoreCase)
-                && TryReadQuotedValue(trimmed, out string indexName)
-                && indexName.StartsWith(PaddleIndexNamePrefix, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-
-            if (trimmed.StartsWith("url", StringComparison.OrdinalIgnoreCase)
-                && trimmed.Contains(PaddleIndexUrlBase, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /// <summary>
-    /// True when a sources entry for the GPU wheel package already exists.
-    /// True khi entry sources cho package wheel GPU đã tồn tại.
-    /// </summary>
-    private static bool HasGpuSourceEntry(List<string> output, List<string> sectionOf)
-        => LastIndexOfSection(output, sectionOf, ToolUvSourcesHeader, static line =>
-            line.StartsWith(GpuWheelPackage, StringComparison.OrdinalIgnoreCase)) >= 0;
-
-    private static int LastIndexOfSection(List<string> output, List<string> sectionOf, string section)
-        => LastIndexOfSection(output, sectionOf, section, null);
-
-    /// <summary>
-    /// Index of the last line of <paramref name="section"/>, optionally narrowed by a predicate on the
-    /// trimmed line; -1 when the file has no such line.
-    /// Chỉ mục dòng cuối của <paramref name="section"/>, có thể thu hẹp bằng predicate trên dòng đã trim; -1
-    /// khi file không có dòng đó.
-    /// </summary>
-    private static int LastIndexOfSection(
-        List<string> output,
-        List<string> sectionOf,
-        string section,
-        Func<string, bool>? lineMatches)
-    {
-        for (int i = output.Count - 1; i >= 0; i--)
-        {
-            if (sectionOf[i] != section) continue;
-            if (lineMatches is null || lineMatches(output[i].Trim())) return i;
-        }
-
-        return -1;
-    }
-
-    /// <summary>
-    /// Variant label used for the index rewrite: null or an unlisted label falls back to
-    /// <see cref="DefaultCudaWheel"/> (cu129), the variant the shipped pyproject already points at.
-    /// Nhãn biến thể dùng để rewrite index: null hoặc nhãn lạ rơi về <see cref="DefaultCudaWheel"/> (cu129),
-    /// biến thể mà pyproject đi kèm đang trỏ tới.
-    /// </summary>
-    private static string NormalizeWheel(string? cudaWheel)
-        => cudaWheel is "cu126" or "cu130" ? cudaWheel : DefaultCudaWheel;
-
-    /// <summary>
-    /// A TOML table / array-of-tables header line, e.g. <c>[project]</c> or <c>[[tool.uv.index]]</c>. No
-    /// content line in this file starts with '[' and ends with ']', so a shape test is enough.
-    /// Dòng header của table / array-of-tables TOML, vd <c>[project]</c> hoặc <c>[[tool.uv.index]]</c>. Không
-    /// có dòng nội dung nào trong file này bắt đầu bằng '[' và kết thúc bằng ']', nên xét hình dạng là đủ.
-    /// </summary>
-    private static bool IsSectionHeader(string trimmed)
-        => trimmed.Length > 1 && trimmed[0] == '[' && trimmed[^1] == ']';
-
-    /// <summary>
-    /// Dependency lines to drop: on CPU both GPU pins; on GPU only the <c>nvidia-cudnn-cu12</c> pin, and only
-    /// for cu126/cu130 (cu129 keeps it exactly as the shipped file has it). Restricted to the
-    /// <c>[project]</c> section so a same-named key elsewhere is never touched.
-    /// Dòng dependency cần bỏ: trên CPU bỏ cả 2 pin GPU; trên GPU chỉ bỏ pin <c>nvidia-cudnn-cu12</c>, và chỉ
-    /// với cu126/cu130 (cu129 giữ pin đúng như file đi kèm). Giới hạn trong section <c>[project]</c> để khóa
-    /// cùng tên ở chỗ khác không bị đụng.
-    /// </summary>
-    private static bool IsGpuPinLine(string trimmed, string section, OcrFlavor flavor, string? variant)
-    {
-        if (section != ProjectHeader) return false;
-        if (flavor == OcrFlavor.Cpu)
-        {
-            return IsDependencyLine(trimmed, GpuWheelPackage) || IsDependencyLine(trimmed, CudnnPackage);
-        }
-
-        return variant != DefaultCudaWheel && IsDependencyLine(trimmed, CudnnPackage);
-    }
-
-    /// <summary>
-    /// True for a quoted dependency entry for <paramref name="packageName"/>, e.g.
-    /// <c>"paddlepaddle-gpu==3.4.0",</c>.
-    /// True với một entry dependency có dấu bao quanh cho <paramref name="packageName"/>, vd
-    /// <c>"paddlepaddle-gpu==3.4.0",</c>.
-    /// </summary>
-    private static bool IsDependencyLine(string trimmed, string packageName)
-        => trimmed.StartsWith($"\"{packageName}", StringComparison.OrdinalIgnoreCase)
-        || trimmed.StartsWith($"'{packageName}", StringComparison.OrdinalIgnoreCase);
-
-    /// <summary>
-    /// Repoints the uv index entry and the sources entry at the target variant; anything outside those two
-    /// sections is returned untouched — including its original indentation, which is why both the raw line
-    /// and its trimmed form are passed in. Name and url are rewritten even for cu129 so a file left at
-    /// another variant returns to the shipped state.
-    /// Trỏ lại entry index uv và entry sources về biến thể đích; mọi thứ ngoài 2 section đó trả nguyên trạng
-    /// — kể cả indent gốc, đó là lý do truyền cả dòng thô lẫn dòng đã trim. name và url được rewrite kể cả
-    /// với cu129 để file đang ở biến thể khác quay về đúng trạng thái đi kèm.
-    /// </summary>
-    private static string RewriteSectionLine(string line, string trimmed, string section, string? variant)
-    {
-        if (variant is null) return line;
-
-        if (section == ToolUvIndexHeader)
-        {
-            if (trimmed.StartsWith("name", StringComparison.OrdinalIgnoreCase)
-                && TryReadQuotedValue(trimmed, out string indexName)
-                && indexName.StartsWith(PaddleIndexNamePrefix, StringComparison.OrdinalIgnoreCase))
-            {
-                return $"name = \"{PaddleIndexNamePrefix}{variant}\"";
-            }
-
-            if (trimmed.StartsWith("url", StringComparison.OrdinalIgnoreCase)
-                && trimmed.Contains(PaddleIndexUrlBase, StringComparison.OrdinalIgnoreCase))
-            {
-                return $"url = \"{PaddleIndexUrlBase}{variant}/\"";
-            }
-        }
-        else if (section == ToolUvSourcesHeader
-                 && trimmed.StartsWith(GpuWheelPackage, StringComparison.OrdinalIgnoreCase))
-        {
-            return RepointIndexReference(line, $"{PaddleIndexNamePrefix}{variant}");
-        }
-
-        return line;
-    }
-
-    /// <summary>
-    /// Replaces the quoted value of the first <c>index = "..."</c> on a sources line, keeping the rest of the
-    /// line exactly as written.
-    /// Thay giá trị trong dấu bao của <c>index = "..."</c> đầu tiên trên một dòng sources, giữ nguyên phần còn
-    /// lại của dòng.
-    /// </summary>
-    private static string RepointIndexReference(string line, string indexName)
-    {
-        int keyword = line.IndexOf("index", StringComparison.OrdinalIgnoreCase);
-        if (keyword < 0) return line;
-
-        int open = line.IndexOf('"', keyword);
-        if (open < 0) return line;
-        int close = line.IndexOf('"', open + 1);
-        if (close <= open) return line;
-
-        return string.Concat(line.AsSpan(0, open + 1), indexName.AsSpan(), line.AsSpan(close));
-    }
-
-    /// <summary>
-    /// Reads the quoted right-hand value of a <c>key = "value"</c> line (single or double quotes).
-    /// Đọc giá trị bên phải có dấu bao của dòng <c>key = "value"</c> (nháy đơn hoặc nháy kép).
-    /// </summary>
-    private static bool TryReadQuotedValue(string line, out string value)
-    {
-        value = string.Empty;
-        int equals = line.IndexOf('=');
-        if (equals < 0) return false;
-
-        string right = line[(equals + 1)..].Trim();
-        if (right.Length < 2 || (right[0] != '"' && right[0] != '\'')) return false;
-
-        char quote = right[0];
-        int close = right.IndexOf(quote, 1);
-        if (close < 0) return false;
-
-        value = right[1..close];
-        return true;
-    }
 }
