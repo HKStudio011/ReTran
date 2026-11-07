@@ -35,6 +35,53 @@ Sáu failure mode spec ngụ ý nhưng không task nào tự phủ — mỗi dò
 5. **`OverlayOnGame` default là `false`** ⇒ sau thay đổi này, ai chưa từng bật `Lớp phủ` sẽ thấy OBS **trắng hoàn toàn** — đúng theo quyết định U3 (một công tắc) nhưng là thay đổi nhìn thấy được, phải nói rõ trên thẻ OBS của trang Home, không để người dùng tưởng OBS hỏng. → Task 9 (key i18n + chữ trên thẻ OBS) + checklist smoke Task 24.
 6. **Ô số nhập rỗng / dùng dấu phẩy thập phân / ngoài dải** ⇒ không `Save`, không gửi `core.start`, hiện lỗi đỏ cạnh nút Lưu (sheet đang hiển thị theo culture). → Task 6 (`OcrMergeThresholdsTests`), Task 7 (`SaveOcrParamsAsync` chặn trước khi save).
 7. **Sai ánh xạ phiên bản driver NVIDIA → chọn wheel CUDA cao hơn máy chạy nổi** (`SystemCheck.cs:401` suy số trăm từ DDI major, thật nằm ở segment branch thứ 3) ⇒ wizard cài cu130 cho máy chỉ đủ cu126, theo hướng **không** fail-safe; fixture tổng hợp `31.0.15.…` đang ghim chặt format sai nên suite không phát hiện. → Task 10 (fixture WMI thật `32.0.15.6094→cu126`, `32.0.15.8163`→CPU, `32.0.16.2114`→cu130).
+8. **Wizard tự tay sửa `pyproject.toml` trên máy user** ⇒ `uv.lock` ship kèm bị vô hiệu (mọi máy sạch resolve lại từ dải `>=`, lệch bộ đã đo perf), và một bản sửa sai (CPU→GPU kiểu incremental) cho ra pyproject **không còn** dependency GPU lẫn index paddle. → Amendment A2: một `pyproject.toml` chuẩn duy nhất + `dependency-groups` `gpu`/`cpu`, `uv sync --group …` chọn flavor, **không** sửa file.
+
+---
+
+## Amendment A2 (2026-11-07) — một target CUDA, `dependency-groups`, không sửa `pyproject.toml`
+
+User chốt, dựa trên số đo (ledger `2026-11-04-merge-thresholds/progress.md`, mục "PaddlePaddle GPU dependencies
+audit" + "Measured: what the GPU OCR path actually loads"). Phần này **thay thế** mọi mục trong plan/spec nói về
+"thang 3 nấc wheel cu130/cu129/cu126" và "ghi đè `pyproject.toml` theo flavor":
+
+- **Bằng chứng:** index paddle không có `paddlepaddle-gpu` 3.4.0 cho cp313/win_amd64 ở nấc `cu126` (tối đa 3.3.1)
+  ⇒ nấc đó không cài được với pin `==3.4.0`; wheel `cu129` chứa fatbin **sm_75/80/86/89/120** (đo bằng
+  `cuobjdump --list-elf --list-ptx phi.dll`) ⇒ GTX 1650/1660 (CC 7.5) chạy được, Pascal/Maxwell/Volta thì không;
+  OCR det+rec thật chỉ cần **cuDNN + cuBLAS(+Lt) + nvrtc** (probe với PATH bỏ CUDA toolkit: `HELLO RETRAN 0.992`,
+  `gpu:0`), `cufft/cusolver/cusparse` không được nạp ⇒ thêm 5 gói paddle khai báo = +955 MB tải về, vô ích;
+  `paddlepaddle` (CPU) `3.4.0` chỉ có trên index paddle `stable/cpu/` (PyPI tối đa 3.3.1).
+- **`ReTran.OCR/pyproject.toml` (một file chuẩn, app không bao giờ sửa):**
+  - `[project].dependencies` = phần không phụ thuộc flavor: `paddleocr==3.7.0`, `paddlex`, `shared-memory`,
+    `pillow`, `numpy`.
+  - `[dependency-groups]`: `gpu = ["paddlepaddle-gpu==3.4.0", "nvidia-cudnn-cu12==9.9.0.52",
+    "nvidia-cublas-cu12==12.9.0.13"]` (cublas ghim đúng bản paddle khai báo, thay cho 12.9.2.10 suy ra từ cudnn),
+    `cpu = ["paddlepaddle==3.4.0"]`.
+  - `[tool.uv]`: `conflicts = [[{ group = "gpu" }, { group = "cpu" }]]`, `default-groups = ["dev", "gpu"]`
+    (để `uv sync` / `uv run pytest` của dev giữ nguyên hành vi theo AGENTS.md).
+  - hai `[[tool.uv.index]]` `explicit = true`: `paddle-cu129` = `…/stable/cu129/`, `paddle-cpu` = `…/stable/cpu/`;
+    `[tool.uv.sources]`: `paddlepaddle-gpu → paddle-cu129`, `paddlepaddle → paddle-cpu`.
+  - `uv lock` một lần, **commit `ReTran.OCR/uv.lock`** (93 packages, đo 2026-11-07) và ship nó:
+    thêm Content item `..\ReTran.OCR\uv.lock` (`CopyToOutputDirectory=PreserveNewest`) vào
+    `ReTran.App/ReTran.App.csproj` (cụm item `ReTran.OCR`, dòng ~92-95).
+- **`UvSyncRunner`:** `SidecarFlavor` còn **`Gpu` | `Cpu`**. argv thật:
+  `uv sync --no-default-groups --group gpu|cpu --frozen` (`--frozen` = dùng đúng lock ship kèm, không re-resolve).
+  **Xoá** máy chế rewrite/pyproject-head: `ApplyFlavorToPyproject`, `RewritePyproject`, `VariantPyprojectFor`,
+  `CanonicalizeGpuPyproject`, `IsPyprojectVariantOfHead`, `ReadPyprojectCurrent`, `ReadPyprojectHead` + các test
+  of chúng. Giữ phát hiện flavor theo **R55** (`uv pip show`, exit code), map `paddlepaddle-gpu`→`Gpu`,
+  `paddlepaddle`→`Cpu`.
+- **`SystemCheck`:** một nấc GPU duy nhất — **driver ≥ 576.02** (sàn CUDA 12.9 trên Windows, `57_602`) **và
+  CC ≥ 7.5** (điền rule cho seam R17) → GPU; còn lại CPU. `CudaWheel` còn `Cu129`/`None`. Fixture cũ mong
+  `cu126`/`cu130` (545.00, 560.76, 570.00, 580.00, `32.0.15.6094`) ⇒ nay mong **CPU + notice**.
+  Notice (chữ tiếng Việt trong modal, không chặn): driver < 576.02 →
+  "Driver NVIDIA … cũ hơn 576.02 — Setup sẽ cài bản CPU. Cập nhật driver rồi chạy lại Setup để dùng GPU.";
+  CC < 7.5 → "Card đồ hoạ (compute capability x.y) không được PaddlePaddle 3.4.0 hỗ trợ — Setup sẽ cài bản CPU.";
+  venv đang mang flavor khác flavor sẽ cài → notice nêu rõ flavour hiện tại/flavour mới + sẽ tải lại (~GB).
+- **Sàn disk (§10 spec):** GPU **8 GB** (đo: venv 3,96 GB = paddle 1.727 MB + cudnn 1.058 MB + cublas 736 MB +
+  nvrtc 178 MB; wheel GPU 869 MB + cudnn 768 MB + cublas 553 MB + nvrtc 76 MB), CPU **2 GB** (wheel paddle CPU
+  **105,5 MB**).
+- **Test flavor CPU mà không phá `.venv` dev:** đặt `UV_PROJECT_ENVIRONMENT=<venv tạm>` khi test (worktree dùng
+  junction `.venv` vào checkout chính — tuyệt đối không `uv sync --group cpu` vào `.venv` thật).
 
 ---
 
