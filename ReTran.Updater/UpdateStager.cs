@@ -105,7 +105,9 @@ internal static class UpdateStager
 
     /// <summary>
     /// Copies every file in staging (subdirectories included) into appDir, overwriting duplicates.
+    /// Overwrite-only by design — never delete files in appDir: user state (.venv, models) must survive updates (spec 2026-11-03-first-run-setup-wizard §5.2).
     /// Copy toàn bộ file staging (kể cả thư mục con) vào appDir, ghi đè file trùng.
+    /// Chỉ ghi đè theo thiết kế — không bao giờ xoá file trong appDir.
     /// </summary>
     internal static void CopyDirectory(string stagingDir, string appDir)
     {

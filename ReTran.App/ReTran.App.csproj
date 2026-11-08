@@ -96,7 +96,7 @@
     <ItemGroup>
         <Content Include="..\ReTran.OCR\pyproject.toml" Link="ReTran.OCR\pyproject.toml" CopyToOutputDirectory="PreserveNewest" />
         <Content Include="..\ReTran.OCR\uv.lock" Link="ReTran.OCR\uv.lock" CopyToOutputDirectory="PreserveNewest" />
-        <Content Include="..\ReTran.OCR\src\**\*.*" Link="ReTran.OCR\src\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+        <Content Include="..\ReTran.OCR\src\**\*.*" Exclude="..\ReTran.OCR\src\**\__pycache__\**" Link="ReTran.OCR\src\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
         <Content Include="..\runtimes\win-x64\uv.exe" Link="runtimes\win-x64\uv.exe" CopyToOutputDirectory="PreserveNewest" />
         <Content Include="..\runtimes\win-x64\uv.version.txt" Link="runtimes\win-x64\uv.version.txt" CopyToOutputDirectory="PreserveNewest" />
     </ItemGroup>

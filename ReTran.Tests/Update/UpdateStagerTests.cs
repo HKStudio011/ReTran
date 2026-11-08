@@ -148,6 +148,27 @@ public class UpdateStagerTests : IDisposable
         Assert.Equal("<html/>", File.ReadAllText(Path.Combine(AppDir, "wwwroot", "index.html")));
     }
 
+    [Fact]
+    public void CopyDirectory_PreservesForeignFilesAndDirectories_InAppDir()
+    {
+        // Hàng rào (spec 2026-11-03-first-run-setup-wizard §5.2): user state (.venv, models)
+        // phải sống sót qua update — updater chỉ ghi đè, không bao giờ xoá trong appDir.
+        CreateDirs();
+        Directory.CreateDirectory(Path.Combine(AppDir, ".venv", "Scripts"));
+        File.WriteAllText(Path.Combine(AppDir, ".venv", "Scripts", "python.exe"), "py");
+        Directory.CreateDirectory(Path.Combine(AppDir, "models", "official_models", "m"));
+        File.WriteAllText(Path.Combine(AppDir, "models", "official_models", "m", "f.txt"), "model");
+        File.WriteAllText(Path.Combine(AppDir, "extra.txt"), "extra");
+        File.WriteAllText(Path.Combine(StagingDir, "ReTran.App.exe"), "new-exe");
+
+        UpdateStager.CopyDirectory(StagingDir, AppDir);
+
+        Assert.Equal("py", File.ReadAllText(Path.Combine(AppDir, ".venv", "Scripts", "python.exe")));
+        Assert.Equal("model", File.ReadAllText(Path.Combine(AppDir, "models", "official_models", "m", "f.txt")));
+        Assert.Equal("extra", File.ReadAllText(Path.Combine(AppDir, "extra.txt")));
+        Assert.Equal("new-exe", File.ReadAllText(Path.Combine(AppDir, "ReTran.App.exe")));
+    }
+
     private const string SelfContainedRuntimeConfig =
         """{"runtimeOptions":{"tfm":"net10.0","includedFrameworks":[{"name":"Microsoft.NETCore.App","version":"10.0.12"}]}}""";
 
