@@ -1,7 +1,6 @@
 using System.Text.Json.Nodes;
 using ReTran.Core.Capture;
 using ReTran.Core.Cli;
-using ReTran.Core.Config;
 using ReTran.Core.Ocr;
 using ReTran.Core.OcrClient;
 using Xunit;
@@ -234,17 +233,19 @@ public class OcrLoopCliTests
     [Fact]
     public async Task OcrLoop_RealSidecar_FakeSource_EmitsTwoJsonLines()
     {
-        // Infra gate: repo + venv + paddle warm-up — otherwise skip (never fail on environment).
-        if (!OperatingSystem.IsWindows()) return;
-        string? repoRoot = OcrBootstrap.FindRepoRoot();
-        if (repoRoot is null) return;
-        string python = OcrBootstrap.ResolvePythonExe(new CoreConfig(), repoRoot) ?? "";
-        if (python.Length == 0 || !File.Exists(python)) return;
+        // Infra gate: repo+venv (resolved from AppContext.BaseDirectory, see TryResolveRepoWithVenv) +
+        // paddle warm-up — otherwise report a skip with a reason (never fail on environment, never a
+        // silent return that xUnit counts as passed with zero sidecar coverage).
+        if (!OperatingSystem.IsWindows())
+            Assert.Skip("real-sidecar E2E is Windows-only (venv layout + sidecar spawn)");
+        if (!OcrTestSupport.TryResolveRepoWithVenv(out string repoRoot, out string python))
+            Assert.Skip("no ancestor of AppContext.BaseDirectory has both ReTran.OCR/pyproject.toml and ReTran.OCR/.venv/Scripts/python.exe (repo layout or uv venv missing)");
 
         string fixture = OcrTestSupport.CreateTextFixturePng();
         try
         {
-            if (!await OcrTestSupport.TryWarmUpModel(python, repoRoot, fixture)) return;
+            if (!await OcrTestSupport.TryWarmUpModel(python, repoRoot, fixture))
+                Assert.Skip("PaddleOCR import or model warm-up failed (paddle/model download unavailable or broken venv)");
 
             await using var sp = await SidecarProcess.StartAsync(python, repoRoot, CancellationToken.None);
             var pipeline = new OcrPipeline(sp, new OcrDiff());
