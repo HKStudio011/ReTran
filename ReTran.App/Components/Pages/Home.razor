@@ -464,8 +464,9 @@
 
     private async Task StartPipelineAsync()
     {
-        // Spec §3.1: setup chưa xong → modal che màn hình, không start pipeline (guard tách trong PipelineGate).
-        if (!ReTran_App.Services.Setup.PipelineGate.CanStartPipeline(Setup.IsComplete)) return;
+        // Spec §3.1: setup chưa xong HOẶC đang chạy một lượt (vd "chạy lại setup" — Step vẫn Done trong
+        // cửa sổ Checking đồng bộ) → modal che màn hình, không start pipeline (guard tách trong PipelineGate).
+        if (!ReTran_App.Services.Setup.PipelineGate.CanStartPipeline(Setup.IsComplete, Setup.IsRunning)) return;
 
         if (_sourceKind == "window" && string.IsNullOrEmpty(_windowHwnd))
         {

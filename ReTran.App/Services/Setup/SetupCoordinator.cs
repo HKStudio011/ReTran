@@ -237,6 +237,22 @@ public sealed class SetupCoordinator
     public bool IsComplete => Step == SetupStep.Done;
 
     /// <summary>
+    /// True while any coordinator operation (<see cref="StartAsync"/>, <see cref="ContinueWithLanguageAsync"/>,
+    /// <see cref="RetryAsync"/>, <see cref="ConfirmFlavorSwitchAsync"/>, <see cref="SwitchToCpuFlavorAsync"/>) is
+    /// in flight; false once the run finishes, pauses for user input (language, flavor switch), or fails.
+    /// Exposed so callers can tell "complete but re-running" apart from "complete and idle": during a forced
+    /// re-run <see cref="Step"/> still holds <see cref="SetupStep.Done"/> until the first publish, so
+    /// <see cref="IsComplete"/> alone cannot close that window.
+    /// Đúng khi một thao tác của coordinator (<see cref="StartAsync"/>, <see cref="ContinueWithLanguageAsync"/>,
+    /// <see cref="RetryAsync"/>, <see cref="ConfirmFlavorSwitchAsync"/>, <see cref="SwitchToCpuFlavorAsync"/>)
+    /// đang chạy; false khi lượt chạy kết thúc, dừng chờ user nhập liệu (ngôn ngữ, đổi flavor), hoặc fail.
+    /// Mở ra để caller phân biệt "xong nhưng đang chạy lại" với "xong và rảnh": trong lúc "chạy lại setup",
+    /// <see cref="Step"/> vẫn giữ <see cref="SetupStep.Done"/> cho tới publish đầu tiên, nên
+    /// <see cref="IsComplete"/> đơn lẻ không đủ để chặn cửa sổ đó.
+    /// </summary>
+    public bool IsRunning => Volatile.Read(ref _running) == 1;
+
+    /// <summary>
     /// The pending flavor switch while in <see cref="SetupStep.ConfirmingFlavorSwitch"/> (installed vs
     /// target); <see langword="null"} in every other step. Đổi flavor đang chờ khi ở <see cref="SetupStep.ConfirmingFlavorSwitch"/> (bản đã cài so với bản đích); <see langword="null"} ở mọi bước khác.
     /// </summary>

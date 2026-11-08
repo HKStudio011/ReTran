@@ -7,13 +7,13 @@ using ReTran_App.Services.Setup;
 /// <see cref="SetupCoreBridge"/> adapter (its <c>RestartAsync</c> must dispose the core peer BEFORE
 /// starting it again, and its <c>CallAsync</c> must forward method + params verbatim) and the
 /// <see cref="PipelineGate.CanStartPipeline"/> guard extracted from Home.razor (the pipeline may only
-/// start once setup is complete — spec §3.1). The fake core peer records every action so ordering is
-/// asserted, not assumed.
+/// start once setup is complete AND no wizard run is in flight — spec §3.1). The fake core peer records
+/// every action so ordering is asserted, not assumed.
 /// Test cho các mảnh wiring của Task 14 nằm ngoài coordinator: adapter <see cref="SetupCoreBridge"/>
 /// (<c>RestartAsync</c> phải dispose core peer TRƯỚC khi start lại, <c>CallAsync</c> phải forward
 /// nguyên vẹn method + params) và guard <see cref="PipelineGate.CanStartPipeline"/> tách ra từ
-/// Home.razor (pipeline chỉ được start khi setup đã xong — spec §3.1). Fake core peer ghi lại mọi
-/// hành động để assert đúng thứ tự, không đoán.
+/// Home.razor (pipeline chỉ được start khi setup đã xong VÀ wizard không đang chạy lượt nào — spec §3.1).
+/// Fake core peer ghi lại mọi hành động để assert đúng thứ tự, không đoán.
 /// </summary>
 public class SetupWiringTests
 {
@@ -49,13 +49,15 @@ public class SetupWiringTests
         Assert.Same(peer.Result, result);
     }
 
-    [Fact]
-    public void CanStartPipeline_TrueWhenSetupComplete() =>
-        Assert.True(PipelineGate.CanStartPipeline(setupComplete: true));
-
-    [Fact]
-    public void CanStartPipeline_FalseWhileSetupIncomplete() =>
-        Assert.False(PipelineGate.CanStartPipeline(setupComplete: false));
+    [Theory]
+    // Bốn tổ hợp (complete, running): chỉ "xong VÀ rảnh" được start. Dòng (true, true) là cửa sổ race
+    // của "chạy lại setup" — Step vẫn Done nên IsComplete đơn lẻ sẽ pass nhầm.
+    [InlineData(true, false, true)]   // complete + idle → cho start
+    [InlineData(true, true, false)]   // complete nhưng đang rerun (cửa sổ Checking) → chặn
+    [InlineData(false, false, false)] // chưa xong, đang dừng chờ user → chặn
+    [InlineData(false, true, false)]  // chưa xong và đang chạy (first run) → chặn
+    public void CanStartPipeline_RequiresCompleteAndNotRunning(bool setupComplete, bool setupRunning, bool expected) =>
+        Assert.Equal(expected, PipelineGate.CanStartPipeline(setupComplete: setupComplete, setupRunning: setupRunning));
 
     /// <summary>
     /// Recording <see cref="ICorePeer"/> double that is also <see cref="IAsyncDisposable"/> (like the
@@ -103,10 +105,28 @@ public class SetupWiringTests
             return ValueTask.CompletedTask;
         }
 
-        public event Action<string, JsonNode?>? NotificationReceived;
+        // ICorePeer yêu cầu 3 event mà bridge không subscribe — lưu handler vào field riêng thay vì
+        // event trống để không phát sinh CS0067 (handler "được dùng" qua +=/-=).
+        private Action<string, JsonNode?>? _notificationReceived;
+        private Action<Exception>? _handlerError;
+        private Action<int>? _exited;
 
-        public event Action<Exception>? HandlerError;
+        public event Action<string, JsonNode?>? NotificationReceived
+        {
+            add { _notificationReceived += value; }
+            remove { _notificationReceived -= value; }
+        }
 
-        public event Action<int>? Exited;
+        public event Action<Exception>? HandlerError
+        {
+            add { _handlerError += value; }
+            remove { _handlerError -= value; }
+        }
+
+        public event Action<int>? Exited
+        {
+            add { _exited += value; }
+            remove { _exited -= value; }
+        }
     }
 }

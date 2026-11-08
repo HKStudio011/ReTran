@@ -6,22 +6,31 @@ namespace ReTran_App.Services.Setup;
 /// <summary>
 /// Pipeline-start guard for the first-run setup gate (spec §3.1): while the wizard is not complete
 /// its full-screen modal covers the whole UI, so starting capture/OCR underneath would burn CPU/GPU
-/// for a screen nobody can see and race the wizard's own sidecar restarts. Extracted from Home.razor
-/// as a pure function so the decision is unit-testable (SetupWiringTests).
+/// for a screen nobody can see and race the wizard's own sidecar restarts. The guard also blocks a
+/// completed machine that is RE-RUNNING setup: during the forced re-run's synchronous Checking window
+/// the step still reads Done (so completion alone passes), but the re-run will kill+start Core at its
+/// VerifyingSidecar step and any pipeline started in that window dies with it. Extracted from
+/// Home.razor as a pure function so the decision is unit-testable (SetupWiringTests).
 /// Cổng chặn start pipeline khi setup chạy lần đầu chưa xong (spec §3.1): trong khi wizard chưa hoàn
 /// tất, modal toàn màn hình của nó che kín UI — start capture/OCR bên dưới vừa tốn CPU/GPU cho màn
-/// hình không ai thấy, vừa đua với các lần restart sidecar của chính wizard. Tách ra khỏi Home.razor
-/// thành hàm thuần để quyết định test được (SetupWiringTests).
+/// hình không ai thấy, vừa đua với các lần restart sidecar của chính wizard. Cổng cũng chặn máy ĐÃ XONG
+/// nhưng đang "chạy lại setup": trong cửa sổ Checking đồng bộ của lượt chạy lại, bước vẫn đọc là Done
+/// (nên chỉ xét completion thì pass), nhưng lượt chạy đó sẽ kill+start Core ở bước VerifyingSidecar và
+/// pipeline nào start trong cửa sổ đó sẽ chết theo. Tách ra khỏi Home.razor thành hàm thuần để quyết
+/// định test được (SetupWiringTests).
 /// </summary>
 public static class PipelineGate
 {
     /// <summary>
-    /// Whether the capture/OCR pipeline may start given the setup completion state.
-    /// Pipeline capture/OCR có được start không khi biết trạng thái hoàn tất của setup.
+    /// Whether the capture/OCR pipeline may start given the setup completion state and whether a wizard
+    /// run is in flight.
+    /// Pipeline capture/OCR có được start không khi biết trạng thái hoàn tất của setup và wizard có đang
+    /// chạy một lượt không.
     /// </summary>
     /// <param name="setupComplete">True once the setup wizard reached its Done step. Đúng khi wizard setup đã tới bước Done.</param>
-    /// <returns><see langword="true"/> when setup is complete; <see langword="false"/> while it still must run. <see langword="true"/> khi setup đã xong; <see langword="false"/> khi nó còn phải chạy.</returns>
-    internal static bool CanStartPipeline(bool setupComplete) => setupComplete;
+    /// <param name="setupRunning">True while any coordinator operation is in flight (e.g. a forced re-run). Đúng khi một thao tác của coordinator đang chạy (vd "chạy lại setup").</param>
+    /// <returns><see langword="true"/> only when setup is complete AND no run is in flight; <see langword="false"/> otherwise. <see langword="true"/> chỉ khi setup đã xong VÀ không có lượt chạy nào đang diễn ra; <see langword="false"/> trong mọi trường hợp khác.</returns>
+    internal static bool CanStartPipeline(bool setupComplete, bool setupRunning) => setupComplete && !setupRunning;
 }
 
 /// <summary>

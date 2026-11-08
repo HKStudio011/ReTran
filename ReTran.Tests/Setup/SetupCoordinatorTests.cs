@@ -69,19 +69,22 @@ public class SetupCoordinatorTests : IDisposable
 
     /// <summary>
     /// Builds a coordinator over the shared fakes; state and settings point at temp files, model
-    /// polling runs at 10 ms so download tests finish in milliseconds.
+    /// polling runs at 10 ms so download tests finish in milliseconds. The host-reachability seam
+    /// answers "reachable" by default; tests may replace it to hold the Checking step open.
     /// Dựng coordinator trên các fake chung; state và settings trỏ file temp, poll model chạy 10 ms
-    /// để test download kết thúc trong vài mili-giây.
+    /// để test download kết thúc trong vài mili-giây. Seam probe mạng mặc định trả lời "tới được";
+    /// test có thể thay nó để giữ bước Checking mở ra.
     /// </summary>
     private SetupCoordinator NewCoordinator(
         IVideoAdapterSource? adapters = null,
         Func<string, long>? diskFree = null,
+        Func<string, bool>? isHostReachable = null,
         Func<string, bool>? fileExists = null)
     {
         var coordinator = new SetupCoordinator(
             adapters ?? Adapters(NvidiaCurrent),
             diskFree ?? (_ => 100 * GB),
-            _ => true,
+            isHostReachable ?? (_ => true),
             _syncRunner,
             _bridge,
             _settings,
@@ -534,6 +537,98 @@ public class SetupCoordinatorTests : IDisposable
         Assert.True(coordinator.IsComplete);
         Assert.Empty(_uvFake.SyncCalls);
         Assert.Empty(_bridge.Calls);
+    }
+
+    // ── IsRunning: cửa sổ race của "chạy lại setup" (máy đã xong, rerun force) ────────────────────
+
+    [Fact]
+    public async Task ForcedRerun_IsRunningTrueDuringCheckingWindow_FalseAfterDone()
+    {
+        // Production sequence: setup completes IN-SESSION (Step = Done), then the user clicks "Chạy
+        // lại setup" on the same long-lived coordinator. During the forced re-run's synchronous
+        // Checking window Step still holds Done, so IsComplete alone passes — IsRunning is what closes
+        // the window.
+        // Trình tự production: setup xong TRONG PHIÊN (Step = Done), rồi user bấm "Chạy lại setup" trên
+        // cùng một coordinator sống lâu. Trong cửa sổ Checking đồng bộ của lượt chạy lại, Step vẫn giữ
+        // Done nên IsComplete đơn lẻ sẽ pass — chính IsRunning là thứ chặn cửa sổ đó.
+        var blockProbe = false;
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        // The network-probe seam doubles as the window's latch: once blocking is armed, the first probe
+        // call marks entry into the Checking window and holds it open until the test releases it (the
+        // token keeps a cancelled test from leaking the blocked worker thread).
+        // Seam probe mạng đóng vai chốt cửa sổ: khi bật chặn, lần gọi probe đầu đánh dấu vào cửa sổ
+        // Checking và giữ nó mở tới khi test cho phép tiếp tục (token để test bị hủy không rò rỉ luồng
+        // worker đang chặn).
+        Func<string, bool> probe = _ =>
+        {
+            if (!blockProbe) return true;
+            entered.TrySetResult();
+            release.Task.Wait(TestContext.Current.CancellationToken); // the blind window under test
+            return true;
+        };
+        var coordinator = NewCoordinator(isHostReachable: probe);
+
+        // Phase 1: complete the wizard in-session (language answer + full pipeline on the fast fakes).
+        // Giai đoạn 1: hoàn tất wizard trong phiên (trả lời ngôn ngữ + toàn bộ pipeline trên fake nhanh).
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.ChoosingLanguage, coordinator.Step);
+        await coordinator.ContinueWithLanguageAsync("vi", TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.True(coordinator.IsComplete);
+
+        // Phase 2: force the re-run. StartAsync runs synchronously into the Checking step, so it must
+        // run on its own thread — exactly how SettingsPanel.RerunSetup invokes it (Task.Run, fire and
+        // forget).
+        // Giai đoạn 2: buộc chạy lại. StartAsync chạy đồng bộ thẳng vào bước Checking nên phải chạy trên
+        // luồng riêng — đúng cách SettingsPanel.RerunSetup gọi nó (Task.Run, không await).
+        blockProbe = true;
+        Task startTask = Task.Run(
+            () => coordinator.StartAsync(force: true, TestContext.Current.CancellationToken),
+            TestContext.Current.CancellationToken);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+        // In flight: the run is in progress while Step still reads Done — IsComplete alone would pass
+        // the gate, but with IsRunning the gate blocks.
+        // Đang chạy: lượt run đang diễn ra trong khi Step vẫn đọc là Done — IsComplete đơn lẻ sẽ pass
+        // gate, nhưng kèm IsRunning thì gate chặn.
+        Assert.True(coordinator.IsRunning);
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.True(coordinator.IsComplete);
+        Assert.False(PipelineGate.CanStartPipeline(coordinator.IsComplete, coordinator.IsRunning));
+
+        release.SetResult();
+        await startTask.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+        // The run finished (every step was already done → straight back to Done): IsRunning is false.
+        // Lượt chạy kết thúc (mọi bước đã done → quay thẳng về Done): IsRunning về false.
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.True(coordinator.IsComplete);
+        Assert.False(coordinator.IsRunning);
+    }
+
+    [Fact]
+    public async Task IsRunning_FalseWhenRunPausesOrFails()
+    {
+        // Idle from construction: no operation in flight yet.
+        // Rảnh ngay từ khi tạo: chưa có thao tác nào đang chạy.
+        var coordinator = NewCoordinator();
+        Assert.False(coordinator.IsRunning);
+
+        // Pause: no language answered — StartAsync returns having paused at ChoosingLanguage; the run
+        // is over even though the wizard still waits for user input.
+        // Dừng chờ: chưa có ngôn ngữ — StartAsync trả về sau khi dừng ở ChoosingLanguage; lượt chạy
+        // đã kết thúc dù wizard vẫn đang chờ user nhập liệu.
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.ChoosingLanguage, coordinator.Step);
+        Assert.False(coordinator.IsRunning);
+
+        // Fail: hard Checking failure (disk below the GPU floor) — Failed; the run is over too.
+        // Fail: Checking fail cứng (đĩa dưới sàn GPU) — Failed; lượt chạy cũng đã kết thúc.
+        var failed = NewCoordinator(diskFree: _ => 1 * GB);
+        await failed.StartAsync(ct: TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.Failed, failed.Step);
+        Assert.False(failed.IsRunning);
     }
 
     // ── fakes ─────────────────────────────────────────────────────────────────────────────────────
