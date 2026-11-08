@@ -539,6 +539,55 @@ public class SetupCoordinatorTests : IDisposable
         Assert.Empty(_bridge.Calls);
     }
 
+    // ── khởi tạo Step từ state đã lưu (micro-task 14c) ────────────────────────────────────────────
+
+    [Fact]
+    public void Construction_WithCompletePersistedState_StartsAtDone()
+    {
+        // The bug this pins: setup completed in a PREVIOUS session and the app restarts. SetupModal's
+        // cheap path (NeedsSetup false) never calls StartAsync, so the singleton must not sit at
+        // Checking — both the pipeline gate and the Settings recovery section read IsComplete off Step.
+        // Bug được pin ở đây: setup đã xong ở PHIÊN TRƯỚC và app khởi động lại. Đường rẻ của SetupModal
+        // (NeedsSetup false) không gọi StartAsync, nên singleton không được nằm ở Checking — cả gate
+        // pipeline lẫn section khôi phục trong Settings đều đọc IsComplete từ Step.
+        WriteSetupJson("""
+            {
+              "flavor": "gpu",
+              "language": "vi",
+              "isComplete": true,
+              "steps": {
+                "checking": "done",
+                "choosinglanguage": "done",
+                "verifyingfiles": "done",
+                "syncing": "done",
+                "verifysidecar": "done",
+                "downloadingmodels": "done",
+                "applying": "done"
+              }
+            }
+            """);
+
+        var coordinator = NewCoordinator(); // NO StartAsync call / KHÔNG gọi StartAsync
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.True(coordinator.IsComplete);
+        Assert.False(coordinator.IsRunning);
+        Assert.True(PipelineGate.CanStartPipeline(coordinator.IsComplete, coordinator.IsRunning));
+    }
+
+    [Fact]
+    public void Construction_WithIncompletePersistedState_StartsAtChecking()
+    {
+        // The other side of the pin: an incomplete persisted state keeps the default initial step.
+        // Mặt còn lại của pin: state đã lưu chưa hoàn tất giữ nguyên bước khởi tạo mặc định.
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","steps":{"checking":"done"}}""");
+
+        var coordinator = NewCoordinator();
+
+        Assert.Equal(SetupStep.Checking, coordinator.Step);
+        Assert.False(coordinator.IsComplete);
+    }
+
     // ── IsRunning: cửa sổ race của "chạy lại setup" (máy đã xong, rerun force) ────────────────────
 
     [Fact]

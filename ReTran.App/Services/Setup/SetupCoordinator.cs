@@ -203,11 +203,24 @@ public sealed class SetupCoordinator
         _modelDownloadTimeout = modelDownloadTimeout ?? DefaultModelDownloadTimeout;
         _logger = logger;
         _state = _stateFactory();
+
+        // A fresh launch on an already-set-up machine must not leave the singleton stuck at Checking:
+        // SetupModal's cheap path (NeedsSetup false) never calls StartAsync, and both the pipeline gate
+        // and the Settings recovery section ("Chạy lại setup") read IsComplete off Step. Initialization
+        // only — no Publish, because no subscribers exist at construction time.
+        // Máy đã setup xong ở phiên trước khởi động lại không được để singleton kẹt ở Checking: đường rẻ
+        // của SetupModal (NeedsSetup false) không bao giờ gọi StartAsync, và cả gate pipeline lẫn section
+        // khôi phục trong Settings ("Chạy lại setup") đều đọc IsComplete từ Step. Chỉ là khởi tạo — không
+        // Publish vì thời điểm construct chưa có subscriber nào.
+        if (_state.IsComplete) Step = SetupStep.Done;
     }
 
     /// <summary>
-    /// Current wizard step; starts at <see cref="SetupStep.Checking"/> before the first
-    /// <see cref="StartAsync"/>. Bước wizard hiện tại; bắt đầu ở <see cref="SetupStep.Checking"/> trước lần <see cref="StartAsync"/> đầu.
+    /// Current wizard step; starts at <see cref="SetupStep.Done"/> when the persisted state is already
+    /// complete (a fresh launch on a set-up machine), otherwise at <see cref="SetupStep.Checking"/> before
+    /// the first <see cref="StartAsync"/>. Bước wizard hiện tại; bắt đầu ở <see cref="SetupStep.Done"/> khi
+    /// trạng thái đã lưu hoàn tất (khởi động mới trên máy đã setup), nếu không thì ở
+    /// <see cref="SetupStep.Checking"/> trước lần <see cref="StartAsync"/> đầu.
     /// </summary>
     public SetupStep Step { get; private set; } = SetupStep.Checking;
 
