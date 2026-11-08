@@ -531,6 +531,8 @@ def test_main_handlers_register_model_rpc(tmp_path, monkeypatch):
     assert set(handlers) == {
         "sidecar.ping",
         "sidecar.version",
+        # Task 12 addendum §3: the setup wizard's compute-capability probe.
+        "sidecar.device",
         "ocr.spot",
         "ocr.models.list",
         "ocr.models.download",

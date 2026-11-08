@@ -20,6 +20,39 @@ from .ocr.paddle_engine import PaddleOcrEngine
 from .ocr.shm import ShmReader
 
 
+def _device_info() -> dict:
+    """Report the paddle device and its CUDA compute capability for setup verification.
+
+    The first-run wizard calls this after the sidecar ping to gate the GPU
+    flavor on the card's compute capability (the PaddlePaddle 3.4.0 cu129
+    wheels only fatbin sm_75 and newer). ``paddle`` is imported inside the
+    body on purpose: the engine must stay lazy, so serving this verb never
+    pays the paddle import cost at sidecar startup.
+
+    Returns:
+        ``{"device": <str(paddle.device.get_device())>,
+        "capability": [major, minor] | None}``. When paddle cannot be
+        imported or reports no CUDA device (CPU-only build, no visible GPU)
+        ``capability`` is ``None``; any other failure yields nulls plus a
+        short ``error`` field. The sidecar never dies because of this probe.
+    """
+    try:
+        import paddle
+
+        device = str(paddle.device.get_device())
+    except Exception as exc:  # noqa: BLE001 - report, never kill the sidecar
+        return {"device": None, "capability": None, "error": f"{type(exc).__name__}: {exc}"[:200]}
+
+    capability = None
+    if paddle.device.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0:
+        try:
+            major, minor = paddle.device.cuda.get_device_capability()
+            capability = [int(major), int(minor)]
+        except Exception as exc:  # noqa: BLE001 - keep the device, report the probe failure
+            return {"device": device, "capability": None, "error": f"{type(exc).__name__}: {exc}"[:200]}
+    return {"device": device, "capability": capability}
+
+
 def _handlers():
     # One engine instance shared by ocr.spot, the model handlers and the
     # config handlers, so ocr.models.set switches the engine the next spot
@@ -31,6 +64,9 @@ def _handlers():
     handlers = {
         "sidecar.ping": lambda p: "pong",
         "sidecar.version": lambda p: __version__,
+        # Lazy probe (paddle imports inside the handler body): the setup wizard
+        # gates the GPU flavor on the reported compute capability.
+        "sidecar.device": lambda p: _device_info(),
         # ShmReader is handed over as the reader factory: the sidecar maps the
         # OCR shared-memory section lazily, on the first {seq} spot request.
         "ocr.spot": make_spot_handler(engine, reader_factory=ShmReader),
