@@ -366,6 +366,11 @@ FodyWeavers.xsd
 __pycache__/
 *.pyc
 
+# Paddle model cache - downloaded at runtime into <appDir>\ReTran.OCR\models
+# (spec 2026-11-03-first-run-setup-wizard section 5.5); on the dev machine appDir == repo,
+# so real-sidecar tests create it here. Never commit model weights.
+ReTran.OCR/models/
+
 # Agent scratch workspace (venvs, models, SDD artifacts) - never commit
 .team-workspace/
 
