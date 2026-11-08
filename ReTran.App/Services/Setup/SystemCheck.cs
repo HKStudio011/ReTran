@@ -90,8 +90,10 @@ public interface IVideoAdapterSource
 /// Python của venv sidecar đã có chưa — bước sync có thể skip (spec §4).
 /// </param>
 /// <param name="CudaWheel">
-/// "cu130" | "cu129" | "cu126" when <paramref name="Flavor"/> is GPU; null when CPU.
-/// "cu130" | "cu129" | "cu126" khi <paramref name="Flavor"/> là GPU; null khi CPU.
+/// "cu129" — the only paddlepaddle-gpu 3.4.x CUDA wheel the wizard installs — when
+/// <paramref name="Flavor"/> is GPU; null when CPU.
+/// "cu129" — wheel paddlepaddle-gpu 3.4.x CUDA duy nhất mà wizard cài — khi <paramref name="Flavor"/>
+/// là GPU; null khi CPU.
 /// </param>
 public sealed record SystemCheckResult(
     bool Ok,
@@ -103,19 +105,23 @@ public sealed record SystemCheckResult(
     string? CudaWheel);
 
 /// <summary>
-/// First-run system check (spec §4 step 1): picks the OCR wheel flavor — and for NVIDIA the highest
-/// paddlepaddle-gpu CUDA variant the driver fully supports — and fails the wizard outright on hard
-/// gates: non-x64 OS, missing uv.exe, disk below the per-flavor floor, unreachable network-probe host.
-/// Pure: every side effect (adapter source, disk query, HTTPS probe, file existence) is injected, so
-/// the decision is unit-testable with fakes.
-/// Check system lần đầu chạy (spec §4 bước 1): chọn flavor wheel OCR — và với NVIDIA là biến thể
-/// paddlepaddle-gpu CUDA cao nhất mà driver hỗ trợ đầy đủ — và fail cứng wizard khi phạm cổng: OS
-/// non-x64, thiếu uv.exe, đĩa dưới ngưỡng theo flavor, host probe không tới được. Thuần khiết: mọi
-/// side effect (nguồn adapter, hỏi đĩa, probe HTTPS, kiểm tra file) đều được inject nên decision
-/// test được bằng fake.
+/// First-run system check (spec §4 step 1): picks the OCR wheel flavor — for NVIDIA, the GPU flavor
+/// with the single supported paddlepaddle-gpu CUDA wheel ("cu129") when the driver reaches the
+/// 576.02 floor, otherwise CPU with a notice — and fails the wizard outright on hard gates: non-x64
+/// OS, missing uv.exe, disk below the per-flavor floor, unreachable network-probe host. Pure: every
+/// side effect (adapter source, disk query, HTTPS probe, file existence) is injected, so the decision
+/// is unit-testable with fakes.
+/// Check system lần đầu chạy (spec §4 bước 1): chọn flavor wheel OCR — với NVIDIA là flavor GPU kèm
+/// wheel paddlepaddle-gpu CUDA duy nhất ("cu129") khi driver đạt sàn 576.02, không thì CPU kèm notice
+/// — và fail cứng wizard khi phạm cổng: OS non-x64, thiếu uv.exe, đĩa dưới ngưỡng theo flavor, host
+/// probe không tới được. Thuần khiết: mọi side effect (nguồn adapter, hỏi đĩa, probe HTTPS, kiểm tra
+/// file) đều được inject nên decision test được bằng fake.
 /// </summary>
 public static class SystemCheck
 {
+    // Số đo thật 2026-11-07 (Task 11b): venv GPU sau `uv sync` = 3,96 GB — sàn 8 GB vẫn dư cho model.
+    // Measured 2026-11-07 (Task 11b): GPU venv after `uv sync` = 3.96 GB — the 8 GB floor still leaves
+    // headroom for models.
     /// <summary>
     /// Free-disk floor for the GPU flavor (~wheel + venv + models headroom, spec §5.7) — recalibrate
     /// with measured `uv sync` sizes (spec §10).
@@ -124,11 +130,15 @@ public static class SystemCheck
     /// </summary>
     public const long MinFreeBytesGpu = 8L * 1024 * 1024 * 1024;
 
+    // Số đo thật 2026-11-07 (Task 11b): venv CPU sau `uv sync` = 0,67 GB, wheel paddle CPU ~105,5 MB
+    // (đo 100,7 MiB) — sàn hạ từ 5 GB xuống 2 GB vẫn dư nhiều. Measured 2026-11-07 (Task 11b): CPU venv
+    // after `uv sync` = 0.67 GB, paddle CPU wheel ~105.5 MB (measured 100.7 MiB) — the floor drops from
+    // 5 GB to 2 GB with plenty of headroom.
     /// <summary>
     /// Free-disk floor for the CPU flavor (spec §5.7) — recalibrate with measured sizes (spec §10).
     /// Ngưỡng đĩa trống cho flavor CPU (spec §5.7) — hiệu chỉnh bằng số đo thật (spec §10).
     /// </summary>
-    public const long MinFreeBytesCpu = 5L * 1024 * 1024 * 1024;
+    public const long MinFreeBytesCpu = 2L * 1024 * 1024 * 1024;
 
     /// <summary>
     /// Hosts setup must reach over HTTPS: PyPI, the PaddlePaddle wheel index, and GitHub (uv downloads
@@ -142,31 +152,28 @@ public static class SystemCheck
         ["pypi.org", "www.paddlepaddle.org.cn", "github.com"];
     // Host model của paddlex xác nhận khi implement (spec §10) — thêm vào danh sách này lúc đó.
 
-    // Bậc thang wheel paddlepaddle-gpu 3.4.x (chỉ có wheel CUDA 12.6/12.9/13.0 — không có 12.7/12.8),
-    // chọn wheel CAO NHẤT mà driver hỗ trợ ĐẦY ĐỦ. Nguồn: CUDA Toolkit Release Notes — Table 3 (GA
-    // Windows x86_64 minima: 12.6 GA >= 560.76, 12.9 GA >= 576.02) và Table 2 (13.x minor-version
-    // compatibility: Min >= 580; cột Windows của 13.0 GA trong Table 3 là N/A vì display driver không
-    // còn bundle từ 13.0 → sàn Windows thực dụng là nhánh 580). Ngưỡng mã hóa major*100+minor.
+    // Sàn driver duy nhất cho wheel paddlepaddle-gpu 3.4.x còn lại: CUDA 12.9 GA yêu cầu Windows x86_64
+    // >= 576.02 (CUDA Toolkit Release Notes Table 3). Ngưỡng mã hóa major*100+minor. Các nấc cũ bỏ sau
+    // đo thật 2026-11-07: index paddle cu126 KHÔNG có wheel 3.4.0 cho cp313/win_amd64 (tối đa 3.3.1) nên
+    // `uv sync` với pin ==3.4.0 không resolve được; nấc cu130 cần họ gói nvidia-*-cu13 khác + driver >= 580.
+    // Chỉ còn wheel "cu129".
     //
-    // Ladder floors for paddlepaddle-gpu 3.4.x wheels (CUDA 12.6/12.9/13.0 only — no 12.7/12.8 wheels):
-    // pick the HIGHEST wheel the driver FULLY supports. Source: CUDA Toolkit Release Notes — Table 3
-    // (GA Windows x86_64 minima: 12.6 GA >= 560.76, 12.9 GA >= 576.02) and Table 2 (13.x minor-version
-    // compatibility: Min >= 580; the 13.0 GA Table 3 Windows column is N/A because the display driver
-    // is no longer bundled from 13.0 → the 580 branch floor is the operative Windows number). Floors are
-    // encoded as major * 100 + minor.
-    private const int MinDriverForCu130 = 58_000; // 580.00
+    // Single driver floor for the only remaining paddlepaddle-gpu 3.4.x CUDA wheel: CUDA 12.9 GA requires
+    // Windows x86_64 >= 576.02 (CUDA Toolkit Release Notes Table 3). Floor encoded as major*100+minor. The
+    // old rungs were dropped after measuring on 2026-11-07: the paddle cu126 index has NO 3.4.0 wheel for
+    // cp313/win_amd64 (max 3.3.1), so `uv sync` with the ==3.4.0 pin cannot resolve it; the cu130 rung
+    // needs a different nvidia-*-cu13 package family plus driver >= 580. Only the "cu129" wheel remains.
     private const int MinDriverForCu129 = 57_602; // 576.02 — CUDA 12.9 GA
-    private const int MinDriverForCu126 = 56_076; // 560.76 — CUDA 12.6 GA
 
-    // Hạng wheel khi phải chọn giữa nhiều adapter NVIDIA: theo SỐ PHIÊN BẢN CUDA (12.6 → 126 …), không so
+    // Hạng wheel khi phải chọn giữa nhiều adapter NVIDIA: theo SỐ PHIÊN BẢN CUDA (12.9 → 129), không so
     // sánh ordinal nhãn "cuXXX" — nhãn ngắn hơn ("cu99") hay dài hơn ("cu10x") đều làm phép so sánh chuỗi
-    // sai. Thêm nấc mới: thêm một nhãn + một hạng, không phụ thuộc cách đặt tên.
-    // Wheel rank when several NVIDIA adapters compete: by CUDA VERSION NUMBER (12.6 → 126 …), never by
+    // sai. Giữ hạng nguyên dù mới còn một nấc duy nhất: thêm nấc sau này chỉ cần thêm một nhãn + một hạng,
+    // không phụ thuộc cách đặt tên.
+    // Wheel rank when several NVIDIA adapters compete: by CUDA VERSION NUMBER (12.9 → 129), never by
     // string.CompareOrdinal on the "cuXXX" label — a shorter ("cu99") or longer ("cu10x") label breaks
-    // ordinal comparison. Adding a rung: add a label plus a rank, independent of the naming scheme.
-    private const int Cuda130Rank = 130; // "cu130"
+    // ordinal comparison. The integer rank stays even with a single rung: adding one later means adding a
+    // label plus a rank, independent of the naming scheme.
     private const int Cuda129Rank = 129; // "cu129"
-    private const int Cuda126Rank = 126; // "cu126"
 
     private const long BytesPerGb = 1024L * 1024 * 1024;
 
@@ -175,14 +182,14 @@ public static class SystemCheck
 
     /// <summary>
     /// Runs the check gates in order: x64 OS → uv.exe present → flavor + CUDA wheel from the adapters
-    /// (NVIDIA ladder wins over AMD/iGPU notices) → disk floor for that flavor → an HTTPS probe of every
-    /// <see cref="NetworkProbeHosts"/> entry. The arch gate reads <see cref="RuntimeInformation.OSArchitecture"/>
+    /// (the NVIDIA cu129 floor wins over AMD/iGPU notices) → disk floor for that flavor → an HTTPS probe
+    /// of every <see cref="NetworkProbeHosts"/> entry. The arch gate reads <see cref="RuntimeInformation.OSArchitecture"/>
     /// through the injectable <paramref name="osArchitecture"/> seam (same pattern as
     /// <paramref name="fileExists"/>): the app ships an x64-only uv.exe and x64-only paddle wheels, so an
     /// ARM64 Windows machine — which runs Win32 code fine via emulation — must still be sent to the CPU
     /// path / fail the gate rather than assume a 32-bit OS.
-    /// Chạy các cổng check theo thứ tự: OS x64 → uv.exe có mặt → flavor + wheel CUDA từ adapter (bậc
-    /// thang NVIDIA thắng notice AMD/iGPU) → ngưỡng đĩa theo flavor đó → probe HTTPS từng host trong
+    /// Chạy các cổng check theo thứ tự: OS x64 → uv.exe có mặt → flavor + wheel CUDA từ adapter (sàn
+    /// cu129 của NVIDIA thắng notice AMD/iGPU) → ngưỡng đĩa theo flavor đó → probe HTTPS từng host trong
     /// <see cref="NetworkProbeHosts"/>. Cổng arch đọc <see cref="RuntimeInformation.OSArchitecture"/> qua
     /// seam inject được <paramref name="osArchitecture"/> (cùng pattern với <paramref name="fileExists"/>):
     /// app phát hành uv.exe chỉ bản x64 và wheel paddle chỉ bản x64, nên máy Windows ARM64 — vẫn chạy code
@@ -289,14 +296,16 @@ public static class SystemCheck
         => new(false, flavor, null, reason, uvExePresent, venvPresent, CudaWheel: null);
 
     /// <summary>
-    /// Flavor decision (spec §3.5, §5.7): the highest CUDA wheel fully supported by the driver of any
-    /// DISCRETE NVIDIA adapter → GPU flavor with that wheel; a discrete NVIDIA adapter present but none
-    /// qualifies (old or unreadable driver) → CPU + "driver chưa đủ mới" notice; discrete AMD → CPU + the
+    /// Flavor decision (spec §3.5, §5.7): a DISCRETE NVIDIA adapter whose driver reaches the cu129 floor
+    /// (≥ 576.02) → GPU flavor with the "cu129" wheel; a discrete NVIDIA adapter present but none
+    /// qualifies (old or unreadable driver) → CPU + the "driver chưa đủ mới" notice that quotes 576.02
+    /// and offers updating the driver and re-running Setup for the GPU flavor; discrete AMD → CPU + the
     /// spec's AMD notice; nothing else matches → CPU + a light notice that never says "card AMD".
-    /// Quyết định flavor (spec §3.5, §5.7): wheel CUDA cao nhất được hỗ trợ ĐẦY ĐỦ bởi driver của bất kỳ
-    /// adapter NVIDIA RỜI nào → GPU flavor kèm wheel đó; có NVIDIA rời nhưng không adapter nào đạt (driver
-    /// cũ hoặc không đọc được) → CPU + notice "driver chưa đủ mới"; AMD rời → CPU + notice AMD đúng spec;
-    /// còn lại → CPU + notice nhẹ, tuyệt đối không nhắc "card AMD".
+    /// Quyết định flavor (spec §3.5, §5.7): adapter NVIDIA RỜI có driver đạt sàn cu129 (≥ 576.02) → GPU
+    /// flavor kèm wheel "cu129"; có NVIDIA rời nhưng không adapter nào đạt (driver cũ hoặc không đọc được)
+    /// → CPU + notice "driver chưa đủ mới" nêu mốc 576.02 và gợi ý cập nhật driver rồi chạy lại Setup để
+    /// dùng bản GPU; AMD rời → CPU + notice AMD đúng spec; còn lại → CPU + notice nhẹ, tuyệt đối không
+    /// nhắc "card AMD".
     /// </summary>
     private static (OcrFlavor Flavor, string? Notice, string? CudaWheel) DecideFlavor(
         IReadOnlyList<VideoAdapterInfo> adapters)
@@ -346,8 +355,8 @@ public static class SystemCheck
         if (nvidiaDiscretePresent)
         {
             return (OcrFlavor.Cpu,
-                $"Driver NVIDIA hiện tại chưa đủ mới để dùng bản GPU (cần tối thiểu {FormatMinDriver()} " +
-                "cho CUDA 12.x) — wizard sẽ cài bản CPU.",
+                $"Driver NVIDIA hiện tại chưa đủ mới cho bản GPU (cần tối thiểu {FormatMinDriver()} " +
+                "cho CUDA 12.9) — Setup sẽ cài bản CPU. Cập nhật driver rồi chạy lại Setup để dùng bản GPU.",
                 null);
         }
 
@@ -368,35 +377,32 @@ public static class SystemCheck
 
     /// <summary>
     /// Integer rank of a CUDA wheel label, used to pick the best wheel across several NVIDIA adapters
-    /// (R43): rank = the CUDA version number ("cu130" → 130, "cu129" → 129, "cu126" → 126), so ordering
-    /// never depends on how the label string compares. Must stay in sync with the labels returned by
+    /// (R43): rank = the CUDA version number ("cu129" → 129), so ordering never depends on how the label
+    /// string compares. Must stay in sync with the labels returned by
     /// <see cref="CudaWheelForDriverVersion"/>; null or an unlisted label ranks 0 and never wins.
     /// Hạng nguyên của nhãn wheel CUDA, dùng để chọn wheel tốt nhất giữa nhiều adapter NVIDIA (R43):
-    /// rank = số phiên bản CUDA ("cu130" → 130, "cu129" → 129, "cu126" → 126), nên thứ tự không bao giờ
-    /// phụ thuộc cách so sánh chuỗi nhãn. Phải khớp với các nhãn mà <see cref="CudaWheelForDriverVersion"/>
-    /// trả về; null hoặc nhãn chưa khai báo có hạng 0 và không bao giờ thắng.
+    /// rank = số phiên bản CUDA ("cu129" → 129), nên thứ tự không bao giờ phụ thuộc cách so sánh chuỗi
+    /// nhãn. Phải khớp với các nhãn mà <see cref="CudaWheelForDriverVersion"/> trả về; null hoặc nhãn chưa
+    /// khai báo có hạng 0 và không bao giờ thắng.
     /// </summary>
     private static int WheelRank(string? wheel) => wheel switch
     {
-        "cu130" => Cuda130Rank,
         "cu129" => Cuda129Rank,
-        "cu126" => Cuda126Rank,
         _ => 0,
     };
 
     /// <summary>
     /// Maps an NVIDIA Windows product driver version (major + two-digit minor, e.g. 576 and 02 for
-    /// 576.02) to the highest paddlepaddle-gpu 3.4.x CUDA wheel variant the driver FULLY supports:
-    /// ≥ 580.00 → "cu130", ≥ 576.02 → "cu129", ≥ 560.76 → "cu126", below 560.76 or an out-of-format
-    /// minor → null (CPU flavor). Floors: CUDA Toolkit Release Notes Table 3 (12.6 GA Windows x86_64
-    /// ≥ 560.76, 12.9 GA ≥ 576.02) and Table 2 (13.x min ≥ 580 — the 13.0 GA Windows column is N/A
-    /// since 13.0 no longer bundles a display driver, so the 580 branch floor is operative). Pure.
+    /// 576.02) to the paddlepaddle-gpu 3.4.x CUDA wheel variant when the driver FULLY supports it:
+    /// ≥ 576.02 → "cu129" (CUDA 12.9 GA floor, CUDA Toolkit Release Notes Table 3), below 576.02 or an
+    /// out-of-format minor → null (CPU flavor). The cu130/cu126 rungs were removed after measuring on
+    /// 2026-11-07: the paddle cu126 index has no 3.4.0 wheel for cp313/win_amd64 and cu130 needs a
+    /// different nvidia package family. Pure.
     /// Ánh xạ product driver version NVIDIA trên Windows (major + minor đúng 2 chữ số, vd 576 và 02
-    /// cho 576.02) sang biến thể wheel paddlepaddle-gpu 3.4.x CUDA CAO NHẤT mà driver hỗ trợ ĐẦY ĐỦ:
-    /// ≥ 580.00 → "cu130", ≥ 576.02 → "cu129", ≥ 560.76 → "cu126", dưới 560.76 hoặc minor sai format →
-    /// null (flavor CPU). Ngưỡng: CUDA Toolkit Release Notes Table 3 (12.6 GA Windows x86_64 ≥ 560.76,
-    /// 12.9 GA ≥ 576.02) và Table 2 (13.x min ≥ 580 — cột Windows của 13.0 GA là N/A vì 13.0 không còn
-    /// bundle display driver, sàn thực dụng là nhánh 580). Hàm thuần.
+    /// cho 576.02) sang biến thể wheel paddlepaddle-gpu 3.4.x CUDA khi driver hỗ trợ ĐẦY ĐỦ:
+    /// ≥ 576.02 → "cu129" (sàn CUDA 12.9 GA, CUDA Toolkit Release Notes Table 3), dưới 576.02 hoặc minor
+    /// sai format → null (flavor CPU). Các nấc cu130/cu126 đã bỏ sau đo thật 2026-11-07: index paddle
+    /// cu126 không có wheel 3.4.0 cho cp313/win_amd64 và cu130 cần họ gói nvidia khác. Hàm thuần.
     /// </summary>
     /// <param name="productMajor">
     /// Driver major, e.g. 576. / Major của driver, vd 576.
@@ -406,8 +412,8 @@ public static class SystemCheck
     /// Minor của driver, luôn 2 chữ số (0..99); ngoài khoảng → null.
     /// </param>
     /// <returns>
-    /// "cu130" | "cu129" | "cu126", or null when no CUDA wheel is fully supported.
-    /// "cu130" | "cu129" | "cu126", hoặc null khi không wheel CUDA nào được hỗ trợ đầy đủ.
+    /// "cu129" when the driver reaches the 576.02 floor, or null otherwise (CPU flavor).
+    /// "cu129" khi driver đạt sàn 576.02, hoặc null nếu không (flavor CPU).
     /// </returns>
     public static string? CudaWheelForDriverVersion(int productMajor, int productMinor)
     {
@@ -417,13 +423,7 @@ public static class SystemCheck
         }
 
         int version = productMajor * 100 + productMinor;
-        return version switch
-        {
-            >= MinDriverForCu130 => "cu130",
-            >= MinDriverForCu129 => "cu129",
-            >= MinDriverForCu126 => "cu126",
-            _ => null,
-        };
+        return version >= MinDriverForCu129 ? "cu129" : null;
     }
 
     /// <summary>
@@ -502,9 +502,9 @@ public static class SystemCheck
     }
 
     /// <summary>
-    /// Formats the CUDA 12.6 GA driver floor (56_076) as the user-facing "560.76" minimum quoted in the
-    /// CPU-downgrade notice. / Định dạng ngưỡng driver 56_076 thành "560.76" hiển thị cho user trong notice hạ CPU.
+    /// Formats the cu129 driver floor (57_602) as the user-facing "576.02" minimum quoted in the
+    /// CPU-downgrade notice. / Định dạng ngưỡng driver 57_602 thành "576.02" hiển thị cho user trong notice hạ CPU.
     /// </summary>
     private static string FormatMinDriver()
-        => $"{MinDriverForCu126 / 100}.{MinDriverForCu126 % 100:00}";
+        => $"{MinDriverForCu129 / 100}.{MinDriverForCu129 % 100:00}";
 }

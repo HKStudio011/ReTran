@@ -2,17 +2,17 @@ using System.Runtime.InteropServices;
 using ReTran_App.Services.Setup;
 
 /// <summary>
-/// Tests for <see cref="SystemCheck"/>: the GPU/CPU flavor decision with the CUDA wheel ladder
-/// (spec §3.5, §5.7; driver floors 580.00/576.02/560.76 from CUDA Toolkit Release Notes Table 3 /
-/// Table 2), the hard-fail gates (arch, uv.exe, disk per flavor, network probes) and the WMI→product
-/// driver-version mapping feeding the ladder. The mapping fixtures are real NVIDIA INF/WMI strings
-/// (the product family lives in the THIRD segment — the driver branch — not in the DDI major), so a
-/// fixture can never hide a mapping mistake again. All side effects (adapters, disk, network, file
-/// existence) are faked — <c>Run</c> itself is pure.
-/// Test cho <see cref="SystemCheck"/>: quyết định flavor GPU/CPU kèm bậc thang wheel CUDA (spec §3.5,
-/// §5.7; ngưỡng driver 580.00/576.02/560.76 theo CUDA Toolkit Release Notes Table 3 / Table 2), các
-/// cổng fail cứng (arch, uv.exe, đĩa theo flavor, probe mạng) và phép ánh xạ WMI→product version nuôi
-/// bậc thang đó. Fixture ánh xạ là chuỗi INF/WMI NVIDIA thật (họ sản phẩm nằm ở segment THỨ BA —
+/// Tests for <see cref="SystemCheck"/>: the GPU/CPU flavor decision with the single cu129 driver floor
+/// (spec §3.5, §5.7; 576.02 = CUDA 12.9 GA from CUDA Toolkit Release Notes Table 3 — the cu130/cu126
+/// rungs were removed in Task 11c), the hard-fail gates (arch, uv.exe, disk per flavor, network probes)
+/// and the WMI→product driver-version mapping feeding the floor. The mapping fixtures are real NVIDIA
+/// INF/WMI strings (the product family lives in the THIRD segment — the driver branch — not in the DDI
+/// major), so a fixture can never hide a mapping mistake again. All side effects (adapters, disk,
+/// network, file existence) are faked — <c>Run</c> itself is pure.
+/// Test cho <see cref="SystemCheck"/>: quyết định flavor GPU/CPU kèm sàn driver cu129 duy nhất (spec
+/// §3.5, §5.7; 576.02 = CUDA 12.9 GA theo CUDA Toolkit Release Notes Table 3 — nấc cu130/cu126 đã bỏ ở
+/// Task 11c), các cổng fail cứng (arch, uv.exe, đĩa theo flavor, probe mạng) và phép ánh xạ WMI→product
+/// version nuôi sàn đó. Fixture ánh xạ là chuỗi INF/WMI NVIDIA thật (họ sản phẩm nằm ở segment THỨ BA —
 /// branch driver — không phải DDI major), nên fixture không bao giờ che được lỗi ánh xạ nữa. Mọi side
 /// effect (adapter, đĩa, mạng, tồn tại file) đều là fake — bản thân <c>Run</c> thuần khiết.
 /// </summary>
@@ -95,21 +95,25 @@ public class SystemCheckTests
 
         Assert.True(result.Ok);
         Assert.Equal(OcrFlavor.Gpu, result.Flavor);
-        Assert.Equal("cu130", result.CudaWheel); // 617.42 ≥ 580.00
+        Assert.Equal("cu129", result.CudaWheel); // 617.42 ≥ 576.02
         Assert.Null(result.Notice);
         Assert.True(result.UvExePresent);
     }
 
-    // ----- bậc thang CUDA wheel: boundary theo từng hàng của bảng driver → wheel -----
+    // ----- sàn driver cu129 duy nhất: boundary 576.02 (nấc cu130/cu126 đã bỏ, Task 11c) -----
 
     [Fact]
-    public void Gpu_Cu130_WhenDriverAtLeast580()
+    public void Gpu_Cu129_WhenDriverAbove580()
     {
+        // Nấc cu130 đã bỏ (đo thật 2026-11-07): cần họ gói nvidia-*-cu13 khác + driver ≥ 580 — driver
+        // 580.12 giờ vẫn chỉ chọn "cu129". The cu130 rung was removed: it needs the different
+        // nvidia-*-cu13 package family plus a driver >= 580 — a 580.12 driver now still selects only
+        // "cu129".
         var result = Check(Adapters(NvidiaWithDriver(580, 12))); // driver 580.12
 
         Assert.True(result.Ok);
         Assert.Equal(OcrFlavor.Gpu, result.Flavor);
-        Assert.Equal("cu130", result.CudaWheel);
+        Assert.Equal("cu129", result.CudaWheel);
     }
 
     [Fact]
@@ -123,35 +127,48 @@ public class SystemCheckTests
     }
 
     [Fact]
-    public void Gpu_Cu126_WhenDriverJustBelow576_02()
+    public void Cpu_WithNotice_WhenDriverJustBelow576_02()
     {
-        var result = Check(Adapters(NvidiaWithDriver(575, 99)));
-
-        Assert.True(result.Ok);
-        Assert.Equal(OcrFlavor.Gpu, result.Flavor);
-        Assert.Equal("cu126", result.CudaWheel);
-    }
-
-    [Fact]
-    public void Gpu_Cu126_WhenDriverExactly560_76()
-    {
-        var result = Check(Adapters(NvidiaWithDriver(560, 76))); // 560.76 = CUDA 12.6 GA floor
-
-        Assert.True(result.Ok);
-        Assert.Equal(OcrFlavor.Gpu, result.Flavor);
-        Assert.Equal("cu126", result.CudaWheel);
-    }
-
-    [Fact]
-    public void Cpu_WithNotice_WhenDriverJustBelow560_76()
-    {
-        var result = Check(Adapters(NvidiaWithDriver(560, 75)));
+        var result = Check(Adapters(NvidiaWithDriver(575, 99))); // 575.99 — dưới sàn mới 576.02
 
         Assert.True(result.Ok);
         Assert.Equal(OcrFlavor.Cpu, result.Flavor);
         Assert.Null(result.CudaWheel);
         Assert.NotNull(result.Notice);
-        Assert.Contains("560.76", result.Notice);
+        Assert.Contains("576.02", result.Notice);
+    }
+
+    [Fact]
+    public void Cpu_WithNotice_WhenDriverAtOldCu126Floor()
+    {
+        // 560.76 từng là sàn cu126 (wheel đã bỏ) — driver này giờ chỉ còn ra CPU + notice nêu sàn mới.
+        // 560.76 used to be the cu126 floor (rung removed) — this driver now only lands on CPU plus the
+        // notice quoting the new floor.
+        var result = Check(Adapters(NvidiaWithDriver(560, 76)));
+
+        Assert.True(result.Ok);
+        Assert.Equal(OcrFlavor.Cpu, result.Flavor);
+        Assert.Null(result.CudaWheel);
+        Assert.NotNull(result.Notice);
+        Assert.Contains("576.02", result.Notice);
+    }
+
+    [Fact]
+    public void Cpu_WithNotice_RerunSetupHint_WhenDriverAt576_01()
+    {
+        // Biên sát sàn 576.02: notice phải nêu mốc 576.02 và gợi ý cập nhật driver + chạy lại Setup —
+        // đúng yêu cầu user (cảnh báo bản CPU, có thể đổi sang bản GPU sau khi nâng driver).
+        // Sharp boundary at the 576.02 floor: the notice must quote 576.02 and offer updating the driver
+        // plus re-running Setup — the user requirement (warn about the CPU flavor, switchable to GPU
+        // after a driver update).
+        var result = Check(Adapters(NvidiaWithDriver(576, 1)));
+
+        Assert.True(result.Ok);
+        Assert.Equal(OcrFlavor.Cpu, result.Flavor);
+        Assert.Null(result.CudaWheel);
+        Assert.NotNull(result.Notice);
+        Assert.Contains("576.02", result.Notice);
+        Assert.Contains("chạy lại Setup", result.Notice);
     }
 
     [Fact]
@@ -175,7 +192,7 @@ public class SystemCheckTests
 
         Assert.True(result.Ok);
         Assert.Equal(OcrFlavor.Gpu, result.Flavor);
-        Assert.Equal("cu130", result.CudaWheel);
+        Assert.Equal("cu129", result.CudaWheel);
     }
 
     // ----- NVIDIA RỜI mới được xét flavor GPU (đối xứng với nhánh AMD, spec §3.5) -----
@@ -196,7 +213,7 @@ public class SystemCheckTests
         Assert.Equal(OcrFlavor.Cpu, result.Flavor);
         Assert.Null(result.CudaWheel);
         Assert.NotNull(result.Notice);
-        Assert.DoesNotContain("560.76", result.Notice);
+        Assert.DoesNotContain("576.02", result.Notice);
         Assert.Contains("CPU", result.Notice);
     }
 
@@ -215,17 +232,16 @@ public class SystemCheckTests
         Assert.True(result.Ok);
         Assert.Equal(OcrFlavor.Cpu, result.Flavor);
         Assert.Null(result.CudaWheel);
-        Assert.Contains("560.76", result.Notice);
+        Assert.Contains("576.02", result.Notice);
     }
 
-    // ----- chuỗi INF/WMI NVIDIA thật: driver → wheel (regression 560.94 từng ra cu130) -----
+    // ----- chuỗi INF/WMI NVIDIA thật: driver → wheel (regression 560.94 từng ra cu130; nay chỉ còn cu129) -----
 
     [Theory]
-    [InlineData("32.0.15.6094", "cu126")] // 560.94 — bug cũ suy thành 660.94 ⇒ chọn nhầm cu130
-    [InlineData("32.0.15.7666", "cu129")] // 576.66
-    [InlineData("32.0.15.8163", "cu130")] // 581.63 — bug cũ suy thành 681.63 (không tồn tại)
-    [InlineData("32.0.16.2114", "cu130")] // 621.14 — máy dev đo 2026-11-06
-    [InlineData("32.0.16.1742", "cu130")] // 617.42 — máy dev đo 2026-11-05
+    [InlineData("32.0.15.7666", "cu129")] // 576.66 — vừa trên sàn 576.02
+    [InlineData("32.0.15.8163", "cu129")] // 581.63 — bug cũ suy thành 681.63 (không tồn tại); nấc cu130 đã bỏ
+    [InlineData("32.0.16.2114", "cu129")] // 621.14 — máy dev đo 2026-11-06
+    [InlineData("32.0.16.1742", "cu129")] // 617.42 — máy dev đo 2026-11-05
     public void Gpu_HighestWheelTheDriverSupports_RealWmiStrings(string wmiDriverVersion, string expectedWheel)
     {
         var adapter = new VideoAdapterInfo("NVIDIA GeForce RTX 4060", true, wmiDriverVersion);
@@ -239,7 +255,8 @@ public class SystemCheckTests
     }
 
     [Theory]
-    [InlineData("31.0.15.3699")] // 536.99 — dưới sàn 560.76
+    [InlineData("32.0.15.6094")] // 560.94 — dưới sàn mới 576.02 (từng ra cu126 trước khi bỏ nấc)
+    [InlineData("31.0.15.3699")] // 536.99 — dưới sàn 576.02
     [InlineData("27.21.14.5609")] // 456.09 — decode được nhưng dưới sàn
     [InlineData("32.0.17.1234")] // branch 17 chưa tồn tại ⇒ từ chối
     [InlineData("30.0.13.6521")] // branch 13 (họ 3xx tiền CUDA 12) ⇒ từ chối
@@ -253,7 +270,7 @@ public class SystemCheckTests
         Assert.Equal(OcrFlavor.Cpu, result.Flavor);
         Assert.Null(result.CudaWheel);
         Assert.NotNull(result.Notice);
-        Assert.Contains("560.76", result.Notice);
+        Assert.Contains("576.02", result.Notice);
     }
 
     // ----- AMD / iGPU notices (spec §5.7) -----
@@ -347,23 +364,23 @@ public class SystemCheckTests
     [Fact]
     public void Fail_WhenDiskBelowCpuThreshold()
     {
-        var result = Check(Adapters(IntelIgpu), freeBytes: 4 * GB);
+        var result = Check(Adapters(IntelIgpu), freeBytes: 1 * GB);
 
         Assert.False(result.Ok);
         Assert.NotNull(result.FailureReason);
-        Assert.Contains("5 GB", result.FailureReason);
+        Assert.Contains("2 GB", result.FailureReason);
     }
 
     [Fact]
     public void Fail_WhenDiskBelowGpuThreshold_ButCpuWouldPass()
     {
-        var gpuTooLittle = Check(Adapters(NvidiaCurrent), freeBytes: 7 * GB);
+        var gpuTooLittle = Check(Adapters(NvidiaCurrent), freeBytes: 3 * GB);
 
         Assert.False(gpuTooLittle.Ok);
         Assert.Contains("8 GB", gpuTooLittle.FailureReason);
 
-        // Cùng 7 GB đó nhưng chỉ có iGPU → flavor CPU với ngưỡng 5 GB → pass.
-        Assert.True(Check(Adapters(IntelIgpu), freeBytes: 7 * GB).Ok);
+        // Cùng 3 GB đó nhưng chỉ có iGPU → flavor CPU với ngưỡng 2 GB → pass.
+        Assert.True(Check(Adapters(IntelIgpu), freeBytes: 3 * GB).Ok);
     }
 
     [Fact]
@@ -433,20 +450,20 @@ public class SystemCheckTests
         // số trăm nằm ở branch segment (14 ⇒ họ 4xx), DDI major không mang thông tin đó. Chuỗi này decode
         // thành 456.09 (NVIDIA 456.71 ship INF 27.21.14.5671, cùng encoding). Ý định gốc của hàng test —
         // driver họ 4xx không bao giờ được chọn wheel CUDA — vẫn còn nguyên, và giờ được chốt ở tầng
-        // flavor: 456.09 vẫn ra CPU + notice nêu sàn 560.76.
+        // flavor: 456.09 vẫn ra CPU + notice nêu sàn 576.02.
         // This row's polarity is inverted by Task 10: the old comment claimed DDI major 27 was "outside
         // the mapping range", which is WRONG — the product hundreds digit comes from the branch segment
         // (14 ⇒ 4xx family), DDI major carries no such information. The string decodes to 456.09 (NVIDIA
         // 456.71 ships INF 27.21.14.5671, same encoding). The row's original intent — a 4xx driver must
         // never pick a CUDA wheel — is preserved and now pinned at the flavor level: 456.09 still lands on
-        // CPU plus the notice quoting the 560.76 floor.
+        // CPU plus the notice quoting the 576.02 floor.
         Assert.True(SystemCheck.TryGetNvidiaProductVersion("27.21.14.5609", out var legacy));
         Assert.Equal((456, 9), legacy);
 
         var legacyResult = Check(Adapters(new VideoAdapterInfo("NVIDIA GeForce RTX 2060", true, "27.21.14.5609")));
         Assert.Equal(OcrFlavor.Cpu, legacyResult.Flavor);
         Assert.Null(legacyResult.CudaWheel);
-        Assert.Contains("560.76", legacyResult.Notice);
+        Assert.Contains("576.02", legacyResult.Notice);
     }
 
     [Theory]
@@ -486,15 +503,13 @@ public class SystemCheckTests
     }
 
     [Fact]
-    public void CudaWheelForDriverVersion_FollowsLadderBoundaries()
+    public void CudaWheelForDriverVersion_OnlyCu129AtOrAboveFloor()
     {
-        Assert.Equal("cu130", SystemCheck.CudaWheelForDriverVersion(580, 0));
-        Assert.Equal("cu130", SystemCheck.CudaWheelForDriverVersion(617, 42));
-        Assert.Equal("cu129", SystemCheck.CudaWheelForDriverVersion(579, 99));
-        Assert.Equal("cu129", SystemCheck.CudaWheelForDriverVersion(576, 2));
-        Assert.Equal("cu126", SystemCheck.CudaWheelForDriverVersion(576, 1));
-        Assert.Equal("cu126", SystemCheck.CudaWheelForDriverVersion(560, 76));
-        Assert.Null(SystemCheck.CudaWheelForDriverVersion(560, 75));
+        Assert.Equal("cu129", SystemCheck.CudaWheelForDriverVersion(576, 2)); // = sàn CUDA 12.9 GA
+        Assert.Equal("cu129", SystemCheck.CudaWheelForDriverVersion(580, 0)); // nấc cu130 cũ — giờ vẫn chỉ có cu129
+        Assert.Equal("cu129", SystemCheck.CudaWheelForDriverVersion(617, 42));
+        Assert.Null(SystemCheck.CudaWheelForDriverVersion(576, 1)); // vừa dưới sàn → CPU + notice
+        Assert.Null(SystemCheck.CudaWheelForDriverVersion(560, 76)); // sàn cu126 cũ — giờ là CPU
         Assert.Null(SystemCheck.CudaWheelForDriverVersion(457, 1));
         Assert.Null(SystemCheck.CudaWheelForDriverVersion(560, 150)); // ngoài format minor 2 chữ số → không tin
     }
@@ -502,15 +517,16 @@ public class SystemCheckTests
     [Fact]
     public void Gpu_HighestWheelWins_RegardlessOfAdapterOrder()
     {
-        // Nhiều card NVIDIA: wheel cao nhất phải thắng ở cả hai thứ tự — selection theo rank số nguyên
-        // của wheel, không theo thứ tự adapter hay thứ tự so sánh nhãn "cuXXX".
-        // Multiple NVIDIA cards: the highest wheel must win in both orders — selection is by the wheel's
-        // integer rank, not by adapter order or by comparing the "cu126"/"cu130" label strings.
-        VideoAdapterInfo cu126Card = new("NVIDIA GeForce RTX 4060", true, "32.0.15.6094");
-        VideoAdapterInfo cu130Card = new("NVIDIA GeForce RTX 5060 Ti", true, "32.0.16.2114");
+        // Nhiều card NVIDIA: card đạt sàn 576.02 phải thắng ở cả hai thứ tự dù card kia dưới sàn (wheel
+        // null) — selection theo rank số nguyên của wheel, không theo thứ tự adapter.
+        // Multiple NVIDIA cards: the qualifying card must win in both orders even though the other's
+        // driver is below the floor (null wheel) — selection is by the wheel's integer rank, not by
+        // adapter order.
+        VideoAdapterInfo oldDriverCard = new("NVIDIA GeForce RTX 4060", true, "32.0.15.6094"); // 560.94 < 576.02 → null
+        VideoAdapterInfo newDriverCard = new("NVIDIA GeForce RTX 5060 Ti", true, "32.0.16.2114"); // 621.14 → cu129
 
-        Assert.Equal("cu130", Check(Adapters(cu126Card, cu130Card)).CudaWheel);
-        Assert.Equal("cu130", Check(Adapters(cu130Card, cu126Card)).CudaWheel);
+        Assert.Equal("cu129", Check(Adapters(oldDriverCard, newDriverCard)).CudaWheel);
+        Assert.Equal("cu129", Check(Adapters(newDriverCard, oldDriverCard)).CudaWheel);
     }
 
     [Fact]
