@@ -31,10 +31,14 @@ def _device_info() -> dict:
 
     Returns:
         ``{"device": <str(paddle.device.get_device())>,
-        "capability": [major, minor] | None}``. When paddle cannot be
-        imported or reports no CUDA device (CPU-only build, no visible GPU)
-        ``capability`` is ``None``; any other failure yields nulls plus a
-        short ``error`` field. The sidecar never dies because of this probe.
+        "capability": [major, minor] | None}``. Two tiers of failure: when
+        paddle cannot be imported or report the current device at all, BOTH
+        values are ``None``; when the device is known but probing its compute
+        capability fails, ``device`` is kept and only ``capability`` is
+        ``None``. Both failures carry a short ``error`` field. A CPU-only
+        build (or no visible GPU) is not a failure: it simply reports
+        ``capability: None`` without an error. The sidecar never dies because
+        of this probe.
     """
     try:
         import paddle

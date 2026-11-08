@@ -354,7 +354,10 @@ public sealed class SetupCoordinator
         {
             if (Step != SetupStep.ConfirmingFlavorSwitch) return;
 
+            // The multi-minute sync below must show as Syncing — never as ConfirmingFlavorSwitch with a
+            // null PendingFlavorSwitch, which would contradict the documented invariant of both.
             PendingFlavorSwitch = null;
+            Step = SetupStep.Syncing;
             Publish();
             _logger?.LogInformation("setup: user xác nhận đổi flavor sang {Flavor}", Flavor);
 
@@ -395,6 +398,9 @@ public sealed class SetupCoordinator
             Flavor = OcrFlavor.Cpu;
             _state = _state with { Flavor = FlavorName(OcrFlavor.Cpu) };
             _state.Save();
+            // The multi-minute sync below must show as Syncing — never as Failed with a null Error,
+            // which would contradict the documented invariant of both.
+            Step = SetupStep.Syncing;
             Error = null;
             CanSwitchToCpuFlavor = false;
             Publish();
@@ -436,7 +442,9 @@ public sealed class SetupCoordinator
             Publish();
 
             // Checking sits BEFORE the pipeline, so a retry of it must re-run the gate itself (and may
-            // pause at ChoosingLanguage again when no language was ever answered).
+            // pause at ChoosingLanguage again when no language was ever answered). The pipeline then
+            // starts from its FIRST step — _lastFailedStep is not a pipeline step and must never be
+            // passed to RunPipelineAsync (Array.IndexOf would return -1 for it).
             if (_lastFailedStep == SetupStep.Checking)
             {
                 StepOutcome outcome = RunCheckingStep();
@@ -452,6 +460,9 @@ public sealed class SetupCoordinator
                     Publish();
                     return;
                 }
+
+                await RunPipelineAsync(SetupStep.VerifyingFiles, ct).ConfigureAwait(false);
+                return;
             }
 
             await RunPipelineAsync(_lastFailedStep, ct).ConfigureAwait(false);

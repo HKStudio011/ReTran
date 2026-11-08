@@ -326,6 +326,29 @@ public class SetupCoordinatorTests : IDisposable
     }
 
     [Fact]
+    public async Task Check_FailHard_RetryWithPersistedLanguage_ProceedsIntoPipeline()
+    {
+        // Regression (review of b2fb834): the Checking retry branch used to fall through to
+        // RunPipelineAsync(Checking) — Array.IndexOf returns -1 for a non-pipeline step, and
+        // PipelineSteps[-1] throws IndexOutOfRangeException. Trigger: language already answered →
+        // re-run Setup → Checking hard-fails (e.g. full disk) → user fixes it → clicks "Thử lại".
+        WriteSetupJson("""{"flavor":"gpu","language":"vi"}""");
+        long freeBytes = 1 * GB; // below the GPU floor ⇒ Checking hard-fails
+        var coordinator = NewCoordinator(diskFree: _ => freeBytes);
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+
+        freeBytes = 100 * GB; // the user freed space, then retries
+        await coordinator.RetryAsync(TestContext.Current.CancellationToken);
+
+        // Must NOT throw — and must actually proceed into the pipeline (the first steps ran).
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Single(_uvFake.SyncCalls); // VerifyingFiles passed ⇒ Syncing really ran
+        Assert.Equal(OcrFlavor.Gpu, FlavorOfSyncCall(_uvFake.SyncCalls[0]));
+    }
+
+    [Fact]
     public async Task Skip_CallsCloseApp()
     {
         var coordinator = NewCoordinator();
@@ -420,7 +443,7 @@ public class SetupCoordinatorTests : IDisposable
         Assert.Equal("cpu", ReadSetupJson().Flavor);
         // The capability probe ran exactly once (GPU attempt only; the CPU path never asks).
         // Verb sidecar.device được gọi đúng 1 lần (chỉ ở lượt GPU; đường CPU không hỏi).
-        Assert.Single(_bridge.Calls.Where(static c => c.Method == "sidecar.device"));
+        Assert.Single(_bridge.Calls, static c => c.Method == "sidecar.device");
     }
 
     [Fact]
@@ -453,7 +476,7 @@ public class SetupCoordinatorTests : IDisposable
         Assert.Equal(OcrFlavor.Cpu, FlavorOfSyncCall(_uvFake.SyncCalls[0]));
         // CPU flavor: ping + catalog are enough — the capability probe is never issued.
         // Flavor CPU: chỉ cần ping + catalog — không gọi verb kiểm tra capability.
-        Assert.Empty(_bridge.Calls.Where(static c => c.Method == "sidecar.device"));
+        Assert.DoesNotContain(_bridge.Calls, static c => c.Method == "sidecar.device");
     }
 
     // ── R59: sync fail có thể để lại KHÔNG venv ⇒ mỗi retry là full re-sync ────────────────────────

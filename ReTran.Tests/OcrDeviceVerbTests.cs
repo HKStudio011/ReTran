@@ -31,11 +31,18 @@ public class OcrDeviceVerbTests
 
         Assert.NotNull(result);
         string device = result!["device"]!.GetValue<string>();
-        Assert.True(device.StartsWith("gpu:", StringComparison.Ordinal),
-            $"expected a GPU device on the dev machine, got '{device}'");
+        // A CPU-flavour venv (or a machine without a visible GPU) is a valid environment — skip,
+        // never fail: this test only verifies the gate's input on a GPU setup.
+        if (!device.StartsWith("gpu:", StringComparison.Ordinal))
+            Assert.Skip($"sidecar reports a non-GPU device ('{device}') — no capability to verify here");
+
         JsonArray capability = result["capability"]!.AsArray();
         Assert.Equal(2, capability.Count);
-        // Measured on this machine: CC 12.0 — and comfortably above the wizard's 7.5 floor.
-        Assert.Equal([12, 0], capability.Select(static n => n!.GetValue<int>()).ToArray());
+        int major = capability[0]!.GetValue<int>();
+        int minor = capability[1]!.GetValue<int>();
+        // Assert the gate's OWN floor (major*10+minor >= 75 — cu129 fatbins sm_75/80/86/89/120), not a
+        // machine-specific tuple: on this dev machine the measured value is CC 12.0 (RTX 5060 Ti).
+        Assert.True(major * 10 + minor >= 75,
+            $"GPU device '{device}' reports capability {major}.{minor}, below the wizard's 7.5 floor");
     }
 }
