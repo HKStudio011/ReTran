@@ -39,7 +39,7 @@ Nguyên nhân gốc: Core chỉ tìm được sidecar khi (1) `FindRepoRoot()` �
 2. **Bước Check system chạy đầu tiên, tự động hoàn toàn, không hỏi gì** — đây là cổng vào của mọi bước sau. Kết quả check quyết định các bước tiếp theo (GPU hay CPU, bước nào được skip vì đã có sẵn).
 3. **Các câu hỏi cần user chọn (chọn ngôn ngữ/model) chỉ xuất hiện SAU khi check system pass.**
 4. **Chọn ngôn ngữ**: chọn 1 ngôn ngữ chính của nội dung muốn nhận chữ (không đa-chọn). Ngôn ngữ thuộc phủ v6 → dùng cặp `PP-OCRv6_small`; ngoài phủ → thêm model rec bản 5 theo bộ chữ. Bước này chỉ tải những model còn thiếu.
-5. **GPU/CPU**: NVIDIA **rời** + driver đủ mới → cài bản GPU (`paddlepaddle-gpu`, wheel `cu130`/`cu129`/`cu126` theo nấc driver ở mục 10). Phát hiện GPU rời AMD → **thông báo rõ "không cài được bản GPU cho card AMD trên Windows, sẽ thay bằng bản CPU"** rồi tải bản CPU. Không có GPU rời → bản CPU với thông báo nhẹ tương tự.
+5. **GPU/CPU**: NVIDIA **rời** + driver đủ mới → cài bản GPU (`paddlepaddle-gpu`, wheel `cu129` khi driver ≥ 576.02 — sàn CUDA 12.9, mục 10). Phát hiện GPU rời AMD → **thông báo rõ "không cài được bản GPU cho card AMD trên Windows, sẽ thay bằng bản CPU"** rồi tải bản CPU. Không có GPU rời → bản CPU với thông báo nhẹ tương tự.
 6. **Lỗi ở bất kỳ bước nào**: tự retry 3 lần. Vẫn lỗi → màn hình lỗi hiển thị thông điệp + đúng 2 nút: **Thử lại** (chạy lại bước đó) và **Bỏ qua** (đóng app). Lần chạy sau modal hiện lại vì điều kiện chưa đạt.
 7. **Toàn bộ trạng thái OCR nằm trong thư mục app**: `.venv` và `models` đều ở `<appDir>\ReTran.OCR\` (models cùng cấp với `.venv`, KHÔNG đặt trong `%LOCALAPPDATA%`). Updater khi update **không được xoá** các thư mục này — code mới ghi đè lên, venv/models giữ nguyên.
 8. **Release đổi code sidecar**: update ghi đè source `ReTran.OCR` là đủ (code mới tự hiệu lực), không cần cơ chế re-sync hay version stamp.
@@ -129,7 +129,7 @@ Catalog model tham khảo cho bước hỏi ngôn ngữ (`ReTran.OCR/src/retran_
 
 ## 10. Open items cho builder (tự quyết định được, ghi lại khi làm)
 
-- Mức driver NVIDIA cho flavor GPU + chọn wheel paddlepaddle-gpu 3.4.x (wheel cao nhất ≤ mức driver hỗ trợ đầy đủ, Table 3 + Table 2 CUDA Toolkit Release Notes, tra cứu 2026-11-05): driver >= 580 → cu130; >= 576.02 (12.9 GA) → cu129; >= 560.76 (12.6 GA) → cu126; < 560.76 → flavor CPU. CUDA 13.0 GA cột Windows = N/A (display driver không còn bundle từ 13.0), sàn thực dụng Windows là nhánh 580 theo Table 2 (13.x Min >= 580).
+- Mức driver NVIDIA cho flavor GPU + chọn wheel paddlepaddle-gpu 3.4.x (tra cứu 2026-11-05; thu gọn một nấc sau đo thật 2026-11-07 theo Amendment A2): **một nấc duy nhất** — driver >= 576.02 (sàn CUDA 12.9 GA trên Windows, Table 3 CUDA Toolkit Release Notes) → `cu129`; thấp hơn → flavor CPU + notice nêu "576.02" + cụm "chạy lại Setup". Nấc cu126 bỏ vì index paddle không có wheel 3.4.0 cho cp313/win_amd64 ở đó (tối đa 3.3.1); nấc cu130 bỏ vì cần họ gói `nvidia-*-cu13` khác + driver >= 580, không thêm lợi ích nào cho cùng version paddle.
 - **Quy tắc map WMI `DriverVersion` → product version NVIDIA (đã sửa 2026-11-06, Task 10):** chuỗi WMI có dạng `DDI.0.BRANCH.TTTT`; **số trăm của product version nằm ở `BRANCH` (segment thứ ba)**, không ở DDI major: `14`→4xx, `15`→5xx, `16`→6xx; `TTTT` = `major%100 * 100 + minor`. Branch khác ⇒ từ chối parse ⇒ flavor CPU + notice (fail-safe). DDI major chỉ là phiên bản D3D runtime, đi kèm cả hai họ (5xx có cả `31.0.15.xxxx` lẫn `32.0.15.xxxx`). Chứng cứ (9 cặp, 4 nguồn):
 
   | WMI `DriverVersion` | product thật | nguồn |
@@ -145,9 +145,9 @@ Catalog model tham khảo cho bước hỏi ngôn ngữ (`ReTran.OCR/src/retran_
 
   Hệ quả của bug cũ (`DDI major ⇒ 30⇒400/31⇒500/32⇒600`): mọi driver 5xx mang DDI 32 bị suy thành 6xx ⇒ vượt sàn 580 ⇒ wizard cài **cu130** cho máy chỉ chạy nổi cu126 — sai theo hướng **không** fail-safe. Bug này đóng được vì fixture test cũ tự sinh chuỗi `31.0.15.…`; test hiện tại ghim bằng chuỗi INF thật.
 - Ghi chú chưa chốt (không chặn): `TryGetNvidiaProductVersion` còn chấp nhận tail 3 chữ số và lấy `segments[^1]` khi chuỗi >4 segment, nên về lý thuyết `32.0.16.906`→(609,6) hay `32.0.16.1742.6142`→(661,42) selectable; không chuỗi WMI thật nào tạo ra được hai dạng đó (WMI `DriverVersion` luôn 4 segment, mọi product 5xx/6xx mã hoá 4 chữ số). Siết `segments.Length != 4` nếu chạm lại file đó.
-- **Đo thật `uv sync` cả hai flavor (GB + thời gian) và xác nhận host probe: user chốt defer sang smoke trên máy sạch** (unit test dùng fake process runner). Số đo phải ghi lại vào mục này ở bước smoke (Task 24), kèm hiệu chỉnh ngưỡng đĩa 8/5 GB.
+- **Đo thật `uv sync` cả hai flavor (GB + thời gian) và xác nhận host probe: user chốt defer sang smoke trên máy sạch** (unit test dùng fake process runner). Số đo phải ghi lại vào mục này ở bước smoke (Task 24), kèm hiệu chỉnh ngưỡng đĩa 8/2 GB.
 - Host thật mà paddlex tải model (để probe mạng đúng host).
 - URL download path thật mà uv gọi để lấy CPython managed (xác nhận host probe GitHub chính xác).
 - Chọn phiên bản uv ban đầu để vendor + verify SHA256 đối chiếu release chính thức của uv (ghi vào `runtimes\win-x64\uv.version.txt`).
-- Số GB đĩa + thời gian thực đo của `uv sync` cả hai flavor (kể cả kích thước wheel `paddlepaddle` CPU) → hiệu chỉnh ngưỡng check 8/5 GB.
+- Số GB đĩa + thời gian thực đo của `uv sync` cả hai flavor (kể cả kích thước wheel `paddlepaddle` CPU) → hiệu chỉnh ngưỡng check 8/2 GB.
 - Danh sách cuối cùng ngôn ngữ trên màn hình hỏi (dựa vào catalog, không bịa ngôn ngữ ngoài catalog).
