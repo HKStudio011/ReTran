@@ -7,6 +7,9 @@
 @inject ReTran_App.Services.I18nService L
 @inject ReTran_App.Services.AppSettingsService SettingsStore
 @inject PipelineController Pipeline
+@* Fully-qualified: the Setup namespace also defines OcrModelInfo, which would clash with
+   ReTran_App.Core.OcrModelInfo used throughout this panel. *@
+@inject ReTran_App.Services.Setup.SetupCoordinator Setup
 @inject UpdateCheckService Check
 @inject UpdateCoordinator Coordinator
 @inject ToastService Toast
@@ -255,6 +258,18 @@
     }
 </section>
 
+@if (Setup.IsComplete)
+{
+    @* "Chạy lại setup" (smoke #8): chỉ hiện khi wizard đã xong — bước đã done được skip nên máy
+       không đổi gì sẽ hoàn tất gần tức thì. Khi wizard chưa xong, modal che màn hình thay nút này. *@
+    <section class="rt-sect">
+        <h3>@(L["setup.section"])</h3>
+        <div class="rt-field-row" style="flex-wrap: wrap; gap: 10px;">
+            <button type="button" class="rt-btn rt-mini" disabled="@_rerunStarted" @onclick="RerunSetup">@(L["setup.rerun"])</button>
+        </div>
+    </section>
+}
+
 <section class="rt-sect">
     <h3>@(L["deck.settings.section.look"])</h3>
     <div class="rt-srow">
@@ -389,6 +404,7 @@
         if (Array.IndexOf(_dstOptions, current.Dst) < 0) _dstOptions = [current.Dst, .. _dstOptions];
         L.Changed += OnStateChanged;
         Js.OnWebViewReady += OnStateChanged;
+        Setup.Changed += OnSetupChanged; // theo dõi wizard để hiện/ẩn section + bật lại nút rerun
         _ = LoadOcrModelsAsync(); // nạp catalog model từ Core (fire-and-forget như Home)
         _ = LoadOcrSchemaAsync(); // nạp schema tham số engine từ Core (fire-and-forget)
         base.OnInitialized();
@@ -939,9 +955,29 @@
         _ = Coordinator.StartUpdateAsync(release);
     }
 
+    // "Chạy lại setup": force wizard — bước đã done được skip, mọi thứ sẵn sàng thì đi qua trong vài giây.
+    private bool _rerunStarted;
+
+    private void RerunSetup()
+    {
+        if (_rerunStarted) return;
+        _rerunStarted = true;
+        // Bước Checking làm WMI + probe mạng đồng bộ — chạy ngoài UI thread như đường first-run của SetupModal.
+        _ = Task.Run(() => Setup.StartAsync(force: true));
+    }
+
+    // Wizard publish từ luồng nền (pattern UpdateModal) — marshal về UI thread: khi wizard xong lại thì
+    // bật nút rerun trở lại và re-render để section "Cài đặt" hiện/ẩn theo đúng IsComplete.
+    private void OnSetupChanged() => _ = InvokeAsync(() =>
+    {
+        if (Setup.IsComplete) _rerunStarted = false;
+        StateHasChanged();
+    });
+
     public void Dispose()
     {
         L.Changed -= OnStateChanged;
         Js.OnWebViewReady -= OnStateChanged;
+        Setup.Changed -= OnSetupChanged;
     }
 }

@@ -1,4 +1,5 @@
 ﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Maui.LifecycleEvents;
 using ReTran_App.Core;
@@ -6,6 +7,7 @@ using ReTran_App.Data;
 using ReTran_App.Services;
 using ReTran_App.Services.OverlayFeed;
 using ReTran_App.Services.OverlayWindow;
+using ReTran_App.Services.Setup;
 using ReTran_App.Services.Tray;
 using ReTran_App.Services.Update;
 using ReTran_App.Services.Window;
@@ -86,6 +88,28 @@ namespace ReTran_App
             builder.Services.AddSingleton<UpdateCheckService>();
             builder.Services.AddSingleton<IAppShutdown, MauiAppShutdown>();
 
+            // First-run setup wizard (spec 2026-11-04): WMI adapter inventory, uv sync runner over the
+            // real process runner, the core restart bridge and the coordinator itself. "Bỏ qua" closes
+            // the app through the host lifetime (spec §3.6); the disk/network seams are fail-safe — an
+            // unreadable value fails the wizard's gate with a clear message instead of assuming OK.
+            // Wizard setup chạy lần đầu (spec 2026-11-04): danh sách adapter WMI, runner uv sync trên
+            // process runner thật, bridge restart core và chính coordinator. "Bỏ qua" đóng app qua host
+            // lifetime (spec §3.6); seam đĩa/mạng fail-safe — giá trị không đọc được làm wizard fail
+            // cổng kèm thông báo rõ thay vì giả định OK.
+            builder.Services.AddSingleton<IVideoAdapterSource, VideoAdapterSource>();
+            builder.Services.AddSingleton<IProcessRunner, ProcessRunner>();
+            builder.Services.AddSingleton(sp => new UvSyncRunner(sp.GetRequiredService<IProcessRunner>()));
+            builder.Services.AddSingleton<ISetupCoreBridge>(sp => new SetupCoreBridge(sp.GetRequiredService<ICorePeer>()));
+            builder.Services.AddSingleton(sp => new SetupCoordinator(
+                sp.GetRequiredService<IVideoAdapterSource>(),
+                DiskFreeBytes,
+                IsHostReachable,
+                sp.GetRequiredService<UvSyncRunner>(),
+                sp.GetRequiredService<ISetupCoreBridge>(),
+                sp.GetRequiredService<AppSettingsService>(),
+                () => sp.GetRequiredService<IHostApplicationLifetime>().StopApplication(),
+                logger: sp.GetRequiredService<ILogger<SetupCoordinator>>()));
+
 #if DEBUG
     		builder.Services.AddBlazorWebViewDeveloperTools();
     		builder.Logging.AddDebug();
@@ -131,6 +155,42 @@ namespace ReTran_App
             MauiApp app = builder.Build();
             MigrateDatabase(app.Services, dbPath);
             return app;
+        }
+
+        // Probe client riêng cho bước Checking của setup: timeout 3 s — khác HttpClient chung (100 s),
+        // vì check mạng phải trả lời nhanh để wizard không treo ở màn kiểm tra.
+        private static readonly HttpClient NetworkProbeClient = new() { Timeout = TimeSpan.FromSeconds(3) };
+
+        /// <summary>
+        /// Free bytes on the volume containing <paramref name="path"/>; 0 when unreadable (fail-safe:
+        /// the wizard then fails its disk gate with a clear message instead of assuming space).
+        /// Số byte trống trên ổ chứa path; 0 khi không đọc được (fail-safe: wizard fail cổng đĩa kèm
+        /// thông báo rõ thay vì giả định có dung lượng).
+        /// </summary>
+        private static long DiskFreeBytes(string path)
+        {
+            try { return new DriveInfo(Path.GetFullPath(path)).AvailableFreeSpace; }
+            catch (Exception) { return 0; }
+        }
+
+        /// <summary>
+        /// Short-timeout HTTPS reachability probe for the setup network gate: any HTTP answer (even
+        /// 4xx/5xx) proves the host is reachable; DNS/TLS/connect failures report unreachable.
+        /// Probe HTTPS timeout ngắn cho cổng mạng của setup: bất kỳ đáp HTTP nào (kể cả 4xx/5xx) chứng
+        /// minh tới được host; lỗi DNS/TLS/kết nối báo không tới được.
+        /// </summary>
+        private static bool IsHostReachable(string host)
+        {
+            try
+            {
+                using HttpResponseMessage response = NetworkProbeClient
+                    .GetAsync($"https://{host}/", HttpCompletionOption.ResponseHeadersRead).GetAwaiter().GetResult();
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
 
         private static void MigrateDatabase(IServiceProvider services, string dbPath)

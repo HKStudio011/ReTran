@@ -313,6 +313,38 @@ public static class I18nStrings
         ["ocr.param.return_word_box.label"] = "Trả word box",
         ["ocr.param.return_word_box.hint"] = "ReTran chưa dùng word box; bật chỉ tốn thời gian.",
         ["ocr.param.return_word_box.tip"] = "Mặc định: tắt (false). Áp dụng ngay ở lượt OCR kế tiếp.",
+
+        // Wizard setup chạy lần đầu (spec 2026-11-04)
+        ["setup.title"] = "Cài đặt ReTran",
+        ["setup.checking"] = "Đang kiểm tra hệ thống…",
+        ["setup.chooseLang"] = "Chọn ngôn ngữ chính của nội dung muốn nhận chữ.",
+        ["setup.auto"] = "Tự động",
+        ["setup.totalSize"] = "Tổng dung lượng sẽ tải: {0}",
+        ["setup.confirm"] = "Xác nhận",
+        ["setup.step.verifyingFiles"] = "Đang kiểm tra tệp đi kèm…",
+        ["setup.step.syncing"] = "Đang cài môi trường OCR (uv sync)…",
+        ["setup.step.verifyingSidecar"] = "Đang khởi động lại Core và xác minh sidecar…",
+        ["setup.step.downloadingModels"] = "Đang tải model OCR…",
+        ["setup.step.applying"] = "Đang ghi cặp model vào cài đặt…",
+        ["setup.error.retry"] = "Thử lại",
+        ["setup.error.skip"] = "Bỏ qua",
+        ["setup.error.switchCpu"] = "Chuyển sang bản CPU",
+        // Ba notice hạ GPU→CPU — bản song ngữ của đúng 3 chuỗi SystemCheck tương ứng. Modal hiện
+        // Notice do coordinator giữ (nguồn sự thật duy nhất); các key này là cặp EN/Vi chuẩn cho
+        // từng loại notice khi cần localize UI.
+        ["setup.notice.amdCpu"] = "Không cài được bản GPU cho card AMD trên Windows, sẽ thay bằng bản CPU.",
+        ["setup.notice.noGpu"] = "Không có GPU NVIDIA hỗ trợ — wizard sẽ dùng bản CPU.",
+        ["setup.notice.oldDriver"] = "Driver NVIDIA hiện tại chưa đủ mới cho bản GPU (cần tối thiểu 576.02 cho CUDA 12.9) — Setup sẽ cài bản CPU. Cập nhật driver rồi chạy lại Setup để dùng bản GPU.",
+        // Màn xác nhận đổi flavor (Amendment A2) — chỉ có nút xác nhận, không hành động nào khác.
+        ["setup.flavorSwitch.title"] = "Đổi bản cài đặt OCR",
+        ["setup.flavorSwitch.installed"] = "Đang cài trên máy này: {0}",
+        ["setup.flavorSwitch.target"] = "Sẽ cài theo cấu hình máy: {0}",
+        ["setup.flavorSwitch.size"] = "Dung lượng tải ước tính: {0}",
+        ["setup.flavorSwitch.sizeGpu"] = "~1,6 GB (bản GPU)",
+        ["setup.flavorSwitch.sizeCpu"] = "~0,3 GB (bản CPU)",
+        ["setup.flavorSwitch.confirm"] = "Đổi sang bản mới",
+        ["setup.section"] = "Cài đặt (setup)",
+        ["setup.rerun"] = "Chạy lại setup",
     };
 
     /// <summary>English strings, keyed by dotted ids. Chuỗi tiếng Anh, khóa dạng chấm.</summary>
@@ -622,6 +654,34 @@ public static class I18nStrings
         ["ocr.param.return_word_box.label"] = "Return word box",
         ["ocr.param.return_word_box.hint"] = "ReTran does not use word boxes yet; enabling only costs time.",
         ["ocr.param.return_word_box.tip"] = "Default: off (false). Applies on the next OCR pass.",
+
+        // First-run setup wizard (spec 2026-11-04) — English mirror of the Vi block above.
+        ["setup.title"] = "Set up ReTran",
+        ["setup.checking"] = "Checking your system…",
+        ["setup.chooseLang"] = "Choose the main language of the content you want to read.",
+        ["setup.auto"] = "Automatic",
+        ["setup.totalSize"] = "Total download size: {0}",
+        ["setup.confirm"] = "Confirm",
+        ["setup.step.verifyingFiles"] = "Checking bundled files…",
+        ["setup.step.syncing"] = "Installing the OCR environment (uv sync)…",
+        ["setup.step.verifyingSidecar"] = "Restarting Core and verifying the sidecar…",
+        ["setup.step.downloadingModels"] = "Downloading OCR models…",
+        ["setup.step.applying"] = "Saving the model pair to settings…",
+        ["setup.error.retry"] = "Retry",
+        ["setup.error.skip"] = "Skip",
+        ["setup.error.switchCpu"] = "Switch to the CPU build",
+        ["setup.notice.amdCpu"] = "The GPU build cannot be installed for AMD cards on Windows; the CPU build will be used instead.",
+        ["setup.notice.noGpu"] = "No supported NVIDIA GPU found — the wizard will use the CPU build.",
+        ["setup.notice.oldDriver"] = "Your current NVIDIA driver is too old for the GPU build (576.02 minimum for CUDA 12.9) — Setup will install the CPU build. Update the driver and re-run Setup to use the GPU build.",
+        ["setup.flavorSwitch.title"] = "Change OCR build",
+        ["setup.flavorSwitch.installed"] = "Currently installed on this machine: {0}",
+        ["setup.flavorSwitch.target"] = "Will be installed for this machine: {0}",
+        ["setup.flavorSwitch.size"] = "Estimated download size: {0}",
+        ["setup.flavorSwitch.sizeGpu"] = "~1.6 GB (GPU build)",
+        ["setup.flavorSwitch.sizeCpu"] = "~0.3 GB (CPU build)",
+        ["setup.flavorSwitch.confirm"] = "Switch to the new build",
+        ["setup.section"] = "Setup",
+        ["setup.rerun"] = "Re-run setup",
     };
 
     /// <summary>

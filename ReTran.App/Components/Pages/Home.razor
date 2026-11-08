@@ -10,6 +10,9 @@
 @inject I18nService L
 @inject AppSettingsService SettingsStore
 @inject PipelineController Pipeline
+@* Fully-qualified: the Setup namespace also defines OcrModelInfo, which would clash with
+   ReTran_App.Core.OcrModelInfo used in CheckOcrModelsAsync below. *@
+@inject ReTran_App.Services.Setup.SetupCoordinator Setup
 @inject ReTran_App.Services.OverlayWindow.OverlayWindowService OverlaySvc
 @inject ToastService Toast
 @implements IDisposable
@@ -461,6 +464,9 @@
 
     private async Task StartPipelineAsync()
     {
+        // Spec §3.1: setup chưa xong → modal che màn hình, không start pipeline (guard tách trong PipelineGate).
+        if (!ReTran_App.Services.Setup.PipelineGate.CanStartPipeline(Setup.IsComplete)) return;
+
         if (_sourceKind == "window" && string.IsNullOrEmpty(_windowHwnd))
         {
             _pipelineError = L["deck.error.pickWindow"];

@@ -73,6 +73,9 @@
     @* Modal update toàn màn hình — tự render rỗng khi không có update đang chạy *@
     <UpdateModal />
 
+    @* Modal setup chạy lần đầu — tự trigger trong OnInitialized, render rỗng khi wizard đã xong (spec §5.9) *@
+    <SetupModal />
+
     @* Toast stack: fixed góc dưới phải, z-index cao để nổi trên nội dung *@
     <div class="rt-toasts" aria-live="polite">
         @foreach (var toast in _toasts)

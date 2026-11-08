@@ -1,0 +1,272 @@
+@* Modal setup toàn màn hình chạy lần đầu — điểm entry duy nhất của wizard (spec §5.9): tự trigger
+   trong OnInitialized khi state chưa xong hoặc artifact đã mất; render rỗng khi wizard hoàn tất.
+   Mọi hành động đi qua SetupCoordinator — modal KHÔNG gọi uv/python/sidecar trực tiếp (spec §5.11). *@
+@using ReTran_App.Services
+@using ReTran_App.Services.Setup
+@implements IDisposable
+@inject SetupCoordinator Coordinator
+@inject I18nService L
+@inject AppSettingsService SettingsStore
+
+@if (_wizardActive && !Coordinator.IsComplete)
+{
+    @* Keyframes cho progress bar indeterminate (uv sync có thể kéo dài vài phút). Định nghĩa tại đây
+       thay vì Vite build: modal không được phụ thuộc rebuild frontend. *@
+    <style>
+        .rt-setup-modal .rt-setup-track { position: relative; height: 8px; border-radius: 4px; background: var(--rt-line); overflow: hidden; margin-top: 12px; }
+        .rt-setup-modal .rt-setup-bar { position: absolute; top: 0; bottom: 0; left: -40%; width: 40%; border-radius: 4px; background: var(--rt-tally); animation: rt-setup-sweep 1.4s ease-in-out infinite; }
+        @@keyframes rt-setup-sweep { from { left: -40%; } to { left: 100%; } }
+    </style>
+
+    @* z-index 60 inline (lớn hơn z-50 của .rt-sheet): settings sheet đứng sau trong DOM nên với cùng
+       z-index nó sẽ phủ lên modal — nút "Chạy lại setup" phải để wizard hiện trên sheet. Toasts (z-70)
+       vẫn nổi trên cùng. *@
+    <div class="fixed inset-0 flex items-center justify-center bg-black/50 p-4" style="z-index: 60;">
+        <div role="dialog" aria-modal="true" aria-label="@ModalTitle"
+             class="rt-setup-modal w-full max-w-lg rounded-lg border border-surface bg-background p-4 shadow-xl">
+            <h2 class="mb-3 text-base font-semibold text-surface">@ModalTitle</h2>
+
+            @switch (Coordinator.Step)
+            {
+                case SetupStep.Checking:
+                    <p class="text-sm text-surface">@(L["setup.checking"])</p>
+                    @if (Coordinator.Notice is not null)
+                    {
+                        @* Notice hạ GPU→CPU từ SystemCheck — chuỗi hoàn chỉnh do coordinator giữ. *@
+                        <p class="rt-hint" style="white-space: pre-wrap;">@Coordinator.Notice</p>
+                    }
+                    break;
+
+                case SetupStep.ChoosingLanguage:
+                    <p class="text-sm text-surface mb-1">@(L["setup.chooseLang"])</p>
+                    <div class="flex flex-col gap-2">
+                        <label class="rt-setup-opt" style="@OptionStyle(_selected == "auto")">
+                            <input type="radio" name="setup-lang" checked="@(_selected == "auto")" @onchange='() => SelectLanguage("auto")' />
+                            <span class="text-sm text-surface">@(L["setup.auto"])</span>
+                            <span class="rt-hint">@OptionMeta(PairFor("auto"))</span>
+                        </label>
+                        @foreach (LangOption option in _options)
+                        {
+                            <label class="rt-setup-opt" style="@OptionStyle(_selected == option.Code)">
+                                <input type="radio" name="setup-lang" checked="@(_selected == option.Code)" @onchange='() => SelectLanguage(option.Code)' />
+                                <span class="text-sm text-surface">@option.Name</span>
+                                <span class="rt-hint">@OptionMeta(option.Pair)</span>
+                            </label>
+                        }
+                    </div>
+                    <p class="rt-hint mb-3">@(L.Fmt("setup.totalSize", FormatMb(SelectedTotalMb)))</p>
+                    <button type="button" class="rt-btn rt-btn-primary" disabled="@_busy" @onclick="ConfirmLanguageAsync">@(L["setup.confirm"])</button>
+                    break;
+
+                case SetupStep.ConfirmingFlavorSwitch:
+                    @* Amendment A2: wizard dừng chờ user xác nhận đổi flavor — KHÔNG có hành động nào
+                       khác ngoài nút xác nhận (không sync nào xảy ra trước đó). *@
+                    <p class="text-sm text-surface mb-1">@(L["setup.flavorSwitch.title"])</p>
+                    @if (Coordinator.PendingFlavorSwitch is { } pending)
+                    {
+                        <div class="flex flex-col gap-2">
+                            <p class="rt-hint">@L.Fmt("setup.flavorSwitch.installed", FlavorLabel(pending.Installed))</p>
+                            <p class="rt-hint">@L.Fmt("setup.flavorSwitch.target", FlavorLabel(pending.Target))</p>
+                            <p class="rt-hint">@L.Fmt("setup.flavorSwitch.size", pending.Target == OcrFlavor.Gpu ? L["setup.flavorSwitch.sizeGpu"] : L["setup.flavorSwitch.sizeCpu"])</p>
+                        </div>
+                    }
+                    <button type="button" class="rt-btn rt-btn-primary" disabled="@_busy" @onclick="ConfirmFlavorSwitchAsync">@(L["setup.flavorSwitch.confirm"])</button>
+                    break;
+
+                case SetupStep.Failed:
+                    <p class="text-sm" style="color: var(--rt-danger); white-space: pre-wrap; margin-bottom: 12px;">@Coordinator.Error</p>
+                    <div class="flex gap-2">
+                        <button type="button" class="rt-btn rt-mini" disabled="@_busy" @onclick="RetryAsync">@(L["setup.error.retry"])</button>
+                        @if (Coordinator.CanSwitchToCpuFlavor)
+                        {
+                            @* Lỗi cổng capability: card không chạy nổi bản GPU — đề nghị chuyển CPU
+                               thẳng thay vì đường cụt (addendum §3). *@
+                            <button type="button" class="rt-btn rt-btn-primary rt-mini" disabled="@_busy" @onclick="SwitchToCpuFlavorAsync">@(L["setup.error.switchCpu"])</button>
+                        }
+                        <button type="button" class="rt-btn rt-mini" disabled="@_busy" @onclick="Skip">@(L["setup.error.skip"])</button>
+                    </div>
+                    break;
+
+                default:
+                    @* Các bước chạy (VerifyingFiles…Applying): tên bước + bar indeterminate
+                       (spec cho phép fallback indeterminate). *@
+                    <p class="text-sm text-surface">@(L[StepLabelKey(Coordinator.Step)])</p>
+                    <div class="rt-setup-track" aria-hidden="true"><div class="rt-setup-bar"></div></div>
+                    break;
+            }
+        </div>
+    </div>
+}
+
+@code {
+    // Ngôn ngữ phổ biến trên màn hình hỏi (spec §13) — tất cả đều có trong catalog. Nhóm "khác" theo
+    // catalog là open item của spec (mục 10, dòng cuối) — chưa render ở bản này.
+    private static readonly string[] CommonLangCodes = ["vi", "en", "zh", "ja", "ko", "ru", "ar", "th", "el", "hi"];
+
+    private bool _wizardActive;   // Wizard đã được start (hoặc đang chạy do rerun) — phân biệt với đường rẻ "đã xong".
+    private bool _busy;           // Chặn bấm chồng các nút xác nhận/thử lại.
+    private string _selected = "auto";
+    private readonly List<LangOption> _options = [];
+
+    private string ModalTitle => L["setup.title"];
+
+    protected override void OnInitialized()
+    {
+        Coordinator.Changed += OnChanged;
+        BuildOptions();
+        if (!_wizardActive)
+        {
+            _selected = PreselectLanguage();
+            SetupState state = SetupState.Load();
+            // Đường rẻ (spec §5.9): chỉ kiểm tra file/thư mục — không probe Python.
+            if (SetupState.NeedsSetup(state, SetupPaths.VenvPythonExe, SetupPaths.ModelsDir))
+            {
+                _wizardActive = true;
+                // Bước Checking chạy WMI + probe mạng đồng bộ (seam sync theo design) — đưa ra khỏi
+                // UI thread để app start không bị đơ.
+                _ = Task.Run(() => Coordinator.StartAsync());
+            }
+        }
+    }
+
+    // Changed bắn từ luồng nền (uv sync, poll model, restart core) — marshal về UI thread trước khi
+    // re-render; mọi publish ngoài Done nghĩa là wizard đang chạy/chờ → modal phải hiện (đường rerun
+    // start wizard từ SettingsPanel, không qua component này).
+    private void OnChanged() => _ = InvokeAsync(() =>
+    {
+        if (!Coordinator.IsComplete) _wizardActive = true;
+        StateHasChanged();
+    });
+
+    public void Dispose() => Coordinator.Changed -= OnChanged;
+
+    /// <summary>One selectable language row: code, display name, and the model pair it would use.</summary>
+    private sealed record LangOption(string Code, string Name, (string Det, string Rec) Pair);
+
+    private void BuildOptions()
+    {
+        foreach (string code in CommonLangCodes)
+            _options.Add(new LangOption(code, I18nStrings.LanguageName(code), PairFor(code)));
+    }
+
+    // Preselect theo brief: ngôn ngữ nguồn đã set trong settings nếu là mã hợp lệ, không thì "Tự động".
+    private string PreselectLanguage()
+    {
+        string src = SettingsStore.Load().Src.Trim().ToLowerInvariant();
+        return _options.Any(o => o.Code == src) ? src : "auto";
+    }
+
+    // Cặp model chỉ-để-hiển-thị — mirror routing recommended() của catalog.py: phủ v6 → cặp default;
+    // không thì rec legacy đầu tiên phủ mã đó. Cặp THẬT vẫn lấy từ ocr.models.recommend ở bước
+    // DownloadingModels — lệch hiển thị tối đa sai số dung lượng (spec §13).
+    private static (string Det, string Rec) PairFor(string code)
+    {
+        if (code == "auto" || Covers(OcrCatalogDisplay.DefaultRec, code))
+            return (OcrCatalogDisplay.DefaultDet, OcrCatalogDisplay.DefaultRec);
+
+        OcrModelInfo? legacy = OcrCatalogDisplay.Models.FirstOrDefault(m =>
+            m.Kind == "rec" && !m.Name.StartsWith("PP-OCRv6", StringComparison.Ordinal) && m.Langs.Contains(code));
+        return legacy is null
+            ? (OcrCatalogDisplay.DefaultDet, OcrCatalogDisplay.DefaultRec)
+            : (OcrCatalogDisplay.DefaultDet, legacy.Name);
+    }
+
+    private static bool Covers(string recName, string code) =>
+        OcrCatalogDisplay.Models.FirstOrDefault(m => m.Name == recName)?.Langs.Contains(code) ?? false;
+
+    private static double SizeMb(string name) =>
+        OcrCatalogDisplay.Models.FirstOrDefault(m => m.Name == name)?.SizeMb ?? 0.0;
+
+    private static double TotalMb((string Det, string Rec) pair) => SizeMb(pair.Det) + SizeMb(pair.Rec);
+
+    private static string FormatMb(double mb) => $"{mb:0.#} MB";
+
+    private string OptionMeta((string Det, string Rec) pair) => $"{pair.Det} · {pair.Rec} · {FormatMb(TotalMb(pair))}";
+
+    private double SelectedTotalMb => _selected == "auto"
+        ? TotalMb(PairFor("auto"))
+        : _options.FirstOrDefault(o => o.Code == _selected) is { } option ? TotalMb(option.Pair) : 0.0;
+
+    // Highlight dòng đang chọn — không có class riêng trong CSS build sẵn nên dùng inline.
+    private static string OptionStyle(bool selected) => selected
+        ? "border: 1px solid var(--rt-tally); border-radius: 6px; padding: 8px;"
+        : "border: 1px solid var(--rt-line); border-radius: 6px; padding: 8px;";
+
+    private static string FlavorLabel(OcrFlavor flavor) => flavor == OcrFlavor.Gpu ? "GPU" : "CPU";
+
+    // Bước → key i18n: các key theo brief là camelCase (verifyingFiles…) nên KHÔNG suy được từ
+    // Step.ToString().ToLowerInvariant() (sẽ ra "verifyingfiles" — key thiếu, UI hiện nguyên key).
+    private static string StepLabelKey(SetupStep step) => step switch
+    {
+        SetupStep.VerifyingFiles => "setup.step.verifyingFiles",
+        SetupStep.Syncing => "setup.step.syncing",
+        SetupStep.VerifyingSidecar => "setup.step.verifyingSidecar",
+        SetupStep.DownloadingModels => "setup.step.downloadingModels",
+        SetupStep.Applying => "setup.step.applying",
+        _ => "setup.checking",
+    };
+
+    private void SelectLanguage(string code) => _selected = code;
+
+    private async Task ConfirmLanguageAsync()
+    {
+        if (_busy) return;
+        _busy = true;
+        try
+        {
+            await Coordinator.ContinueWithLanguageAsync(_selected);
+        }
+        finally
+        {
+            _busy = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task ConfirmFlavorSwitchAsync()
+    {
+        if (_busy) return;
+        _busy = true;
+        try
+        {
+            await Coordinator.ConfirmFlavorSwitchAsync();
+        }
+        finally
+        {
+            _busy = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task RetryAsync()
+    {
+        if (_busy) return;
+        _busy = true;
+        try
+        {
+            await Coordinator.RetryAsync();
+        }
+        finally
+        {
+            _busy = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task SwitchToCpuFlavorAsync()
+    {
+        if (_busy) return;
+        _busy = true;
+        try
+        {
+            await Coordinator.SwitchToCpuFlavorAsync();
+        }
+        finally
+        {
+            _busy = false;
+            StateHasChanged();
+        }
+    }
+
+    private void Skip() => Coordinator.Skip();
+}
