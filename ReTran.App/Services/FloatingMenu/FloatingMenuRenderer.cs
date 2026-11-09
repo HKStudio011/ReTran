@@ -58,11 +58,8 @@ public static class FloatingMenuRenderer
     /// <summary>Grip dot diameter in the header (pixels). Đường kính chấm grip trong header (pixel).</summary>
     private const float GripDotSize = 4f;
 
-    /// <summary>Gap between grip dots (pixels). Khoảng cách giữa các chấm grip (pixel).</summary>
-    private const float GripDotGap = 8f;
-
-    /// <summary>Line height of the stats block lines (pixels). Chiều cao mỗi dòng trong vùng thống kê (pixel).</summary>
-    private const float StatsLineHeight = 16f;
+    /// <summary>Edge-to-edge pitch of the grip dots (pixels); the visible gap is the pitch minus the dot size. Pitch cạnh-đến-cạnh của các chấm grip (pixel); khe nhìn thấy bằng pitch trừ cỡ chấm.</summary>
+    private const float GripDotPitch = 8f;
 
     /// <summary>Dimmed text: TextColor at ~50% alpha. Chữ mờ: TextColor alpha ~50%.</summary>
     private static readonly SD.Color DimColor = SD.Color.FromArgb(130, BoxAnnotationStyle.TextColor.R, BoxAnnotationStyle.TextColor.G, BoxAnnotationStyle.TextColor.B);
@@ -174,7 +171,7 @@ public static class FloatingMenuRenderer
         // The left strip is the drag handle (inert in hit-test — the host maps it to HTCAPTION).
         // Dải bên trái là tay kéo (trơ trong hit-test — host tự ánh xạ thành HTCAPTION).
         for (int i = 0; i < 3; i++)
-            g.FillEllipse(dimBrush, px + RowPadX + i * GripDotGap, midY - GripDotSize / 2f, GripDotSize, GripDotSize);
+            g.FillEllipse(dimBrush, px + RowPadX + i * GripDotPitch, midY - GripDotSize / 2f, GripDotSize, GripDotSize);
 
         int btnX = px + pw - FloatingMenuLayout.CollapseButtonSize;
         int btnY = py + (FloatingMenuLayout.HeaderHeight - FloatingMenuLayout.CollapseButtonSize) / 2;
@@ -381,20 +378,32 @@ public static class FloatingMenuRenderer
             s.OverlayOn ? "Bật" : "Tắt",
         ];
 
-        float top = y + (FloatingMenuLayout.StatsBlockHeight - labels.Length * StatsLineHeight) / 2f;
+        // Pitch derived from the block height (≈18.4 px for 5 lines): a 13-px line measures ≈18.9 px tall,
+        // so a fixed 16-px pitch made adjacent lines overlap; this fills the block exactly without overlap.
+        // Pitch suy ra từ chiều cao vùng (≈18,4 px cho 5 dòng): dòng 13 px đo cao ≈18,9 px nên pitch cố định
+        // 16 px làm các dòng đè nhau; cách này lấp đúng vùng mà không trùng lặp.
+        float lineH = FloatingMenuLayout.StatsBlockHeight / labels.Length;
         for (int i = 0; i < labels.Length; i++)
         {
-            float lineY = top + (i + 0.5f) * StatsLineHeight;
+            float lineY = y + (i + 0.5f) * lineH;
             DrawTextAt(g, labels[i], SmallSize, px + RowPadX, lineY, format, dimBrush);
             DrawRightAligned(g, values[i], SmallSize, px + pw - RowPadX, lineY, format, textBrush);
         }
     }
 
-    /// <summary>Dimmed or error status line (hint/error row), truncated to the panel width. Dòng trạng thái mờ hoặc lỗi (row hint/lỗi), cắt vừa rộng panel.</summary>
+    /// <summary>
+    /// Dimmed or error status line (hint/error row), truncated to the panel width. The row is a single
+    /// text line, so the fit height is compensated by TruncateToFit's vertical padding — otherwise the
+    /// height rule (line + 2·PadY ≤ innerHeight) rejects every candidate and the row renders as a lone "…".
+    /// Dòng trạng thái mờ hoặc lỗi (row hint/lỗi), cắt vừa rộng panel. Row là một dòng chữ duy nhất nên chiều
+    /// cao fit được bù bằng đệm dọc của TruncateToFit — nếu không, luật chiều cao (dòng + 2·PadY ≤ innerHeight)
+    /// từ chối mọi ứng viên và row chỉ còn dấu "…" đơn lẻ.
+    /// </summary>
     private static void DrawLine(SD.Graphics g, string text, int size, int px, int pw, int y, int h,
         SD.Brush brush, SD.StringFormat format)
     {
-        string value = BoxAnnotationStyle.TruncateToFit(g, text, size, MathF.Max(1f, pw - 2f * RowPadX), h, format, 1);
+        float innerH = h + 2f * BoxAnnotationStyle.PadY(size);
+        string value = BoxAnnotationStyle.TruncateToFit(g, text, size, MathF.Max(1f, pw - 2f * RowPadX), innerH, format, 1);
         DrawTextAt(g, value, size, px + RowPadX, y + h / 2f, format, brush);
     }
 
