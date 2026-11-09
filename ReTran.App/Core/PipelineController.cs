@@ -87,9 +87,11 @@ public sealed record OcrConfigSetResult(
 /// Bộ điều phối phía App trên <see cref="ICorePeer"/>: start/dừng pipeline của Core
 /// (<c>core.start</c>/<c>core.stop</c>/<c>core.list_sources</c>), trả lời yêu cầu cache của Core
 /// từ cache dịch thuật SQLite, và biến thông báo của Core thành khung <see cref="OverlayState"/>
-/// cùng <see cref="PipelineStateChanged"/>.
+/// cùng <see cref="PipelineStateChanged"/>. Implements <see cref="IPipelineControl"/> so UI surfaces
+/// can depend on the interface instead of this concrete type.
+/// Implement <see cref="IPipelineControl"/> để các bề mặt UI phụ thuộc vào interface thay vì type cụ thể này.
 /// </summary>
-public sealed class PipelineController
+public sealed class PipelineController : IPipelineControl
 {
     /// <summary>Stop reason relayed when the core process ends on its own. Lý do dừng khi tiến trình core tự kết thúc.</summary>
     public const string CoreExitedReason = "core-exited";
