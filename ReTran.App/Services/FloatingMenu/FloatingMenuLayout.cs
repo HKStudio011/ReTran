@@ -55,6 +55,9 @@ public readonly record struct MenuHit(int RowId, MenuZone Zone);
 /// <param name="SourceListOpen">Whether the source-list rows are inserted after the Source row. Danh sách nguồn đang chèn sau row Nguồn không.</param>
 /// <param name="Sources">The source-list items (monitors first, then windows). Các mục danh sách nguồn (màn hình trước, cửa sổ sau).</param>
 /// <param name="ErrorLine">Short error status line shown at the panel bottom, or null when there is none. Dòng trạng thái lỗi ngắn ở đáy panel, hoặc null khi không có.</param>
+/// <param name="Fps">Live preview frames per second from RunStats; 0 while idle. Khung preview/giây trực tiếp từ RunStats; 0 khi nghỉ.</param>
+/// <param name="BoxCount">Text boxes on the latest overlay frame (live). Số hộp văn bản trên khung overlay mới nhất (trực tiếp).</param>
+/// <param name="TranslatedLineCount">Boxes with a non-empty translation on the latest overlay frame (live). Số hộp có bản dịch không rỗng trên khung overlay mới nhất (trực tiếp).</param>
 public sealed record MenuState(
     bool Collapsed,
     bool Running,
@@ -68,7 +71,10 @@ public sealed record MenuState(
     bool StatsOpen,
     bool SourceListOpen,
     IReadOnlyList<SourceItem> Sources,
-    string? ErrorLine);
+    string? ErrorLine,
+    double Fps = 0,
+    int BoxCount = 0,
+    int TranslatedLineCount = 0);
 
 /// <summary>
 /// Pure geometry of the floating menu: window/panel sizes per state, row presence and order, hit-testing

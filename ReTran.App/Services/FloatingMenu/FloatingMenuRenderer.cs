@@ -1,3 +1,4 @@
+using System.Globalization;
 using SD = System.Drawing;
 using ReTran_App.Services.OverlayWindow;
 
@@ -362,20 +363,24 @@ public static class FloatingMenuRenderer
     }
 
     /// <summary>
-    /// Stats block: five 13-px lines from the state (cadences, language pair, overlay flag).
-    /// Vùng thống kê: năm dòng 13 px từ state (nhịp, cặp ngôn ngữ, cờ lớp phủ).
+    /// Stats block: five 13-px LIVE lines per spec §7.3 — fps, current box count, translated-line
+    /// count, the source label and the language pair (SRC → DST uppercased). Labels are hardcoded
+    /// Vietnamese for now; the i18n wiring of renderer labels lands after Task 21 adds the keys.
+    /// Vùng thống kê: năm dòng TRỰC TIẾP 13 px theo spec §7.3 — fps, số box hiện tại, số dòng đã dịch,
+    /// nhãn nguồn và cặp ngôn ngữ (SRC → DST hoa). Nhãn tiếng Việt hardcode cho đến khi lượt i18n sau
+    /// Task 21 thêm các key.
     /// </summary>
     private static void DrawStatsBlock(SD.Graphics g, int px, int pw, int y, MenuState s,
         SD.StringFormat format, SD.Brush textBrush, SD.Brush dimBrush)
     {
-        string[] labels = ["Nhịp OCR", "Nhịp chụp", "Dịch sang", "Ngôn ngữ nguồn", "Lớp phủ"];
+        string[] labels = ["FPS", "Box", "Dòng dịch", "Nguồn", "Dịch sang"];
         string[] values =
         [
-            s.OcrFps + " fps",
-            s.CaptureFps + " fps",
-            s.Dst.ToUpperInvariant(),
-            s.Src.ToUpperInvariant(),
-            s.OverlayOn ? "Bật" : "Tắt",
+            s.Fps.ToString("0.#", CultureInfo.InvariantCulture),
+            s.BoxCount.ToString(CultureInfo.InvariantCulture),
+            s.TranslatedLineCount.ToString(CultureInfo.InvariantCulture),
+            s.SourceLabel,
+            $"{s.Src.ToUpperInvariant()} → {s.Dst.ToUpperInvariant()}",
         ];
 
         // Pitch derived from the block height (≈18.4 px for 5 lines): a 13-px line measures ≈18.9 px tall,
@@ -387,7 +392,15 @@ public static class FloatingMenuRenderer
         {
             float lineY = y + (i + 0.5f) * lineH;
             DrawTextAt(g, labels[i], SmallSize, px + RowPadX, lineY, format, dimBrush);
-            DrawRightAligned(g, values[i], SmallSize, px + pw - RowPadX, lineY, format, textBrush);
+
+            // Values are right-aligned and truncated to the column left of them so a long source label
+            // never collides with the label column (numbers and the pair always fit).
+            // Giá trị căn phải và cắt vừa cột bên trái để nhãn nguồn dài không bao giờ đụng cột nhãn
+            // (số và cặp ngôn ngữ luôn vừa).
+            float labelW = MeasureWidth(g, labels[i], SmallSize, format);
+            string value = BoxAnnotationStyle.TruncateToFit(g, values[i], SmallSize,
+                MathF.Max(1f, pw - 2f * RowPadX - labelW - 8f), FloatingMenuLayout.RowHeight, format, 1);
+            DrawRightAligned(g, value, SmallSize, px + pw - RowPadX, lineY, format, textBrush);
         }
     }
 

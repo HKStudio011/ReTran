@@ -11,7 +11,7 @@ namespace ReTran_App.Services.OverlayWindow;
 /// vẽ lại frame mới nhất từ <see cref="OverlayState"/> qua <see cref="IOverlayHost"/>,
 /// và lưu tùy chọn overlay của người dùng qua <see cref="AppSettingsService"/>.
 /// </summary>
-public sealed class OverlayWindowService : IDisposable
+public sealed class OverlayWindowService : IDisposable, IOverlayToggle
 {
     private static readonly TimeSpan AnchorPollInterval = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan DefaultRedrawInterval = TimeSpan.FromMilliseconds(66); // ≈15 fps
