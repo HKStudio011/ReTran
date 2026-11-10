@@ -1,5 +1,6 @@
 using System.Globalization;
 using SD = System.Drawing;
+using ReTran_App.Services;
 using ReTran_App.Services.OverlayWindow;
 
 namespace ReTran_App.Services.FloatingMenu;
@@ -87,8 +88,15 @@ public static class FloatingMenuRenderer
     /// <param name="s">Menu state snapshot to draw. Snapshot trạng thái menu cần vẽ.</param>
     /// <param name="windowW">Window width in pixels (geometry is owned by the layout, not used here). Rộng window theo pixel (hình học do layout sở hữu, không dùng ở đây).</param>
     /// <param name="windowH">Window height in pixels (geometry is owned by the layout, not used here). Cao window theo pixel (hình học do layout sở hữu, không dùng ở đây).</param>
-    internal static void DrawMenu(SD.Graphics g, MenuState s, int windowW, int windowH)
+    /// <param name="l">
+    /// Optional localized string table for the row/stats/hint labels; null keeps the original
+    /// hardcoded values so legacy call sites render exactly as before.
+    /// Bảng chuỗi đã dịch tuỳ chọn cho nhãn row/thống kê/hint; null giữ nguyên giá trị hardcode gốc để
+    /// các caller cũ vẽ y như trước.
+    /// </param>
+    internal static void DrawMenu(SD.Graphics g, MenuState s, int windowW, int windowH, I18nService? l = null)
     {
+        MenuStrings t = Resolve(l);
         using var format = BoxAnnotationStyle.CreateTextFormat();
         using var panelBrush = new SD.SolidBrush(BoxAnnotationStyle.PillFill);
         using var borderPen = new SD.Pen(BoxAnnotationStyle.PillBorder, 1f);
@@ -127,7 +135,7 @@ public static class FloatingMenuRenderer
             // với HitTest của layout.
             if (id == FloatingMenuLayout.RowCloseMenu)
             {
-                DrawLine(g, "Áp dụng ở lần Start kế tiếp", TinySize, px, pw, cursor, FloatingMenuLayout.HintRowHeight, dimBrush, format);
+                DrawLine(g, t.NextStartHint, TinySize, px, pw, cursor, FloatingMenuLayout.HintRowHeight, dimBrush, format);
                 cursor += FloatingMenuLayout.HintRowHeight;
 
                 if (s.ErrorLine is not null)
@@ -137,15 +145,72 @@ public static class FloatingMenuRenderer
                 }
             }
 
-            DrawRow(g, id, kind, px, pw, cursor, s, format, textBrush, dimBrush, tickBrush, borderPen, path);
+            DrawRow(g, id, kind, px, pw, cursor, s, t, format, textBrush, dimBrush, tickBrush, borderPen, path);
             cursor += FloatingMenuLayout.RowHeight;
 
             if (id == FloatingMenuLayout.RowStats && s.StatsOpen)
             {
-                DrawStatsBlock(g, px, pw, cursor, s, format, textBrush, dimBrush);
+                DrawStatsBlock(g, px, pw, cursor, s, t, format, textBrush, dimBrush);
                 cursor += FloatingMenuLayout.StatsBlockHeight;
             }
         }
+    }
+
+    /// <summary>
+    /// Every user-facing string the floating menu draws, resolved once per draw: the eleven row labels
+    /// (menu.row.* — Start/Stop feed the button), the three dedicated stats-block labels (menu.stats.*)
+    /// whose "source"/"dst" lines reuse the Source/Dst row labels, and the hint line
+    /// (menu.note.nextStart).
+    /// Mọi chuỗi hướng người dùng mà menu nổi vẽ, phân giải một lần mỗi lần vẽ: mười một nhãn row
+    /// (menu.row.* — Start/Stop nuôi nút), ba nhãn riêng của vùng thống kê (menu.stats.*) trong đó hai
+    /// dòng "nguồn"/"dịch sang" tái dùng nhãn row Nguồn/Dịch sang, và dòng hint (menu.note.nextStart).
+    /// </summary>
+    internal sealed record MenuStrings(
+        string Start,
+        string Stop,
+        string Source,
+        string Overlay,
+        string Dst,
+        string Src,
+        string OcrFps,
+        string CaptureFps,
+        string MergeLines,
+        string Stats,
+        string CloseMenu,
+        string NextStartHint,
+        string StatFps,
+        string StatBoxes,
+        string StatLines);
+
+    /// <summary>
+    /// Resolves the menu strings for one draw: with a table every label comes from its i18n key; with
+    /// null the exact values the renderer hardcoded before the i18n wiring are returned verbatim, so
+    /// legacy four-argument call sites render unchanged (the Start/Stop button keeps its "Start"/"Stop"
+    /// words).
+    /// Phân giải chuỗi menu cho một lần vẽ: có bảng thì mọi nhãn lấy từ key i18n; null trả về nguyên giá
+    /// trị renderer hardcode trước khi nối i18n, để các caller 4 tham số cũ vẽ không đổi (nút Start/Stop
+    /// giữ nguyên chữ "Start"/"Stop").
+    /// </summary>
+    /// <param name="l">Localized string table in the active language, or null for the original hardcoded values. Bảng chuỗi đã dịch theo ngôn ngữ hiện tại, hoặc null để dùng giá trị hardcode gốc.</param>
+    /// <returns>The resolved strings for every label the renderer draws. Chuỗi đã phân giải cho mọi nhãn mà renderer vẽ.</returns>
+    internal static MenuStrings Resolve(I18nService? l)
+    {
+        if (l is null)
+            return new MenuStrings(
+                Start: "Start", Stop: "Stop",
+                Source: "Nguồn", Overlay: "Lớp phủ", Dst: "Dịch sang", Src: "Ngôn ngữ nguồn",
+                OcrFps: "Nhịp OCR", CaptureFps: "Nhịp chụp", MergeLines: "Gộp nhiều dòng",
+                Stats: "Thống kê", CloseMenu: "Tắt menu nổi",
+                NextStartHint: "Áp dụng ở lần Start kế tiếp",
+                StatFps: "FPS", StatBoxes: "Box", StatLines: "Dòng dịch");
+
+        return new MenuStrings(
+            Start: l["menu.row.start"], Stop: l["menu.row.stop"],
+            Source: l["menu.row.source"], Overlay: l["menu.row.overlay"], Dst: l["menu.row.dst"], Src: l["menu.row.src"],
+            OcrFps: l["menu.row.ocrFps"], CaptureFps: l["menu.row.captureFps"], MergeLines: l["menu.row.mergeLines"],
+            Stats: l["menu.row.stats"], CloseMenu: l["menu.row.closeMenu"],
+            NextStartHint: l["menu.note.nextStart"],
+            StatFps: l["menu.stats.fps"], StatBoxes: l["menu.stats.boxes"], StatLines: l["menu.stats.lines"]);
     }
 
     /// <summary>Collapsed chip: rounded background plus the "R" glyph centred in it. Chip thu gọn: nền bo góc kèm glyph "R" ở giữa.</summary>
@@ -192,7 +257,7 @@ public static class FloatingMenuRenderer
 
     /// <summary>One expanded-menu row: label left, value right, per the row kind. Một row menu mở rộng: nhãn trái, giá trị phải, theo loại row.</summary>
     private static void DrawRow(SD.Graphics g, int id, string kind, int px, int pw, int y, MenuState s,
-        SD.StringFormat format, SD.Brush textBrush, SD.Brush dimBrush, SD.Brush tickBrush,
+        MenuStrings t, SD.StringFormat format, SD.Brush textBrush, SD.Brush dimBrush, SD.Brush tickBrush,
         SD.Pen borderPen, SD.Drawing2D.GraphicsPath path)
     {
         float midY = y + FloatingMenuLayout.RowHeight / 2f;
@@ -200,13 +265,15 @@ public static class FloatingMenuRenderer
         switch (kind)
         {
             case "startstop":
+                // "Pipeline" has no i18n key in the pinned table — stays hardcoded.
+                // "Pipeline" không có key i18n trong bảng ghim — giữ hardcode.
                 DrawLabel(g, "Pipeline", px, midY, format, textBrush);
-                DrawStartStopButton(g, s.Running, px + pw - RowPadX, midY, format, path);
+                DrawStartStopButton(g, s.Running, s.Running ? t.Stop : t.Start, px + pw - RowPadX, midY, format, path);
                 break;
 
             case "source":
             {
-                string label = "Nguồn";
+                string label = t.Source;
                 float labelW = MeasureWidth(g, label, LabelSize, format);
                 DrawLabel(g, label, px, midY, format, textBrush);
                 float maxW = pw - 2f * RowPadX - labelW - 8f;
@@ -223,14 +290,14 @@ public static class FloatingMenuRenderer
             case "overlay":
                 // Disabled while the pipeline is not running (40% alpha in DrawSwitch).
                 // Disabled khi pipeline chưa chạy (alpha 40% trong DrawSwitch).
-                DrawLabel(g, "Lớp phủ", px, midY, format, textBrush);
+                DrawLabel(g, t.Overlay, px, midY, format, textBrush);
                 DrawSwitch(g, px + pw - RowPadX, midY, s.OverlayOn, s.Running);
                 break;
 
             case "cycle":
             {
                 bool dst = id == FloatingMenuLayout.RowDst;
-                DrawLabel(g, dst ? "Dịch sang" : "Ngôn ngữ nguồn", px, midY, format, textBrush);
+                DrawLabel(g, dst ? t.Dst : t.Src, px, midY, format, textBrush);
                 string code = (dst ? s.Dst : s.Src).ToUpperInvariant();
                 DrawRightAligned(g, code, LabelSize, px + pw - RowPadX, midY, format, textBrush);
                 break;
@@ -239,23 +306,23 @@ public static class FloatingMenuRenderer
             case "stepper":
             {
                 bool ocr = id == FloatingMenuLayout.RowOcrFps;
-                DrawStepper(g, ocr ? "Nhịp OCR" : "Nhịp chụp", ocr ? s.OcrFps : s.CaptureFps,
+                DrawStepper(g, ocr ? t.OcrFps : t.CaptureFps, ocr ? s.OcrFps : s.CaptureFps,
                     px, pw, midY, format, textBrush);
                 break;
             }
 
             case "switch":
-                DrawLabel(g, "Gộp nhiều dòng", px, midY, format, textBrush);
+                DrawLabel(g, t.MergeLines, px, midY, format, textBrush);
                 DrawSwitch(g, px + pw - RowPadX, midY, s.MergeLines, true);
                 break;
 
             case "stats":
-                DrawLabel(g, "Thống kê", px, midY, format, textBrush);
+                DrawLabel(g, t.Stats, px, midY, format, textBrush);
                 DrawRightAligned(g, s.StatsOpen ? "▾" : "▸", SmallSize, px + pw - RowPadX, midY, format, dimBrush);
                 break;
 
             case "close":
-                DrawLabel(g, "Tắt menu nổi", px, midY, format, textBrush);
+                DrawLabel(g, t.CloseMenu, px, midY, format, textBrush);
                 break;
         }
     }
@@ -282,11 +349,15 @@ public static class FloatingMenuRenderer
         DrawTextAt(g, value, SmallSize, x, midY, format, selected ? textBrush : dimBrush);
     }
 
-    /// <summary>Start/Stop button at the row's right edge: accent outline and label per pipeline state. Nút Start/Stop ở mép phải row: viền và nhãn màu nhấn theo trạng thái pipeline.</summary>
-    private static void DrawStartStopButton(SD.Graphics g, bool running, float rightX, float midY,
+    /// <summary>
+    /// Start/Stop button at the row's right edge: accent outline per pipeline state and the resolved
+    /// label centred in it.
+    /// Nút Start/Stop ở mép phải row: viền màu nhấn theo trạng thái pipeline và nhãn đã phân giải căn
+    /// giữa trong nút.
+    /// </summary>
+    private static void DrawStartStopButton(SD.Graphics g, bool running, string text, float rightX, float midY,
         SD.StringFormat format, SD.Drawing2D.GraphicsPath path)
     {
-        string text = running ? "Stop" : "Start";
         SD.Color accent = running ? ErrorColor : BoxAnnotationStyle.TickColor;
         using var brush = new SD.SolidBrush(accent);
         using var pen = new SD.Pen(accent, 1f);
@@ -364,16 +435,16 @@ public static class FloatingMenuRenderer
 
     /// <summary>
     /// Stats block: five 13-px LIVE lines per spec §7.3 — fps, current box count, translated-line
-    /// count, the source label and the language pair (SRC → DST uppercased). Labels are hardcoded
-    /// Vietnamese for now; the i18n wiring of renderer labels lands after Task 21 adds the keys.
+    /// count, the source label and the language pair (SRC → DST uppercased). Labels come from the
+    /// resolved <see cref="MenuStrings"/> (menu.stats.* plus the Source/Dst row labels).
     /// Vùng thống kê: năm dòng TRỰC TIẾP 13 px theo spec §7.3 — fps, số box hiện tại, số dòng đã dịch,
-    /// nhãn nguồn và cặp ngôn ngữ (SRC → DST hoa). Nhãn tiếng Việt hardcode cho đến khi lượt i18n sau
-    /// Task 21 thêm các key.
+    /// nhãn nguồn và cặp ngôn ngữ (SRC → DST hoa). Nhãn lấy từ MenuStrings đã phân giải (menu.stats.*
+    /// cộng nhãn row Nguồn/Dịch sang).
     /// </summary>
-    private static void DrawStatsBlock(SD.Graphics g, int px, int pw, int y, MenuState s,
+    private static void DrawStatsBlock(SD.Graphics g, int px, int pw, int y, MenuState s, MenuStrings t,
         SD.StringFormat format, SD.Brush textBrush, SD.Brush dimBrush)
     {
-        string[] labels = ["FPS", "Box", "Dòng dịch", "Nguồn", "Dịch sang"];
+        string[] labels = [t.StatFps, t.StatBoxes, t.StatLines, t.Source, t.Dst];
         string[] values =
         [
             s.Fps.ToString("0.#", CultureInfo.InvariantCulture),

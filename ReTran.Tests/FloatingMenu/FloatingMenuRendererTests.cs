@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.Drawing.Imaging;
+using ReTran_App.Services;
 using ReTran_App.Services.FloatingMenu;
 using Color = System.Drawing.Color;
 
@@ -12,7 +13,7 @@ public class FloatingMenuRendererTests
         MergeLines: true, StatsOpen: statsOpen, SourceListOpen: false,
         Sources: Array.Empty<SourceItem>(), ErrorLine: errorLine);
 
-    private static Bitmap Render(MenuState s)
+    private static Bitmap Render(MenuState s, I18nService? l = null)
     {
         var (w, h) = FloatingMenuLayout.WindowSize(s);
         var bitmap = new Bitmap(w, h, PixelFormat.Format32bppPArgb);
@@ -24,8 +25,83 @@ public class FloatingMenuRendererTests
         // đánh lừa bộ dò teal).
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
         g.Clear(Color.Transparent);
-        FloatingMenuRenderer.DrawMenu(g, s, w, h);
+        FloatingMenuRenderer.DrawMenu(g, s, w, h, l);
         return bitmap;
+    }
+
+    [Fact]
+    public void Resolve_Null_ReturnsPreI18nValuesVerbatim()
+    {
+        // The null seam must reproduce exactly what the renderer hardcoded before the i18n wiring —
+        // including the English "Start"/"Stop" button words — so legacy 4-arg call sites render unchanged.
+        // Seam null phải tái hiện đúng những gì renderer hardcode trước khi nối i18n — kể cả chữ
+        // "Start"/"Stop" tiếng Anh của nút — để caller 4 tham số cũ vẽ không đổi.
+        FloatingMenuRenderer.MenuStrings t = FloatingMenuRenderer.Resolve(null);
+
+        Assert.Equal("Start", t.Start);
+        Assert.Equal("Stop", t.Stop);
+        Assert.Equal("Nguồn", t.Source);
+        Assert.Equal("Lớp phủ", t.Overlay);
+        Assert.Equal("Dịch sang", t.Dst);
+        Assert.Equal("Ngôn ngữ nguồn", t.Src);
+        Assert.Equal("Nhịp OCR", t.OcrFps);
+        Assert.Equal("Nhịp chụp", t.CaptureFps);
+        Assert.Equal("Gộp nhiều dòng", t.MergeLines);
+        Assert.Equal("Thống kê", t.Stats);
+        Assert.Equal("Tắt menu nổi", t.CloseMenu);
+        Assert.Equal("Áp dụng ở lần Start kế tiếp", t.NextStartHint);
+        Assert.Equal("FPS", t.StatFps);
+        Assert.Equal("Box", t.StatBoxes);
+        Assert.Equal("Dòng dịch", t.StatLines);
+    }
+
+    [Fact]
+    public void Resolve_En_ReturnsExactTableValues()
+    {
+        var en = new I18nService();
+        en.Set("en");
+        FloatingMenuRenderer.MenuStrings t = FloatingMenuRenderer.Resolve(en);
+
+        Assert.Equal("Start", t.Start);
+        Assert.Equal("Stop", t.Stop);
+        Assert.Equal("Source", t.Source);
+        Assert.Equal("Overlay", t.Overlay);
+        Assert.Equal("Translate to", t.Dst);
+        Assert.Equal("Source language", t.Src);
+        Assert.Equal("OCR rhythm", t.OcrFps);
+        Assert.Equal("Capture rhythm", t.CaptureFps);
+        Assert.Equal("Merge lines", t.MergeLines);
+        Assert.Equal("Stats", t.Stats);
+        Assert.Equal("Turn off floating menu", t.CloseMenu);
+        Assert.Equal("Language / rhythm / source apply on the next start.", t.NextStartHint);
+        Assert.Equal("FPS", t.StatFps);
+        Assert.Equal("Boxes", t.StatBoxes);
+        Assert.Equal("Translated lines", t.StatLines);
+    }
+
+    [Fact]
+    public void DrawMenu_WithEnService_RendersWithoutThrowing()
+    {
+        // Smoke: the full expanded menu (stats block open + error line) through the i18n path must
+        // paint a real frame — same dark-panel coverage guarantee as the default path.
+        // Smoke: menu mở rộng đầy đủ (vùng thống kê mở + dòng lỗi) qua đường i18n phải vẽ được khung
+        // thật — cùng bảo đảm phủ panel tối như đường mặc định.
+        var en = new I18nService();
+        en.Set("en");
+        MenuState s = State(statsOpen: true, errorLine: "Could not start: test");
+        using Bitmap bitmap = Render(s, en);
+
+        var (px, py, pw, ph) = FloatingMenuLayout.PanelRect(s);
+        int dark = 0, total = 0;
+        for (int y = py; y < py + ph; y++)
+            for (int x = px; x < px + pw; x++)
+            {
+                total++;
+                if (IsDark(bitmap.GetPixel(x, y))) dark++;
+            }
+
+        Assert.True(dark > total * 0.6f,
+            $"expected the dark panel to cover > 60% of its rect, got {dark}/{total}");
     }
 
     // A > 0 matters: fully transparent pixels are (0,0,0), which would otherwise count as "dark" and let a

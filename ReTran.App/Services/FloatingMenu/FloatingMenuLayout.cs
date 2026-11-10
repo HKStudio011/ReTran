@@ -362,22 +362,30 @@ public static class FloatingMenuLayout
     }
 
     /// <summary>
-    /// Builds the capture-source list: every monitor first (label "Màn hình {Id+1}"), then up to
-    /// MaxSourceWindows windows in stable input order (label "{Process} — {Title}", truncated to 40
-    /// characters plus an ellipsis without cutting between surrogate halves).
-    /// Dựng danh sách nguồn capture: mọi màn hình trước (label "Màn hình {Id+1}"), sau đó tối đa
-    /// MaxSourceWindows cửa sổ theo thứ tự đầu vào ổn định (label "{Process} — {Title}", cắt 40 ký tự kèm
-    /// dấu ba chấm mà không cắt giữa surrogate pair).
+    /// Builds the capture-source list: every monitor first (label "Màn hình {Id+1}" by default, or the
+    /// factory's value when one is given), then up to MaxSourceWindows windows in stable input order
+    /// (label "{Process} — {Title}", truncated to 40 characters plus an ellipsis without cutting between
+    /// surrogate halves). Window labels are never affected by the factory.
+    /// Dựng danh sách nguồn capture: mọi màn hình trước (label "Màn hình {Id+1}" mặc định, hoặc giá trị
+    /// của factory khi có), sau đó tối đa MaxSourceWindows cửa sổ theo thứ tự đầu vào ổn định (label
+    /// "{Process} — {Title}", cắt 40 ký tự kèm dấu ba chấm mà không cắt giữa surrogate pair). Label cửa
+    /// sổ không bao giờ bị factory ảnh hưởng.
     /// </summary>
     /// <param name="monitors">Available monitors, in display order. Các màn hình có sẵn, theo thứ tự hiển thị.</param>
     /// <param name="windows">Available windows, in the order reported by the capture list. Các cửa sổ có sẵn, theo thứ tự danh sách capture trả về.</param>
+    /// <param name="monitorLabel">
+    /// Optional factory for monitor labels (argument = zero-based monitor id); null keeps the default
+    /// "Màn hình {Id+1}".
+    /// Factory tuỳ chọn cho label màn hình (tham số = chỉ số màn hình từ 0); null giữ mặc định
+    /// "Màn hình {Id+1}".
+    /// </param>
     /// <returns>The source items, monitors first then windows. Các mục nguồn, màn hình trước rồi cửa sổ.</returns>
     public static IReadOnlyList<SourceItem> BuildSources(IReadOnlyList<MonitorInfo> monitors,
-        IReadOnlyList<WindowInfo> windows)
+        IReadOnlyList<WindowInfo> windows, Func<int, string>? monitorLabel = null)
     {
         var items = new List<SourceItem>(monitors.Count + Math.Min(windows.Count, MaxSourceWindows));
         foreach (var m in monitors)
-            items.Add(new SourceItem(true, m.Id, $"Màn hình {m.Id + 1}", null));
+            items.Add(new SourceItem(true, m.Id, monitorLabel is null ? $"Màn hình {m.Id + 1}" : monitorLabel(m.Id), null));
 
         int windowsTaken = 0;
         foreach (var w in windows)

@@ -257,6 +257,22 @@ public class FloatingMenuLayoutTests
     }
 
     [Fact]
+    public void BuildSources_CustomMonitorLabelFactory_UsedForMonitorsOnly()
+    {
+        var monitors = new[] { new MonitorInfo(0, "M1"), new MonitorInfo(1, "M2") };
+        var windows = new[] { new WindowInfo("0x1", "Game", "game.exe") };
+
+        // The factory receives the zero-based monitor id; window labels must stay untouched.
+        // Factory nhận chỉ số màn hình từ 0; label cửa sổ phải giữ nguyên.
+        var items = FloatingMenuLayout.BuildSources(monitors, windows, i => $"Monitor {i + 1}");
+
+        Assert.Equal("Monitor 1", items[0].Label);
+        Assert.Equal("Monitor 2", items[1].Label);
+        Assert.True(items[0].IsMonitor && items[1].IsMonitor);
+        Assert.Equal("game.exe — Game", items[2].Label);
+    }
+
+    [Fact]
     public void ClampPosition_ClampsIntoContainingMonitor_EdgeAndOffscreen()
     {
         var monitors = new[]

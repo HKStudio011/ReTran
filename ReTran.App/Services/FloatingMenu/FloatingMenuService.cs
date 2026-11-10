@@ -450,7 +450,11 @@ public sealed class FloatingMenuService : IDisposable
             {
                 if (_disposed) return;
                 _errorLine = null;
-                _sources = FloatingMenuLayout.BuildSources(monitors, windows);
+                // Monitor labels go through i18n (menu.source.monitor) so the list matches the active
+                // language; window labels are built by the layout and never localized.
+                // Label màn hình qua i18n (menu.source.monitor) để danh sách khớp ngôn ngữ hiện tại; label
+                // cửa sổ do layout dựng và không bao giờ được dịch.
+                _sources = FloatingMenuLayout.BuildSources(monitors, windows, i => _L.Fmt("menu.source.monitor", i + 1));
                 _sourceListOpen = true;
                 RequestRedraw();
             }
@@ -753,7 +757,7 @@ public sealed class FloatingMenuService : IDisposable
             g.SmoothingMode = SDD.SmoothingMode.AntiAlias;
             g.TextRenderingHint = SDT.TextRenderingHint.AntiAlias;
             g.Clear(SD.Color.Transparent);
-            FloatingMenuRenderer.DrawMenu(g, state, w, h);
+            FloatingMenuRenderer.DrawMenu(g, state, w, h, _L);
         }
 
         _host.DrawMenu(surface);

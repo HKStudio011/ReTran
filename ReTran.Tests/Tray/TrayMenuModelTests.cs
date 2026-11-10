@@ -27,6 +27,16 @@ public class TrayMenuModelTests
         Assert.False(ById(menu, TrayCommandId.ShowHideMenu).IsChecked);
     }
 
+    [Fact]
+    public void Build_MenuVisible_OverlayOff_ChecksLandOnRightItems()
+    {
+        // Trạng thái mix: tick phải rơi đúng vào ShowHideMenu (menu đang hiện) chứ không phải
+        // ToggleOverlay (overlay đang tắt) — bắt lỗi hoán đổi hai bool trong Build.
+        var menu = TrayMenuModel.Build("a", "b", "c", "d", menuVisible: true, overlayOn: false);
+        Assert.True(ById(menu, TrayCommandId.ShowHideMenu).IsChecked);
+        Assert.False(ById(menu, TrayCommandId.ToggleOverlay).IsChecked);
+    }
+
     // Build trả IReadOnlyList<TrayCommand> — không có indexer enum; tra theo Id bằng helper này.
     private static TrayCommand ById(IReadOnlyList<TrayCommand> menu, TrayCommandId id) =>
         menu.Single(c => c.Id == id);
