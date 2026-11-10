@@ -5,6 +5,7 @@ using Microsoft.Maui.LifecycleEvents;
 using ReTran_App.Core;
 using ReTran_App.Data;
 using ReTran_App.Services;
+using ReTran_App.Services.FloatingMenu;
 using ReTran_App.Services.OverlayFeed;
 using ReTran_App.Services.OverlayWindow;
 using ReTran_App.Services.Setup;
@@ -45,10 +46,41 @@ namespace ReTran_App
 
             // Local game overlay: layered Win32 window + window/monitor anchor tracker.
             // Overlay game local: cửa sổ layered Win32 + tracker neo theo cửa sổ/monitor.
-            builder.Services.AddSingleton<IOverlayHost, Win32OverlayHost>();
+            // Win32OverlayHost mang HAI bề mặt — box overlay qua IOverlayHost và cửa sổ menu nổi qua
+            // IMenuWindowHost — trên cùng một worker thread/pump, nên nó đăng ký theo TYPE CỤ THỂ rồi
+            // mỗi interface forward tới đúng instance đó. Dạng đóng AddSingleton<IOverlayHost,
+            // Win32OverlayHost>() sẽ cho ra HAI object khác nhau (hai worker thread, hai cửa sổ box,
+            // và neo z-order box-dưới-menu trong BoxInsertAfter mất tác dụng).
+            // Win32OverlayHost carries TWO surfaces — the overlay box via IOverlayHost and the floating
+            // menu window via IMenuWindowHost — on one worker thread/pump, so it is registered by
+            // CONCRETE type and each interface forwards to that one instance. The closed form would
+            // produce two different objects (two worker threads and the box-under-menu z-order anchor
+            // in BoxInsertAfter stops working).
+            builder.Services.AddSingleton<Win32OverlayHost>();
+            builder.Services.AddSingleton<IOverlayHost>(sp => sp.GetRequiredService<Win32OverlayHost>());
+            builder.Services.AddSingleton<IMenuWindowHost>(sp => sp.GetRequiredService<Win32OverlayHost>());
             builder.Services.AddSingleton<IAnchorTracker, Win32AnchorTracker>();
             builder.Services.AddSingleton<IForegroundWatcher, Win32ForegroundWatcher>();
             builder.Services.AddSingleton<OverlayWindowService>();
+            // Công tắc overlay cho menu nổi đi qua IOverlayToggle, trỏ cùng instance OverlayWindowService
+            // mà trang điều khiển và tray đang dùng — state bật/tắt overlay chỉ được tồn tại ở một nơi.
+            // The floating menu reaches the overlay through IOverlayToggle, forwarded to the same
+            // OverlayWindowService instance the control page and the tray already use — the on/off state
+            // must exist in exactly one place.
+            builder.Services.AddSingleton<IOverlayToggle>(sp => sp.GetRequiredService<OverlayWindowService>());
+
+            // Menu nổi (kế hoạch floating menu): RunStats là nguồn số DUY NHẤT cho cả rail thống kê
+            // trang điều khiển lẫn vùng thống kê của menu; FloatingMenuService đứng sau switch trong
+            // app, mục tray và cửa sổ menu. Cả hai là singleton không tham số khởi tạo — mọi dependency
+            // do container cung cấp (xem IPipelineControl forward dưới: RunStats và FloatingMenuService
+            // phụ thuộc interface, không phụ thuộc PipelineController cụ thể).
+            // Floating menu: RunStats is the SINGLE numbers source for both the control page's stats rail
+            // and the menu's stats block; FloatingMenuService backs the in-app switch, the tray entry and
+            // the menu window. Both are parameterless singletons — every dependency comes from the
+            // container (see the IPipelineControl forward below: RunStats and FloatingMenuService depend
+            // on the interface, not on the concrete PipelineController).
+            builder.Services.AddSingleton<RunStats>();
+            builder.Services.AddSingleton<FloatingMenuService>();
 
             // System tray: close-to-tray window bridge, Shell_NotifyIcon host, clean exit path,
             // error routing (balloon vs toast) and the menu actions behind it. The icon is only
@@ -78,6 +110,11 @@ namespace ReTran_App
             builder.Services.AddSingleton<ICorePeer>(sp => sp.GetRequiredService<CoreProcessClient>());
             builder.Services.AddSingleton<TranslationCache>();
             builder.Services.AddSingleton<PipelineController>();
+            // Cùng instance cho bề mặt interface mà RunStats / FloatingMenuService / menu nổi cần —
+            // đăng ký đóng sẽ tạo controller thứ hai (state chạy và nguồn hoạt động sẽ chia làm hai).
+            // Same instance as the interface surface RunStats / FloatingMenuService depend on — the
+            // closed form would build a second controller (run state and active source would split in two).
+            builder.Services.AddSingleton<IPipelineControl>(sp => sp.GetRequiredService<PipelineController>());
 
             builder.Services.AddSingleton(_ => new HttpClient());
             builder.Services.AddSingleton<GitHubAppUpdateService>();
@@ -149,6 +186,30 @@ namespace ReTran_App
                         .GetService<ILoggerFactory>()?
                         .CreateLogger("ReTran.App.Tray")
                         .LogError(ex, "The tray/close-to-tray hook failed on window creation; the app continues without it.");
+                }
+
+                try
+                {
+                    // Menu nổi: cùng pattern resolve và cùng cửa sổ chính. Start() tạo cửa sổ menu
+                    // (idempotent) trên worker thread của host overlay rồi hiện nó ở vị trí đã lưu khi
+                    // cờ FloatingMenuOn bật. try riêng: hỏng ở đây không được giết app (menu là tiện
+                    // ích, như nhánh tray trên), và không được ghi log bằng message của tray — tray đã
+                    // chạy xong nên message đó sẽ báo sai thứ đã hỏng.
+                    // Floating menu: same resolve pattern, same primary window. Start() creates the menu
+                    // window (idempotent) on the overlay host's worker thread and shows it at the
+                    // persisted position when FloatingMenuOn is on. Separate try: a failure here must not
+                    // kill the app (the menu is a convenience, like the tray branch above) and must not
+                    // be logged with the tray's message — the tray already finished, so that message
+                    // would misreport what failed.
+                    IServiceProvider? services = IPlatformApplication.Current?.Services;
+                    services?.GetRequiredService<FloatingMenuService>().Start();
+                }
+                catch (Exception ex)
+                {
+                    IPlatformApplication.Current?.Services?
+                        .GetService<ILoggerFactory>()?
+                        .CreateLogger("ReTran.App.FloatingMenu")
+                        .LogError(ex, "The floating menu failed to start on window creation; the app continues without it.");
                 }
             })));
 
