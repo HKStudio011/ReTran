@@ -154,13 +154,21 @@ public class FloatingMenuServiceTests
         public ToastService Toast { get; } = new();
         public FakeTray Tray { get; } = new();
         public AppNotifier Notifier { get; }
-        public I18nService L { get; } = new();
+        public I18nService L { get; }
         public FloatingMenuService Service { get; }
 
         private Fixture(string dir, TimeSpan? redrawInterval)
         {
             _dir = dir;
             Settings = new AppSettingsService(Path.Combine(dir, "settings.json"));
+            // Pin vi: the default follows the machine's UI culture and tests must not depend on it — CI
+            // runners are en-US, where an unpinned service would label monitors "Monitor N" and break
+            // assertions written against the Vietnamese defaults.
+            // Ghim vi: mặc định theo UI culture của máy và test không được phụ thuộc vào nó — runner CI là
+            // en-US, nơi service chưa ghim sẽ đặt label monitor thành "Monitor N" và phá assertion viết
+            // theo mặc định tiếng Việt.
+            L = new I18nService();
+            L.Set("vi");
             Stats = new RunStats(Preview, Overlay, Pipeline, now: () => _statsTick);
             Notifier = new AppNotifier(Toast, Tray, () => false, () => false, NullLogger<AppNotifier>.Instance);
             Service = new FloatingMenuService(Settings, OverlayToggle, Pipeline, Host, Notifier, Stats, L,
