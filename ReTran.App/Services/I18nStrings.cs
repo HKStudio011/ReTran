@@ -366,6 +366,7 @@ public static class I18nStrings
         ["menu.stats.fps"] = "FPS",
         ["menu.stats.boxes"] = "Box",
         ["menu.stats.lines"] = "Dòng dịch",
+        ["home.switch.floatingMenu"] = "Menu nổi",
     };
 
     /// <summary>English strings, keyed by dotted ids. Chuỗi tiếng Anh, khóa dạng chấm.</summary>
@@ -724,6 +725,7 @@ public static class I18nStrings
         ["menu.stats.fps"] = "FPS",
         ["menu.stats.boxes"] = "Boxes",
         ["menu.stats.lines"] = "Translated lines",
+        ["home.switch.floatingMenu"] = "Floating menu",
     };
 
     /// <summary>

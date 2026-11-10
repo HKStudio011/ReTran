@@ -4,12 +4,13 @@
 @using ReTran_App.Services
 @using ReTran_App.Services.OverlayFeed
 @inject PreviewState Preview
-@inject OverlayState Overlay
 @inject OverlayFeedServer Feed
 @inject JsInteropService Js
 @inject I18nService L
 @inject AppSettingsService SettingsStore
 @inject PipelineController Pipeline
+@inject RunStats Stats
+@inject ReTran_App.Services.FloatingMenu.FloatingMenuService MenuSvc
 @* Fully-qualified: the Setup namespace also defines OcrModelInfo, which would clash with
    ReTran_App.Core.OcrModelInfo used in CheckOcrModelsAsync below. *@
 @inject ReTran_App.Services.Setup.SetupCoordinator Setup
@@ -207,6 +208,17 @@
                 </section>
 
                 <section class="rt-rail-sec">
+                    <div class="rt-sec-head">
+                        <h3>@(L["home.switch.floatingMenu"])</h3>
+                        <button type="button" class="rt-switch" role="switch"
+                                aria-checked="@Pressed(_menuOn)" aria-label="@(L["home.switch.floatingMenu"])"
+                                @onclick="ToggleMenu">
+                            <span class="rt-knob"></span>
+                        </button>
+                    </div>
+                </section>
+
+                <section class="rt-rail-sec">
                     <div class="rt-sec-head"><h3>@(L["deck.overlay.obs.title"])</h3></div>
                     <div class="rt-device">
                         <span class="rt-mono">@(_overlayFeedFailed ? "—" : OverlayUrl)</span>
@@ -252,12 +264,7 @@
     private long _lastPreviewRender;
     private int _frameW;
     private int _frameH;
-    private double _fps;
-    private int _fpsFrames;
-    private long _fpsWindowStart;
-    private Timer? _fpsTimer;
-    private int _boxCount;
-    private int _translatedCount;
+    private bool _menuOn;
 
     /// <summary>Preview refresh cap: ≥100 ms/lần (~10 fps) — data-URL nặng trong WebView không được vẽ mỗi frame. / Preview refresh cap: ≥100 ms per frame (~10 fps).</summary>
     private const long PreviewMinIntervalMs = 100;
@@ -279,9 +286,10 @@
     }
 
     private string FrameSizeText => _frameW > 0 && _frameH > 0 ? $"{_frameW}×{_frameH}" : "—";
-    private string FpsText => IsRunning && _fps > 0.05 ? L.Fmt("deck.unit.fps", Num(_fps, 1)) : "—";
-    private string BoxText => IsRunning ? L.Fmt("deck.unit.boxes", _boxCount) : "—";
-    private string LinesText => IsRunning ? L.Fmt("deck.unit.lines", _translatedCount) : "—";
+    // Số liệu đọc từ RunStats (nguồn chung với menu nổi) — giữ format Num(...) + unit i18n và "—" khi không chạy.
+    private string FpsText => IsRunning && Stats.Fps > 0.05 ? L.Fmt("deck.unit.fps", Num(Stats.Fps, 1)) : "—";
+    private string BoxText => IsRunning ? L.Fmt("deck.unit.boxes", Stats.BoxCount) : "—";
+    private string LinesText => IsRunning ? L.Fmt("deck.unit.lines", Stats.TranslatedLineCount) : "—";
     private string DirectionText => L.Fmt("deck.chain.direction", Tag(_settingsSrc), Tag(_quickDst));
     private string RunHint => IsRunning
         ? L.Fmt("deck.run.hint.live", SourceDisplay)
@@ -324,7 +332,7 @@
         L.Changed += OnStateChanged;
         Pipeline.PipelineStateChanged += OnPipelineStateChanged;
         Preview.Changed += OnPreviewChanged;
-        Overlay.Changed += OnOverlayChanged;
+        Stats.Changed += OnStatsChanged;
         SettingsStore.Changed += OnSettingsChanged;
 
         PreviewFrame? initial = Preview.Latest; // quay lại trang vẫn thấy khung cuối
@@ -342,8 +350,6 @@
         _ = LoadSourcesAsync();
         _ = CheckOcrModelsAsync(); // first-run: báo khi chưa có model OCR nào được cài
 
-        _fpsWindowStart = Environment.TickCount64;
-        _fpsTimer = new Timer(_ => TickFps(), null, 1000, 1000);
         base.OnInitialized();
     }
 
@@ -373,6 +379,8 @@
         _quickDst = current.Dst;
         _settingsSrc = current.Src;
         _provider = current.Provider;
+        // Switch menu nổi: init từ settings và re-sync mỗi khi file đổi (kể cả toggle từ tray).
+        _menuOn = current.FloatingMenuOn;
         // File ghi tay có thể chứa dst ngoài danh sách — thêm vào để select không bị trống.
         if (Array.IndexOf(_dstOptions, _quickDst) < 0) _dstOptions = [_quickDst, .. DefaultDstOptions];
     }
@@ -387,6 +395,9 @@
     });
 
     private void OnStateChanged() => _ = InvokeAsync(StateHasChanged);
+
+    // RunStats.Changed nổ trên timer thread của nó hoặc thread khung hình — marshal về renderer.
+    private void OnStatsChanged() => _ = InvokeAsync(StateHasChanged);
 
     // Nạp danh sách màn hình/cửa sổ từ Core; lỗi → giữ placeholder, không crash UI.
     private async Task LoadSourcesAsync()
@@ -480,10 +491,6 @@
         {
             await Pipeline.StartAsync(BuildSelection(), CancellationToken.None);
             _pipelineState = "running";
-            _boxCount = 0;
-            _translatedCount = 0;
-            Interlocked.Exchange(ref _fpsFrames, 0);
-            _fpsWindowStart = Environment.TickCount64;
         }
         catch (Exception ex)
         {
@@ -506,7 +513,6 @@
         {
             await Pipeline.StopAsync(CancellationToken.None);
             _pipelineState = "stopped";
-            _fps = 0;
         }
         catch (Exception ex) // core chưa start → ICorePeer.CallAsync ném InvalidOperationException
         {
@@ -536,14 +542,12 @@
                     _pipelineError = L.Fmt("home.status.coreError", reason);
                 }
             }
-            if (!running) _fps = 0;
             StateHasChanged();
         });
 
-    // frame.annotated đến từ read-loop thread của peer; đếm fps trước, throttle preview ≥100 ms.
+    // frame.annotated đến từ read-loop thread của peer — throttle preview ≥100 ms (fps do RunStats đếm).
     private void OnPreviewChanged(PreviewFrame frame) => _ = InvokeAsync(() =>
     {
-        Interlocked.Increment(ref _fpsFrames);
         _frameW = frame.W;
         _frameH = frame.H;
 
@@ -553,30 +557,6 @@
         _previewSrc = PreviewDataUrl(frame);
         StateHasChanged();
     });
-
-    // frame.translated ~3 fps — đủ rẻ để đọc box/dòng dịch cho rail.
-    private void OnOverlayChanged() => _ = InvokeAsync(() =>
-    {
-        OverlayFrame? frame = Overlay.Latest;
-        _boxCount = frame?.Boxes.Count ?? 0;
-        _translatedCount = frame?.Boxes.Count(b => !string.IsNullOrWhiteSpace(b.Translated)) ?? 0;
-        StateHasChanged();
-    });
-
-    // Timer 1 s: fps = số frame nhận được trong cửa sổ vừa qua; dừng pipeline thì về 0.
-    private void TickFps()
-    {
-        long now = Environment.TickCount64;
-        int frames = Interlocked.Exchange(ref _fpsFrames, 0);
-        double elapsed = Math.Max(0.001, (now - _fpsWindowStart) / 1000.0);
-        _fpsWindowStart = now;
-        double fps = frames / elapsed;
-
-        bool running = IsRunning;
-        bool changed = Math.Abs(fps - _fps) >= 0.05 || (running && fps == 0 && _fps > 0);
-        _fps = fps;
-        if (running && changed) _ = InvokeAsync(StateHasChanged);
-    }
 
     private static string PreviewDataUrl(PreviewFrame frame) =>
         $"data:image/jpeg;base64,{frame.JpegBase64}";
@@ -601,6 +581,13 @@
         OverlaySvc.SetEnabled(_overlayOn);
     }
 
+    // Service tự persist FloatingMenuOn; UI chỉ mirror — toggle từ tray re-sync qua SettingsStore.Changed.
+    private void ToggleMenu()
+    {
+        _menuOn = !_menuOn;
+        MenuSvc.SetEnabled(_menuOn);
+    }
+
     private async Task CopyOverlayUrlAsync()
     {
         try
@@ -619,9 +606,7 @@
         L.Changed -= OnStateChanged;
         Pipeline.PipelineStateChanged -= OnPipelineStateChanged;
         Preview.Changed -= OnPreviewChanged;
-        Overlay.Changed -= OnOverlayChanged;
+        Stats.Changed -= OnStatsChanged;
         SettingsStore.Changed -= OnSettingsChanged;
-        _fpsTimer?.Dispose();
-        _fpsTimer = null;
     }
 }
