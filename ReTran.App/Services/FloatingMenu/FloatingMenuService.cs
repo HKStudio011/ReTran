@@ -814,11 +814,12 @@ public sealed class FloatingMenuService : IDisposable
     /// <summary>
     /// The source label for the menu: the live session's source when one is active, otherwise the
     /// persisted triple. A window source shows its list label ("{Process} — {Title}") when the last
-    /// fetched source list still knows it, else the raw handle; a monitor reads "Màn hình {N+1}"
-    /// exactly like FloatingMenuLayout.BuildSources renders it.
+    /// fetched source list still knows it, else the raw handle; a monitor goes through the same i18n
+    /// key as the source list (menu.source.monitor) so the row always matches what the list shows.
     /// Nhãn nguồn cho menu: nguồn của phiên đang chạy nếu có, ngược lại là bộ ba đã lưu. Nguồn cửa sổ
     /// hiện label trong danh sách ("{Process} — {Title}") khi danh sách nguồn gần nhất còn biết nó,
-    /// nếu không thì handle thô; màn hình đọc "Màn hình {N+1}" đúng như BuildSources của layout render.
+    /// nếu không thì handle thô; màn hình đi qua cùng key i18n với danh sách nguồn (menu.source.monitor)
+    /// để dòng này luôn khớp đúng những gì danh sách hiển thị.
     /// </summary>
     private string SourceLabelFor(AppSettings s) // caller holds _gate
     {
@@ -835,7 +836,9 @@ public sealed class FloatingMenuService : IDisposable
         }
 
         int monitor = active?.Monitor ?? s.SourceMonitor;
-        return $"Màn hình {monitor + 1}";
+        // Same key and index semantics as the list factory in OpenSourceListAsync (zero-based id → Id+1).
+        // Cùng key và ngữ nghĩa chỉ số với factory danh sách trong OpenSourceListAsync (id từ 0 → Id+1).
+        return _L.Fmt("menu.source.monitor", monitor + 1);
     }
 
     /// <summary>

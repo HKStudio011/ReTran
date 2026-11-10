@@ -351,6 +351,33 @@ public class FloatingMenuServiceTests
     }
 
     [Fact]
+    public void SourceLabel_MonitorSource_MatchesLocalizedListLabel()
+    {
+        // Fixture is pinned to vi; default triple is monitor 0 — the drawn row must read exactly what
+        // the source list shows for that monitor ("Màn hình 1").
+        // Fixture ghim vi; bộ ba mặc định là monitor 0 — dòng đã vẽ phải đọc đúng những gì danh sách
+        // nguồn hiển thị cho màn hình đó ("Màn hình 1").
+        using var fx = Fixture.Create();
+        fx.Service.Start();
+
+        Assert.Equal("Màn hình 1", fx.Service.LastDrawnState!.SourceLabel);
+    }
+
+    [Fact]
+    public void SourceLabel_MonitorSource_EnglishWhenLanguageIsEn()
+    {
+        // Switch to en before the first draw: the label is formatted from the live table at draw time,
+        // so monitor 0 must read "Monitor 1" — identical to the list's menu.source.monitor entry.
+        // Đổi sang en trước lần vẽ đầu: label được định dạng từ bảng hiện tại lúc draw, nên monitor 0
+        // phải đọc "Monitor 1" — giống hệt mục menu.source.monitor của danh sách.
+        using var fx = Fixture.Create();
+        fx.L.Set("en");
+        fx.Service.Start();
+
+        Assert.Equal("Monitor 1", fx.Service.LastDrawnState!.SourceLabel);
+    }
+
+    [Fact]
     public void CloseMenu_HidesAndPersistsOff()
     {
         using var fx = Fixture.Create();
