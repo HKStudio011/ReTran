@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging;
 using ReTran_App.Core;
 using ReTran_App.Services;
@@ -28,7 +29,10 @@ namespace ReTran_App.Services.FloatingMenu;
 /// by one lock (re-entrant per thread, so a save's Changed handler re-entering RequestRedraw is
 /// safe); under it the service only does bounded work — small JSON file I/O, one GDI+ panel render,
 /// non-blocking host enqueues, one notifier call. Async intents await RPC OUTSIDE the lock and
-/// commit their result under it. Rendered bitmaps are cached per window size and handed to the host,
+/// commit their result under it. Never take another service's gate while holding ours: the overlay
+/// service's IsEnabled getter and SetEnabled both take theirs, and its save fires settings.Changed
+/// synchronously back into our handler — so read what is needed under our gate and act on the outside.
+/// Rendered bitmaps are cached per window size and handed to the host,
 /// which consumes them asynchronously on its worker thread — they are therefore kept alive (and
 /// reused) until <see cref="Dispose"/>, never disposed per draw.
 /// Threading: service không gắn với UI thread. Event host đến trên worker thread của overlay; event
@@ -37,9 +41,12 @@ namespace ReTran_App.Services.FloatingMenu;
 /// một lock (re-entrant theo thread, nên handler Changed của một lần save gọi lại RequestRedraw vẫn
 /// an toàn); dưới lock service chỉ làm việc có giới hạn — I/O JSON nhỏ, render GDI+ một panel,
 /// enqueue host không chặn, một lần gọi notifier. Intent async await RPC NGOÀI lock rồi commit kết
-/// quả DƯỚI lock. Bitmap render được cache theo cỡ window và đưa cho host — host tiêu thụ chúng bất
-/// đồng bộ trên worker thread — nên chúng được giữ sống (và tái sử dụng) đến Dispose, không dispose
-/// sau mỗi lần vẽ.
+/// quả DƯỚI lock. Không bao giờ lấy gate của service khác khi đang giữ gate của mình: cả getter
+/// IsEnabled lẫn SetEnabled của service overlay đều lấy gate riêng của chúng, và lần lưu của nó phát
+/// settings.Changed đồng bộ trở lại handler của ta — nên đọc những gì cần dưới gate của mình rồi
+/// hành động ở bên ngoài. Bitmap render được cache theo cỡ window và đưa cho host — host tiêu thụ
+/// chúng bất đồng bộ trên worker thread — nên chúng được giữ sống (và tái sử dụng) đến Dispose,
+/// không dispose sau mỗi lần vẽ.
 /// </remarks>
 public sealed class FloatingMenuService : IDisposable
 {
@@ -52,8 +59,13 @@ public sealed class FloatingMenuService : IDisposable
     /// <summary>Cycle list for the destination language — mirrors SettingsPanel.razor's DstCodes, pinned here to avoid parsing Razor. Danh sách cycle ngôn ngữ đích — gương DstCodes trong SettingsPanel.razor, ghim ở đây để tránh parse Razor.</summary>
     private static readonly string[] DstCodes = ["vi", "en", "ja", "ko", "zh", "ru", "fr", "de", "es"];
 
-    /// <summary>Work areas for position clamping: the layout's fallback area — this service has no monitor-rect source of its own (Win32AnchorTracker's enumeration is private). Work area để clamp vị trí: vùng dự phòng của layout — service này không có nguồn rect monitor riêng (phép liệt kê trong Win32AnchorTracker là private).</summary>
-    private static readonly (int Left, int Top, int Right, int Bottom)[] WorkAreas = [FloatingMenuLayout.FallbackWorkArea];
+    // Real monitor work areas (rcWork), queried once at Start() — ReTran.App has no Forms reference
+    // and Win32AnchorTracker's enumeration is private (and returns rcMonitor, not rcWork). Until the
+    // query runs — and whenever it fails — the layout fallback stands in.
+    // Các work area thật của các monitor (rcWork), truy vấn một lần tại Start() — ReTran.App không tham
+    // chiếu Forms và phép liệt kê của Win32AnchorTracker là private (lại trả rcMonitor, không phải
+    // rcWork). Trước khi truy vấn chạy — và mỗi khi nó lỗi — vùng dự phòng của layout đứng vào.
+    private (int Left, int Top, int Right, int Bottom)[] _workAreas = [FloatingMenuLayout.FallbackWorkArea];
 
     private readonly AppSettingsService _settings;
     private readonly IOverlayToggle _overlay;
@@ -136,6 +148,13 @@ public sealed class FloatingMenuService : IDisposable
     internal Func<DateTime> DrawClock { get; set; } = () => DateTime.UtcNow;
 
     /// <summary>
+    /// Test seam for the monitor work areas: when non-null, Start() uses these instead of querying
+    /// user32. Production leaves it null. Điểm cho test các work area của monitor: khi khác null,
+    /// Start() dùng chúng thay vì truy vấn user32. Production để null.
+    /// </summary>
+    internal (int Left, int Top, int Right, int Bottom)[]? WorkAreasOverride { get; set; }
+
+    /// <summary>
     /// Start-up hook: creates the menu window (idempotent) and shows it at the persisted position —
     /// or the default top-right spot when none is stored — whenever FloatingMenuOn is set.
     /// Hook khởi động: tạo cửa sổ menu (idempotent) và hiện nó tại vị trí đã lưu — hoặc vị trí mặc
@@ -146,8 +165,9 @@ public sealed class FloatingMenuService : IDisposable
         lock (_gate)
         {
             if (_disposed) return;
+            _workAreas = WorkAreasOverride ?? QueryMonitorWorkAreas(); // real areas once at start-up
             _host.CreateMenu(); // the window exists even when the menu starts hidden (idempotent)
-            ShowLocked();
+            if (_settings.Load().FloatingMenuOn) ShowLocked(); // show only when the switch is on
         }
     }
 
@@ -188,10 +208,14 @@ public sealed class FloatingMenuService : IDisposable
     /// Starts the pipeline from the persisted source triple (spec D8–D10). A window source with no
     /// stored handle is refused with the error line plus a notification — the pipeline is NOT started
     /// and the settings are NOT mutated. RPC failures surface as the error line plus a notification;
-    /// an ocr-model-missing rejection gets the friendly "model not installed" detail.
+    /// an ocr-model-missing rejection gets the friendly "model not installed" detail. The error line
+    /// stays drawn until a later successful intent clears it — a passive repaint (e.g. the ~1 s stats
+    /// tick) must not wipe it.
     /// Khởi động pipeline từ bộ ba nguồn đã lưu (spec D8–D10). Nguồn cửa sổ không có handle được từ
     /// chối bằng dòng lỗi kèm thông báo — KHÔNG khởi động pipeline và KHÔNG đổi cài đặt. Lỗi RPC hiện
     /// thành dòng lỗi kèm thông báo; lỗi thiếu model OCR nhận chi tiết thân thiện "chưa cài model".
+    /// Dòng lỗi giữ nguyên cho đến khi một intent thành công sau đó xóa nó — một lần vẽ thụ động (vd
+    /// tick thống kê ~1 s) không được phép xóa nó.
     /// </summary>
     /// <returns>A task that completes when the start attempt finishes (success or handled failure). Task hoàn tất khi nỗ lực start kết thúc (thành công hoặc thất bại đã xử lý).</returns>
     public async Task StartPipelineAsync()
@@ -227,7 +251,10 @@ public sealed class FloatingMenuService : IDisposable
         }
         catch (RpcException ex) when (!PipelineController.IsOcrModelMissing(ex))
         {
+            // A failed start keeps the error line drawn — only the success path below clears it.
+            // Start thất bại giữ dòng lỗi trên panel — chỉ nhánh thành công bên dưới mới xóa nó.
             lock (_gate) { if (!_disposed) SetError(_L.Fmt("menu.error.startFailed", ex.Message)); }
+            return;
         }
         catch (RpcException ex) when (PipelineController.IsOcrModelMissing(ex))
         {
@@ -236,11 +263,13 @@ public sealed class FloatingMenuService : IDisposable
             // Chi tiết thân thiện: bộ key ghim chưa có chuỗi riêng cho thiếu model nên giá trị chỗ đặt
             // là câu tiếng Việt hardcode đến lượt i18n sau Task 21.
             lock (_gate) { if (!_disposed) SetError(_L.Fmt("menu.error.startFailed", "model OCR chưa được cài")); }
+            return;
         }
         catch (OperationCanceledException)
         {
             // Cancelled start (shutdown, user cancel): no error line, no notification.
             // Start bị hủy (app thoát, người dùng hủy): không dòng lỗi, không thông báo.
+            return;
         }
         catch (Exception ex)
         {
@@ -248,12 +277,13 @@ public sealed class FloatingMenuService : IDisposable
             // Một cú click menu không được kéo sập worker thread bằng task exception không quan sát.
             _log.LogWarning(ex, "Pipeline start failed.");
             lock (_gate) { if (!_disposed) SetError(_L.Fmt("menu.error.startFailed", ex.Message)); }
+            return;
         }
 
         lock (_gate)
         {
             if (_disposed) return;
-            _errorLine = null; // a successful intent clears the previous error line
+            _errorLine = null; // reached only on success — a successful intent clears the previous error line
             RequestRedraw();
         }
     }
@@ -300,11 +330,21 @@ public sealed class FloatingMenuService : IDisposable
     /// </summary>
     public void ToggleOverlay()
     {
+        bool running;
         lock (_gate)
         {
-            if (_disposed || !_pipeline.IsRunning) return;
-            _overlay.SetEnabled(!_overlay.IsEnabled);
+            if (_disposed) return;
+            running = _pipeline.IsRunning; // plain property — safe to read under the gate
         }
+        if (!running) return;
+
+        // Deliberately OUTSIDE the gate: IsEnabled's getter and SetEnabled both take the overlay service's
+        // own gate, and its save fires settings.Changed synchronously back into our RequestRedraw —
+        // holding ours across that call would form an ABBA lock pair (menu gate ↔ overlay gate).
+        // Cố ý NGOÀI gate: cả getter IsEnabled lẫn SetEnabled đều lấy gate riêng của service overlay, và
+        // lần lưu của nó phát settings.Changed đồng bộ trở lại RequestRedraw của chúng ta — giữ gate của
+        // mình xuyên suốt lời gọi ấy sẽ tạo cặp khóa ABBA (gate menu ↔ gate overlay).
+        _overlay.SetEnabled(!_overlay.IsEnabled);
     }
 
     /// <summary>
@@ -473,7 +513,13 @@ public sealed class FloatingMenuService : IDisposable
         lock (_gate)
         {
             if (_disposed || !_visible) return;
-            MenuState state = BuildState();
+            // Interpret the click against what the user can SEE: a throttled draw may leave the painted
+            // panel behind the internal state (e.g. an opened source list whose frame was dropped), and
+            // hit-testing fresh state would dispatch to rows that were never painted.
+            // Đọc cú click theo đúng thứ NGƯỜI DÙNG THẤY: một lần vẽ bị throttle có thể để panel đã vẽ
+            // tụt sau state nội bộ (vd danh sách nguồn mở mà khung hình bị bỏ), và hit-test state mới sẽ
+            // dispatch vào các row chưa từng được vẽ.
+            MenuState state = LastDrawnState ?? BuildState();
             MenuHit? hit = FloatingMenuLayout.HitTest(x + FloatingMenuLayout.ShadowMargin,
                 y + FloatingMenuLayout.ShadowMargin, state);
             if (hit is null) return;
@@ -560,7 +606,7 @@ public sealed class FloatingMenuService : IDisposable
         lock (_gate)
         {
             if (_disposed || !_visible) return;
-            (int cx, int cy) = FloatingMenuLayout.ClampPosition(x, y, _windowW, _windowH, WorkAreas);
+            (int cx, int cy) = FloatingMenuLayout.ClampPosition(x, y, _windowW, _windowH, _workAreas);
             _posX = cx;
             _posY = cy;
             Persist(s => s with { FloatingMenuX = cx, FloatingMenuY = cy });
@@ -589,30 +635,58 @@ public sealed class FloatingMenuService : IDisposable
     }
 
     // All four change sources funnel into the same leading-edge-throttled redraw — none may bypass
-    // it, that is the whole point of Review Focus #6 (redraw storm).
+    // it, that is the whole point of Review Focus #6 (redraw storm). Each handler isolates its own
+    // failures: RunStats raises from a timer callback where an unobserved exception kills the process,
+    // and a throwing subscriber on any source must not take down that source's pump.
     // Cả bốn nguồn thay đổi đều đổ về một đường redraw throttle leading-edge duy nhất — không nguồn
-    // nào được phép bỏ qua nó, đó chính là ý của Review Focus #6 (bão redraw).
-    private void OnRunStateChanged() => RequestRedraw();
-    private void OnPipelineLoopChanged(bool running, string? reason) => RequestRedraw();
-    private void OnSettingsChanged() => RequestRedraw();
-    private void OnStatsChanged() => RequestRedraw();
+    // nào được phép bỏ qua nó, đó chính là ý của Review Focus #6 (bão redraw). Mỗi handler tự cách ly
+    // lỗi của mình: RunStats phát từ callback timer, nơi exception không quan sát sẽ giết tiến trình,
+    // và một subscriber ném lỗi trên bất kỳ nguồn nào cũng không được kéo sập vòng chạy của nguồn đó.
+    private void OnRunStateChanged() => SafeRequestRedraw("pipeline state change");
+    private void OnPipelineLoopChanged(bool running, string? reason) => SafeRequestRedraw("pipeline loop change");
+    private void OnSettingsChanged() => SafeRequestRedraw("settings change");
+    private void OnStatsChanged() => SafeRequestRedraw("stats change");
 
     /// <summary>
-    /// Shows the menu at the persisted position (clamped into the work area) or the default spot,
-    /// sized to the current state, and paints the initial frame.
-    /// Hiện menu tại vị trí đã lưu (kẹp vào work area) hoặc vị trí mặc định, đúng cỡ trạng thái hiện
-    /// tại, và vẽ khung hình đầu tiên.
+    /// Passive redraw with isolation: a throwing subscriber on any of the four change sources must not
+    /// take down its pump (RunStats raises from a timer callback, where an exception kills the process).
+    /// Redraw thụ động có cách ly: một subscriber ném lỗi trên bất kỳ nguồn đổi nào cũng không được kéo
+    /// sập vòng chạy của nó (RunStats phát từ callback timer, nơi exception sẽ giết tiến trình).
     /// </summary>
-    private void ShowLocked() // caller holds _gate
+    /// <param name="source">Name of the change source, for the log line. Tên nguồn thay đổi, để ghi log.</param>
+    private void SafeRequestRedraw(string source)
     {
+        try
+        {
+            RequestRedraw();
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Passive floating-menu redraw skipped ({Source}).", source);
+        }
+    }
+
+    /// <summary>
+    /// Shows the menu at the persisted position (clamped into the work area) or the default spot —
+    /// top-right of the primary monitor — sized to the current state, and paints the initial frame.
+    /// The caller decides whether showing is wanted: Start() gates on FloatingMenuOn, SetEnabled and
+    /// ToggleVisible have already made the call (re-showing after a hide must work even though the
+    /// persisted flag still reads off).
+    /// Hiện menu tại vị trí đã lưu (kẹp vào work area) hoặc vị trí mặc định — góc trên phải màn hình
+    /// chính — đúng cỡ trạng thái hiện tại, và vẽ khung hình đầu tiên. Caller quyết định có nên hiện
+    /// hay không: Start() tự kiểm tra FloatingMenuOn, SetEnabled và ToggleVisible đã tự quyết (hiện lại
+    /// sau khi ẩn phải hoạt động dù cờ đã lưu vẫn đang off).
+    /// </summary>
+    private void ShowLocked() // caller holds _gate — the caller has already decided to show
+    {
+        if (_visible) return;
         AppSettings s = _settings.Load();
-        if (!s.FloatingMenuOn || _visible) return;
 
         MenuState state = BuildState();
         var (w, h) = FloatingMenuLayout.WindowSize(state);
         var (x, y) = s.FloatingMenuX is int px && s.FloatingMenuY is int py
-            ? FloatingMenuLayout.ClampPosition(px, py, w, h, WorkAreas)
-            : FloatingMenuLayout.DefaultPosition(w, h, FloatingMenuLayout.FallbackWorkArea);
+            ? FloatingMenuLayout.ClampPosition(px, py, w, h, _workAreas)
+            : FloatingMenuLayout.DefaultPosition(w, h, _workAreas[0]); // primary monitor first
 
         _visible = true;
         _posX = x;
@@ -634,10 +708,14 @@ public sealed class FloatingMenuService : IDisposable
     /// <summary>
     /// Leading-edge throttle: the first event after a draw paints immediately; every event inside
     /// <see cref="_redrawInterval"/> of it is dropped. No trailing timer exists — if state changes
-    /// again later, that change's own event redraws.
+    /// again later, that change's own event redraws. A fresh snapshot identical to the last DRAWN one
+    /// is skipped without painting or moving the throttle anchor, so a per-second stats tick with
+    /// unchanged numbers costs a record comparison, not a GDI+ render plus host push.
     /// Throttle leading-edge: sự kiện đầu sau một lần vẽ vẽ ngay; mọi sự kiện nằm trong cửa sổ
     /// _redrawInterval kế đó bị bỏ. Không có trailing timer — nếu state đổi lại sau đó, chính sự kiện
-    /// của lần đổi ấy sẽ vẽ.
+    /// của lần đổi ấy sẽ vẽ. Snapshot mới trùng snapshot đã vẽ gần nhất bị bỏ qua mà không vẽ và không
+    /// dời mốc throttle, nên tick thống kê mỗi giây với số không đổi chỉ tốn một phép so record chứ
+    /// không tốn render GDI+ cộng đẩy host.
     /// </summary>
     private void RequestRedraw()
     {
@@ -646,8 +724,9 @@ public sealed class FloatingMenuService : IDisposable
             if (_disposed || !_visible) return;
             DateTime now = DrawClock();
             if (now - _lastDrawUtc < _redrawInterval) return;
-            _lastDrawUtc = now;
-            DrawLocked(BuildState());
+            MenuState state = BuildState();
+            if (state == LastDrawnState) return; // no real change — skip the render, keep the anchor
+            DrawLocked(state);
         }
     }
 
@@ -659,6 +738,7 @@ public sealed class FloatingMenuService : IDisposable
     /// </summary>
     private void DrawLocked(MenuState state) // caller holds _gate
     {
+        _lastDrawUtc = DrawClock(); // a real draw — anchor the throttle window here (initial paint included)
         var (w, h) = FloatingMenuLayout.WindowSize(state);
         if (w != _windowW || h != _windowH)
         {
@@ -700,8 +780,10 @@ public sealed class FloatingMenuService : IDisposable
     }
 
     /// <summary>
-    /// Fresh snapshot from the persisted settings, the live pipeline/overlay state and RunStats.
-    /// Snapshot mới từ cài đặt đã lưu, trạng thái pipeline/lớp phủ đang chạy và RunStats.
+    /// Fresh snapshot from the persisted settings (including the overlay switch — the overlay service
+    /// persists OverlayOnGame on every toggle) and the live pipeline state and RunStats.
+    /// Snapshot mới từ cài đặt đã lưu (kể cả công tắc lớp phủ — service overlay persist OverlayOnGame ở
+    /// mỗi lần bật/tắt) cùng trạng thái pipeline đang chạy và RunStats.
     /// </summary>
     private MenuState BuildState() // caller holds _gate
     {
@@ -710,7 +792,7 @@ public sealed class FloatingMenuService : IDisposable
             Collapsed: s.FloatingMenuCollapsed,
             Running: _pipeline.IsRunning,
             SourceLabel: SourceLabelFor(s),
-            OverlayOn: _overlay.IsEnabled,
+            OverlayOn: s.OverlayOnGame, // persisted per toggle — reading _overlay.IsEnabled here would cross into its gate
             Dst: s.Dst,
             Src: s.Src,
             OcrFps: s.OcrFps,
@@ -781,7 +863,93 @@ public sealed class FloatingMenuService : IDisposable
     private void SetError(string message) // caller holds _gate
     {
         _errorLine = message;
-        _notifier.Notify(message, ToastSeverity.Error);
+        try
+        {
+            _notifier.Notify(message, ToastSeverity.Error);
+        }
+        catch (Exception ex)
+        {
+            // The toast branch is NOT isolated (AppNotifier documents it): a throwing subscriber must
+            // not kill the intent's redraw bookkeeping.
+            // Nhánh toast KHÔNG được cách ly (AppNotifier ghi rõ): một subscriber ném lỗi không được
+            // kéo sập phần ghi sổ redraw của intent.
+            _log.LogWarning(ex, "Floating-menu error notification failed.");
+        }
         RequestRedraw();
+    }
+
+    /// <summary>
+    /// Queries user32 for the work area (rcWork) of every monitor, primary monitor first; returns the
+    /// layout fallback when the query yields nothing. Classic DllImport is used (not LibraryImport) —
+    /// same convention as Win32AnchorTracker and ReTran.Core.Capture.NativeMethods.
+    /// Truy vấn user32 lấy work area (rcWork) của mọi monitor, màn hình chính trước; trả về vùng dự
+    /// phòng của layout khi truy vấn không về gì. Dùng DllImport cổ điển (không phải LibraryImport) —
+    /// cùng quy ước với Win32AnchorTracker và ReTran.Core.Capture.NativeMethods.
+    /// </summary>
+    private static (int Left, int Top, int Right, int Bottom)[] QueryMonitorWorkAreas()
+    {
+        var primary = new List<(int Left, int Top, int Right, int Bottom)>();
+        var others = new List<(int Left, int Top, int Right, int Bottom)>();
+        List<(int Left, int Top, int Right, int Bottom)> TargetOf(bool isPrimary) => isPrimary ? primary : others;
+
+        NativeMethods.MonitorEnumProc callback = (nint monitor, nint _, ref NativeMethods.RECT __, nint _) =>
+        {
+            var info = new NativeMethods.MONITORINFO { cbSize = Marshal.SizeOf<NativeMethods.MONITORINFO>() };
+            if (NativeMethods.GetMonitorInfoW(monitor, ref info))
+                TargetOf((info.dwFlags & NativeMethods.MONITORINFOF_PRIMARY) != 0)
+                    .Add((info.rcWork.Left, info.rcWork.Top, info.rcWork.Right, info.rcWork.Bottom));
+            return true; // keep enumerating — every monitor counts
+        };
+
+        bool ok = NativeMethods.EnumDisplayMonitors(nint.Zero, nint.Zero, callback, nint.Zero);
+        GC.KeepAlive(callback); // the delegate must stay alive across the P/Invoke call
+
+        if (!ok || primary.Count + others.Count == 0) return [FloatingMenuLayout.FallbackWorkArea];
+
+        var areas = new List<(int Left, int Top, int Right, int Bottom)>(primary.Count + others.Count);
+        areas.AddRange(primary); // primary monitor first
+        areas.AddRange(others);
+        return [.. areas];
+    }
+
+    /// <summary>
+    /// user32 entry points for the work-area query (internal only). ReTran.App has no Forms reference,
+    /// so Screen.AllScreens is not an option; Win32AnchorTracker's own enumeration is private and
+    /// reports rcMonitor instead of rcWork.
+    /// Các hàm user32 cho truy vấn work area (chỉ nội bộ). ReTran.App không tham chiếu Forms nên
+    /// Screen.AllScreens không phải lựa chọn; phép liệt kê của Win32AnchorTracker là private và trả
+    /// rcMonitor chứ không phải rcWork.
+    /// </summary>
+    private static class NativeMethods
+    {
+        internal const int MONITORINFOF_PRIMARY = 1;
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct RECT
+        {
+            internal int Left;
+            internal int Top;
+            internal int Right;
+            internal int Bottom;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct MONITORINFO
+        {
+            internal int cbSize;
+            internal RECT rcMonitor;
+            internal RECT rcWork;
+            internal int dwFlags;
+        }
+
+        internal delegate bool MonitorEnumProc(nint hMonitor, nint hdc, ref RECT rect, nint data);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool EnumDisplayMonitors(nint hdc, nint clip, MonitorEnumProc callback, nint data);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GetMonitorInfoW(nint hMonitor, ref MONITORINFO info);
     }
 }

@@ -84,12 +84,36 @@ public class FloatingMenuServiceTests
             return Task.FromResult(SourcesResult);
         }
 
-        // Accessors rỗng: fake không bao giờ tự phát event — test raise thủ công qua pipeline thật
-        // nếu cần; tránh CS0067 mà vẫn đúng hợp đồng IPipelineControl.
-        // Empty accessors: the fake never raises on its own (tests drive state directly); avoids
-        // CS0067 while keeping the IPipelineControl contract.
-        public event Action? StateChanged { add { } remove { } }
-        public event Action<bool, string?>? PipelineStateChanged { add { } remove { } }
+        // Real accessors so the two subscriptions (RunStats + service) are actually exercised: the
+        // add/remove counts back the subscribe-at-ctor / unsubscribe-at-Dispose assertions, and the
+        // Raise* helpers fire the events for tests. Accessor thật để hai đăng ký (RunStats + service)
+        // được chạy thực sự: số đếm add/remove phục vụ assert subscribe-khi-dựng /
+        // unsubscribe-khi-Dispose; Raise* để test phát event.
+        public int StateChangedAdds { get; private set; }
+        public int StateChangedRemoves { get; private set; }
+        public int PipelineStateChangedAdds { get; private set; }
+        public int PipelineStateChangedRemoves { get; private set; }
+
+        private Action? _stateChanged;
+        private Action<bool, string?>? _pipelineStateChanged;
+
+        public event Action? StateChanged
+        {
+            add { _stateChanged += value; StateChangedAdds++; }
+            remove { _stateChanged -= value; StateChangedRemoves++; }
+        }
+
+        public event Action<bool, string?>? PipelineStateChanged
+        {
+            add { _pipelineStateChanged += value; PipelineStateChangedAdds++; }
+            remove { _pipelineStateChanged -= value; PipelineStateChangedRemoves++; }
+        }
+
+        /// <summary>Fires StateChanged as the pipeline would after a start/stop. Phát StateChanged như pipeline sau một lần start/stop.</summary>
+        public void RaiseStateChanged() => _stateChanged?.Invoke();
+
+        /// <summary>Fires PipelineStateChanged (abrupt stop etc.). Phát PipelineStateChanged (dừng đột xuất v.v.).</summary>
+        public void RaisePipelineStateChanged(bool running, string? reason) => _pipelineStateChanged?.Invoke(running, reason);
     }
 
     /// <summary>Tray fake catching balloons — same pattern as the Plan-1 AppNotifier tests. Fake tray bắt balloon — cùng pattern với test AppNotifier của Plan 1.</summary>
@@ -388,5 +412,157 @@ public class FloatingMenuServiceTests
         Assert.Equal(5.0, state.Fps, 2);
         Assert.Equal(2, state.BoxCount);
         Assert.Equal(1, state.TranslatedLineCount);
+    }
+
+    [Fact]
+    public async Task StartRpcError_ErrorLineSurvivesPassiveRedraw()
+    {
+        // I1 / D12: the ~1 s RunStats tick raises stats.Changed with new numbers — the passive
+        // repaint must STILL carry the error line, not silently drop it (and its +18 px row).
+        using var fx = Fixture.Create();
+        fx.Pipeline.StartException = new RpcException(-32000, "ocr-model-missing: PP-OCRv6_small_det");
+        fx.Service.Start();
+        fx.Advance();
+
+        await fx.Service.StartPipelineAsync();
+        Assert.Equal("menu.error.startFailed", fx.Service.LastDrawnState!.ErrorLine);  // drawn on the failure
+
+        fx.Pipeline.IsRunning = true;
+        for (int i = 0; i < 3; i++) fx.Preview.Publish(new PreviewFrame(i + 1, 1920, 1080, ""));
+        fx.StatsTick += 1000;
+        fx.Advance();               // let the tick's redraw pass the throttle → a real repaint happens
+        fx.Stats.TickForTest();     // fps = 3/1 s → stats.Changed → passive RequestRedraw
+
+        MenuState state = fx.Service.LastDrawnState!;
+        Assert.Equal(3.0, state.Fps, 2);                          // the passive repaint really occurred
+        Assert.Equal("menu.error.startFailed", state.ErrorLine);  // and the error line survived it
+    }
+
+    [Fact]
+    public async Task OnPanelClicked_HitTestsTheDrawnState_WhenTheOpenedListFrameWasThrottled()
+    {
+        // I2: clicks must be interpreted against what the user can SEE. Huge throttle window:
+        // OpenSourceListAsync opens the list internally but its frame is throttled away → the screen
+        // still shows the OLD panel (Overlay row at visible index 2, list rows not painted).
+        using var fx = Fixture.Create(redrawInterval: TimeSpan.FromHours(1));
+        IReadOnlyList<MonitorInfo> monitors = [];
+        IReadOnlyList<WindowInfo> windows = [new WindowInfo("0x1", "Game", "game.exe")];
+        fx.Pipeline.SourcesResult = (monitors, windows);
+        fx.Pipeline.IsRunning = true;
+        fx.Service.Start();
+
+        await fx.Service.OpenSourceListAsync();  // internal state opens the list; the drawn frame does not
+
+        // Centre of the OLD panel's Overlay row in panel coords: header 36, then rows
+        // StartStop [36,80), Source [80,124), Overlay [124,168) → centre (160, 146).
+        fx.Service.OnPanelClicked(160, 146);
+
+        Assert.Equal([true], fx.OverlayToggle.Calls);   // toggled the row the user actually sees
+        Assert.False(fx.Settings.Load().SourceUseWindow); // did NOT select an unpainted list row
+    }
+
+    [Fact]
+    public void OnDragFinished_ClampsAgainstInjectedWorkAreas()
+    {
+        using var fx = Fixture.Create();
+        // Primary 2560×1440 first (as the query returns it), a left monitor with negative coords after.
+        // Màn hình chính 2560×1440 trước (như truy vấn trả về), màn hình trái toạ độ âm sau đó.
+        fx.Service.WorkAreasOverride = [(0, 0, 2560, 1440), (-1280, 0, 0, 1440)];
+        fx.Service.Start();
+
+        var (x0, y0, _, _) = fx.Host.ShowCalls.Single();
+        Assert.Equal(2560 - 16 - 336, x0); // default top-right of the REAL primary area, not the fallback's 1568
+        Assert.Equal(16, y0);
+
+        // Inside the primary area: no clamp, no re-show. Trong vùng chính: không kẹp, không hiện lại.
+        fx.Service.OnDragFinished(2000, 300);
+        AppSettings s = fx.Settings.Load();
+        Assert.Equal(2000, s.FloatingMenuX);
+        Assert.Equal(300, s.FloatingMenuY);
+        int shows = fx.Host.ShowCalls.Count;
+
+        // Overshoot right: clamped to area.Right − windowW and the window is re-positioned.
+        // Vượt mép phải: kẹp về Right − rộng window và cửa sổ được đặt lại.
+        fx.Service.OnDragFinished(2500, 300);
+        s = fx.Settings.Load();
+        Assert.Equal(2560 - 336, s.FloatingMenuX); // 2224 — not the fallback area's 1584
+        Assert.Equal(300, s.FloatingMenuY);
+        Assert.Equal(shows + 1, fx.Host.ShowCalls.Count);
+
+        // Left monitor (negative coords): reachable and NOT clamped to x ≥ 0.
+        // Màn hình trái (toạ độ âm): với tới được và KHÔNG bị kẹp về x ≥ 0.
+        fx.Service.OnDragFinished(-1000, 300);
+        s = fx.Settings.Load();
+        Assert.Equal(-1000, s.FloatingMenuX);
+        Assert.Equal(300, s.FloatingMenuY);
+    }
+
+    [Fact]
+    public void ToggleVisible_FlipsStateShowHideAndPersists()
+    {
+        using var fx = Fixture.Create();
+        fx.Service.Start(); // FloatingMenuOn defaults to true → shown
+        Assert.True(fx.Service.IsVisible);
+        int shows = fx.Host.ShowCalls.Count;
+
+        bool now = fx.Service.ToggleVisible(); // hide
+        Assert.False(now);
+        Assert.False(fx.Service.IsVisible);
+        Assert.Equal(1, fx.Host.HideCalls);
+        Assert.False(fx.Settings.Load().FloatingMenuOn);
+
+        // Re-showing must work even though the persisted flag just read off.
+        // Hiện lại phải hoạt động dù cờ vừa lưu đang off.
+        now = fx.Service.ToggleVisible();
+        Assert.True(now);
+        Assert.True(fx.Service.IsVisible);
+        Assert.Equal(shows + 1, fx.Host.ShowCalls.Count);
+        Assert.True(fx.Settings.Load().FloatingMenuOn);
+    }
+
+    [Fact]
+    public async Task PipelineEvents_SubscribedAtCtor_RedrawOnRaise_UnsubscribedAtDispose()
+    {
+        using var fx = Fixture.Create();
+        // Ctor wiring: RunStats (created first in the fixture) and the service both subscribe to both
+        // pipeline events → two adds each before anything else happens.
+        Assert.Equal(2, fx.Pipeline.StateChangedAdds);
+        Assert.Equal(2, fx.Pipeline.PipelineStateChangedAdds);
+
+        fx.Service.Start();
+        int draws = fx.Host.DrawnBitmaps.Count;
+        fx.Advance(); // open the leading-edge window
+
+        fx.Pipeline.IsRunning = true;      // an observable state change ...
+        fx.Pipeline.RaiseStateChanged();   // ... raised through the real event → exactly one more draw
+        Assert.Equal(draws + 1, fx.Host.DrawnBitmaps.Count);
+
+        fx.Service.Dispose();
+        Assert.Equal(1, fx.Pipeline.StateChangedRemoves);
+        Assert.Equal(1, fx.Pipeline.PipelineStateChangedRemoves);
+
+        // Post-dispose: events and intents are safe no-ops — no draw, no persist, no re-create.
+        // Sau Dispose: event và intent là no-op an toàn — không vẽ, không lưu, không tạo lại window.
+        int shows = fx.Host.ShowCalls.Count;
+        fx.Pipeline.IsRunning = false;
+        fx.Pipeline.RaiseStateChanged();
+        fx.Pipeline.RaisePipelineStateChanged(false, "test");
+        fx.Save(new AppSettings("google", "auto", "vi", null)); // settings.Changed — already unsubscribed
+        fx.StatsTick += 1000;
+        fx.Stats.TickForTest();                                   // stats.Changed — already unsubscribed
+        fx.Advance();
+        await fx.Service.StartPipelineAsync();
+        fx.Service.ToggleStats();
+        fx.Service.CycleDst(true);
+        Assert.Equal("vi", fx.Settings.Load().Dst);                 // post-dispose intent: no mutation
+        fx.Service.SelectSource(new SourceItem(false, -1, "game.exe — Game", "0xABC"));
+        Assert.False(fx.Settings.Load().SourceUseWindow);
+        fx.Service.OnPanelClicked(20, 20);
+        fx.Service.OnDragFinished(100, 100);
+        fx.Service.CloseMenu();
+
+        Assert.Equal(draws + 1, fx.Host.DrawnBitmaps.Count); // nothing new was drawn
+        Assert.Equal(shows, fx.Host.ShowCalls.Count);
+        Assert.Equal(1, fx.Host.CreateMenuCalls);            // no re-create after dispose
     }
 }
