@@ -219,9 +219,9 @@ public class FloatingMenuServiceTests
         Assert.Empty(fx.Pipeline.Started);                        // D10: StartAsync không được gọi
         Assert.Equal(before, File.ReadAllText(fx.SettingsPath));  // settings giữ nguyên
         MenuState state = fx.Service.LastDrawnState!;
-        Assert.Equal("menu.error.noWindow", state.ErrorLine);     // key chưa có (Task 21) → raw key
+        Assert.Equal(fx.L["menu.error.noWindow"], state.ErrorLine);      // Task 21: chuỗi đã có trong bảng i18n
         var balloon = fx.Tray.Balloons.Single();
-        Assert.Equal("menu.error.noWindow", balloon.Text);
+        Assert.Equal(fx.L["menu.error.noWindow"], balloon.Text);
         Assert.Equal(BalloonIcon.Error, balloon.Icon);
     }
 
@@ -237,7 +237,8 @@ public class FloatingMenuServiceTests
 
         MenuState state = fx.Service.LastDrawnState!;
         Assert.NotNull(state.ErrorLine);
-        Assert.Equal("menu.error.startFailed", state.ErrorLine);  // raw key đến khi Task 21 thêm chuỗi
+        // Task 21: chuỗi đã có trong bảng i18n; chi tiết thiếu model vẫn hardcode (chờ i18n riêng).
+        Assert.Equal(fx.L.Fmt("menu.error.startFailed", "model OCR chưa được cài"), state.ErrorLine);
         var balloon = fx.Tray.Balloons.Single();
         Assert.Equal(state.ErrorLine, balloon.Text);
         Assert.Equal(BalloonIcon.Error, balloon.Icon);
@@ -425,7 +426,8 @@ public class FloatingMenuServiceTests
         fx.Advance();
 
         await fx.Service.StartPipelineAsync();
-        Assert.Equal("menu.error.startFailed", fx.Service.LastDrawnState!.ErrorLine);  // drawn on the failure
+        string errorLine = fx.L.Fmt("menu.error.startFailed", "model OCR chưa được cài"); // Task 21: chuỗi i18n thật
+        Assert.Equal(errorLine, fx.Service.LastDrawnState!.ErrorLine);  // drawn on the failure
 
         fx.Pipeline.IsRunning = true;
         for (int i = 0; i < 3; i++) fx.Preview.Publish(new PreviewFrame(i + 1, 1920, 1080, ""));
@@ -435,7 +437,7 @@ public class FloatingMenuServiceTests
 
         MenuState state = fx.Service.LastDrawnState!;
         Assert.Equal(3.0, state.Fps, 2);                          // the passive repaint really occurred
-        Assert.Equal("menu.error.startFailed", state.ErrorLine);  // and the error line survived it
+        Assert.Equal(errorLine, state.ErrorLine);                 // and the error line survived it
     }
 
     [Fact]

@@ -345,6 +345,27 @@ public static class I18nStrings
         ["setup.flavorSwitch.confirm"] = "Đổi sang bản mới",
         ["setup.section"] = "Cài đặt (setup)",
         ["setup.rerun"] = "Chạy lại setup",
+
+        // Menu nổi + mục tray Hiện/ẩn menu nổi (spec 2026-11-04)
+        ["tray.menu.showHideMenu"] = "Hiện/ẩn menu nổi",
+        ["menu.row.start"] = "Bắt đầu",
+        ["menu.row.stop"] = "Dừng",
+        ["menu.row.source"] = "Nguồn",
+        ["menu.row.overlay"] = "Lớp phủ",
+        ["menu.row.dst"] = "Dịch sang",
+        ["menu.row.src"] = "Ngôn ngữ nguồn",
+        ["menu.row.ocrFps"] = "Nhịp OCR",
+        ["menu.row.captureFps"] = "Nhịp chụp",
+        ["menu.row.mergeLines"] = "Gộp nhiều dòng",
+        ["menu.row.stats"] = "Thống kê",
+        ["menu.row.closeMenu"] = "Tắt menu nổi",
+        ["menu.note.nextStart"] = "Ngôn ngữ / nhịp / nguồn áp dụng ở lần Start kế tiếp.",
+        ["menu.error.noWindow"] = "Chưa chọn cửa sổ nguồn — mở hàng Nguồn để chọn.",
+        ["menu.error.startFailed"] = "Không thể bắt đầu: {0}",
+        ["menu.source.monitor"] = "Màn hình {0}",
+        ["menu.stats.fps"] = "FPS",
+        ["menu.stats.boxes"] = "Box",
+        ["menu.stats.lines"] = "Dòng dịch",
     };
 
     /// <summary>English strings, keyed by dotted ids. Chuỗi tiếng Anh, khóa dạng chấm.</summary>
@@ -682,6 +703,27 @@ public static class I18nStrings
         ["setup.flavorSwitch.confirm"] = "Switch to the new build",
         ["setup.section"] = "Setup",
         ["setup.rerun"] = "Re-run setup",
+
+        // Floating menu + tray show/hide item (spec 2026-11-04) — English mirror of the Vi block above.
+        ["tray.menu.showHideMenu"] = "Show/hide floating menu",
+        ["menu.row.start"] = "Start",
+        ["menu.row.stop"] = "Stop",
+        ["menu.row.source"] = "Source",
+        ["menu.row.overlay"] = "Overlay",
+        ["menu.row.dst"] = "Translate to",
+        ["menu.row.src"] = "Source language",
+        ["menu.row.ocrFps"] = "OCR rhythm",
+        ["menu.row.captureFps"] = "Capture rhythm",
+        ["menu.row.mergeLines"] = "Merge lines",
+        ["menu.row.stats"] = "Stats",
+        ["menu.row.closeMenu"] = "Turn off floating menu",
+        ["menu.note.nextStart"] = "Language / rhythm / source apply on the next start.",
+        ["menu.error.noWindow"] = "No source window selected — open the Source row to pick one.",
+        ["menu.error.startFailed"] = "Could not start: {0}",
+        ["menu.source.monitor"] = "Monitor {0}",
+        ["menu.stats.fps"] = "FPS",
+        ["menu.stats.boxes"] = "Boxes",
+        ["menu.stats.lines"] = "Translated lines",
     };
 
     /// <summary>

@@ -22,6 +22,7 @@ public class TrayIconServiceTests
         public bool OverlayOn { get; set; }
         public bool Running { get; set; } = true;
         public bool ThrowOnOverlay { get; set; }
+        public bool MenuVisible { get; set; }
         public List<string> Calls { get; } = new();
         public bool OverlayIsOn => OverlayOn;
         public bool PipelineRunning => Running;
@@ -30,6 +31,11 @@ public class TrayIconServiceTests
             if (ThrowOnOverlay) throw new InvalidOperationException("simulated");
             OverlayOn = on;
             Calls.Add("overlay:" + on);
+        }
+        public void SetMenuVisible(bool on)
+        {
+            MenuVisible = on;
+            Calls.Add("menu:" + on);
         }
         public void OpenAppWindow() => Calls.Add("open");
         public Task ExitApp() { Calls.Add("exit"); return Task.CompletedTask; }
@@ -51,6 +57,26 @@ public class TrayIconServiceTests
         var menu = svc.BuildMenu();
         // IReadOnlyList<TrayCommand> không index được bằng enum (ruling Task 2) → Single theo Id.
         Assert.True(menu.Single(c => c.Id == TrayCommandId.ToggleOverlay).IsChecked);
+    }
+
+    [Fact]
+    public void BuildMenu_ReflectsMenuVisibility()
+    {
+        var (svc, _, actions, _) = Create(overlayOn: false, running: true);
+        Assert.False(svc.BuildMenu().Single(c => c.Id == TrayCommandId.ShowHideMenu).IsChecked);
+        actions.MenuVisible = true; // menu đang hiện → mục tray phải tick theo trạng thái HIỆN TẠI
+        Assert.True(svc.BuildMenu().Single(c => c.Id == TrayCommandId.ShowHideMenu).IsChecked);
+    }
+
+    [Fact]
+    public void Selected_ShowHideMenu_TogglesAction()
+    {
+        var (svc, host, actions, _) = Create(overlayOn: false, running: true);
+        svc.Start();
+        host.Raise(TrayCommandId.ShowHideMenu); // menu đang ẩn → SetMenuVisible(true)
+        Assert.Equal("menu:True", actions.Calls.Single());
+        host.Raise(TrayCommandId.ShowHideMenu); // menu đang hiện → SetMenuVisible(false)
+        Assert.Equal(new[] { "menu:True", "menu:False" }, actions.Calls.ToArray());
     }
 
     [Fact]

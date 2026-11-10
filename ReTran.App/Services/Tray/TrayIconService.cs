@@ -26,6 +26,12 @@ public interface ITrayActions
     bool PipelineRunning { get; }
 
     /// <summary>
+    /// Whether the floating menu is currently shown; drives the checked state of the show/hide entry.
+    /// Menu nổi đang được hiện hay không; quyết định trạng thái tick của mục hiện/ẩn.
+    /// </summary>
+    bool MenuVisible { get; }
+
+    /// <summary>
     /// Turns the overlay on or off. Throwing is allowed — the tray catches it, logs the detail and
     /// shows the user one localized error message (spec §Báo lỗi, D12).
     /// Bật/tắt overlay. Được phép ném lỗi — khay bắt lỗi, log chi tiết và cho người dùng thấy một
@@ -33,6 +39,15 @@ public interface ITrayActions
     /// </summary>
     /// <param name="on">Target state. Trạng thái đích.</param>
     void SetOverlay(bool on);
+
+    /// <summary>
+    /// Shows or hides the floating menu, persisting the choice either way. Throwing is allowed — the
+    /// tray catches it, logs the detail and shows the user one localized error message (spec §Báo lỗi, D12).
+    /// Hiện hoặc ẩn menu nổi, lưu lựa chọn trong cả hai trường hợp. Được phép ném lỗi — khay bắt lỗi,
+    /// log chi tiết và cho người dùng thấy một thông điệp lỗi đã dịch (spec §Báo lỗi, D12).
+    /// </summary>
+    /// <param name="on">Target visibility. Trạng thái hiện mong muốn.</param>
+    void SetMenuVisible(bool on);
 
     /// <summary>
     /// Shows the primary app window again (the close-to-tray counterpart of pressing X).
@@ -196,9 +211,11 @@ public sealed class TrayIconService : IDisposable
 
     /// <summary>
     /// Builds the context menu from the CURRENT app state: the host calls this on every right-click,
-    /// so <see cref="ITrayActions.OverlayIsOn"/> is read live here and must never be cached.
+    /// so <see cref="ITrayActions.MenuVisible"/> and <see cref="ITrayActions.OverlayIsOn"/> are read live
+    /// here and must never be cached.
     /// Dựng menu ngữ cảnh từ trạng thái app HIỆN TẠI: host gọi hàm này mỗi lần click chuột phải, nên
-    /// <see cref="ITrayActions.OverlayIsOn"/> phải đọc trực tiếp ở đây, không được cache.
+    /// <see cref="ITrayActions.MenuVisible"/> và <see cref="ITrayActions.OverlayIsOn"/> phải đọc trực tiếp
+    /// ở đây, không được cache.
     /// </summary>
     /// <remarks>
     /// This is a SECOND entry point the tray window procedure calls bare (the host invokes the provider
@@ -212,17 +229,20 @@ public sealed class TrayIconService : IDisposable
     /// host hiểu là "không menu" — menu đơn giản không mở cho cú click đó — và lý do được log.
     /// </remarks>
     /// <returns>
-    /// The ordered entries OpenApp / ToggleOverlay (checked per overlay state) / Exit, or an empty list
-    /// when the app state could not be read (the host then shows no menu).
-    /// Các mục theo thứ tự OpenApp / ToggleOverlay (tick theo trạng thái overlay) / Exit, hoặc danh sách
-    /// rỗng khi không đọc được trạng thái app (host khi đó không hiện menu).
+    /// The ordered entries OpenApp / ShowHideMenu (checked per menu visibility) / ToggleOverlay (checked
+    /// per overlay state) / Exit, or an empty list when the app state could not be read (the host then
+    /// shows no menu).
+    /// Các mục theo thứ tự OpenApp / ShowHideMenu (tick theo trạng thái hiện của menu nổi) / ToggleOverlay
+    /// (tick theo trạng thái overlay) / Exit, hoặc danh sách rỗng khi không đọc được trạng thái app
+    /// (host khi đó không hiện menu).
     /// </returns>
     public IReadOnlyList<TrayCommand> BuildMenu()
     {
         try
         {
             return TrayMenuModel.Build(
-                _L["tray.menu.open"], _L["tray.menu.overlay"], _L["tray.menu.exit"], _actions.OverlayIsOn);
+                _L["tray.menu.open"], _L["tray.menu.showHideMenu"], _L["tray.menu.overlay"],
+                _L["tray.menu.exit"], _actions.MenuVisible, _actions.OverlayIsOn);
         }
         catch (Exception ex)
         {
@@ -274,6 +294,11 @@ public sealed class TrayIconService : IDisposable
             {
                 case TrayCommandId.OpenApp:
                     _actions.OpenAppWindow();
+                    break;
+                case TrayCommandId.ShowHideMenu:
+                    // Read the current visibility right here so a click always flips what is on screen.
+                    // Đọc trạng thái hiện tại ngay tại đây để mỗi click luôn lật đúng điều đang trên màn hình.
+                    _actions.SetMenuVisible(!_actions.MenuVisible);
                     break;
                 case TrayCommandId.ToggleOverlay:
                     announceNextStart = ToggleOverlay();
