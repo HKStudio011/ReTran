@@ -976,7 +976,7 @@ Get-Process ReTran.App | Select-Object Id, CPU, WorkingSet64, PeakWorkingSet64
 | Surface bitmap | **một `Bitmap` 32bpp PArgb cho mỗi cỡ window**, tái sử dụng suốt tuổi thọ service (host tiêu thụ bất đồng bộ trên worker thread nên không tạo/dispose theo từng lần vẽ). Trạng thái mặc định **336×510 px = 685.440 B ≈ 0,65 MB**; chip thu gọn 60×60 ≈ 14 KB | `FloatingMenuService.GetSurface`, `FloatingMenuLayout.WindowSize` |
 | Nhịp vẽ | Snapshot `MenuState` (record) — **chỉ vẽ khi khác khung đã vẽ thật**; throttle **leading-edge 66 ms ⇒ trần ~15 fps**; **không trailing timer, không loop redraw** | `FloatingMenuService.RequestRedraw` + `DefaultRedrawInterval` |
 | Nguồn số | `RunStats` singleton **dùng chung** với rail thống kê trang điều khiển — một công thức fps duy nhất cho toàn app; menu không tự đếm frame | `RunStats`, `Home.razor`, `FloatingMenuService.BuildState` |
-| RPC | `core.list_sources` **chỉ** khi mở hàng Nguồn (`OpenSourceListAsync` là caller duy nhất); không poll | `FloatingMenuService.OpenSourceListAsync` |
+| RPC | `core.list_sources` **chỉ** khi mở hàng Nguồn (`OpenSourceListAsync` là caller duy nhất **trong menu**; `Home.razor` cũng gọi một lần khi tải trang); không poll | `FloatingMenuService.OpenSourceListAsync` |
 | Z-order | Menu tự đặt `HWND_TOPMOST` trong `ShowMenu` và trong lúc kéo; box overlay chèn **sau** hwnd menu ngay trong lần `SetWindowPos` nó vẫn gọi — **không có timer re-assert z-order mới** | `Win32OverlayHost.BoxInsertAfter/ShowMenu`, menu WndProc |
 | Start-up | `FloatingMenuService.Start()` chạy từ hook `OnWindowCreated` của window chính (sau `TrayIconService.Start()`), trong `try` riêng — lỗi menu không giết app và không bị ghi vào log của tray | `MauiProgram` |
 
@@ -990,7 +990,7 @@ Get-Process ReTran.App | Select-Object Id, CPU, WorkingSet64, PeakWorkingSet64
 
 Số ở bảng trên là **hằng số / geometry lấy từ code đã commit**, không phải số đo process. Delta CPU/RAM của App khi menu hiện cần mở app thật (smoke 7 mục của plan, do controller chạy) — task DI wiring này chưa chạy app. Mốc so sánh hợp lệ: §M4 mục C (App idle **0,08 CPU-s / 0,2% 1 core**, RSS 200,4 MB) và §M5 (App **0,49 core / 325 MB** khi pipeline chạy).
 
-Kỳ vọng khi đo thật: CPU App ≈ không đổi khi không tương tác với menu (chỉ có tick 1 s của `RunStats` + tối đa ~4 lần đọc `settings.json`/giây); RAM tăng ~0,7 MB cho surface mặc định, thêm ~0,1–0,8 MB khi mở vùng thống kê / danh sách nguồn (thêm theo cỡ window, không tăng theo thời gian).
+Kỳ vọng khi đo thật: CPU App ≈ không đổi khi không tương tác với menu (chỉ có tick 1 s của `RunStats` + tối đa ~4 lần đọc `settings.json`/giây); RAM tăng ≈ 0,65 MB cho surface mặc định, thêm ~0,1–0,8 MB khi mở vùng thống kê / danh sách nguồn (thêm theo cỡ window, không tăng theo thời gian).
 
 ### Lệnh đo (khi mở app có menu nổi)
 

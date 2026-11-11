@@ -1,4 +1,5 @@
 using System.Drawing;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ReTran_App.Core;
 using ReTran_App.Services;
@@ -20,8 +21,11 @@ public class FloatingMenuServiceTests
         public int HideCalls { get; private set; }
         public List<Bitmap> DrawnBitmaps { get; } = new();
 
-        public bool MenuCreated => CreateMenuCalls > 0;
+        public bool MenuCreated => CreateMenuCalls > 0 && !MenuCreationFails;
         public nint MenuHwnd => 0;
+
+        /// <summary>Simulates the host failing to create the "ReTranMenu" window (worker fault or ≤5 s timeout). Mô phỏng host không tạo được cửa sổ menu.</summary>
+        public bool MenuCreationFails { get; set; }
 
         public void CreateMenu() => CreateMenuCalls++;
         public void ShowMenu(int x, int y, int width, int height) => ShowCalls.Add((x, y, width, height));
@@ -155,6 +159,7 @@ public class FloatingMenuServiceTests
         public FakeTray Tray { get; } = new();
         public AppNotifier Notifier { get; }
         public I18nService L { get; }
+        public RecordingLogger<FloatingMenuService> Log { get; } = new();
         public FloatingMenuService Service { get; }
 
         private Fixture(string dir, TimeSpan? redrawInterval)
@@ -172,7 +177,7 @@ public class FloatingMenuServiceTests
             Stats = new RunStats(Preview, Overlay, Pipeline, now: () => _statsTick);
             Notifier = new AppNotifier(Toast, Tray, () => false, () => false, NullLogger<AppNotifier>.Instance);
             Service = new FloatingMenuService(Settings, OverlayToggle, Pipeline, Host, Notifier, Stats, L,
-                NullLogger<FloatingMenuService>.Instance, redrawInterval);
+                Log, redrawInterval);
             Service.DrawClock = () => DateTime.UnixEpoch.AddMilliseconds(_drawMs);
         }
 
@@ -250,6 +255,20 @@ public class FloatingMenuServiceTests
         var balloon = fx.Tray.Balloons.Single();
         Assert.Equal(state.ErrorLine, balloon.Text);
         Assert.Equal(BalloonIcon.Error, balloon.Icon);
+    }
+
+    [Fact]
+    public void Start_MenuWindowCreationFails_LogsWarningAndDoesNotThrow()
+    {
+        using var fx = Fixture.Create();
+        fx.Host.MenuCreationFails = true; // worker fault / ≤5 s timeout — MenuCreated stays false
+
+        // Must not throw (the host swallows the failure); a warning must reach the app log.
+        // Không được ném lỗi (host nuốt lỗi); phải có warning trong log app.
+        fx.Service.Start();
+
+        Assert.Single(fx.Log.Warnings);
+        Assert.Contains("ReTranMenu", fx.Log.Warnings[0]);
     }
 
     [Fact]
@@ -601,5 +620,28 @@ public class FloatingMenuServiceTests
         Assert.Equal(draws + 1, fx.Host.DrawnBitmaps.Count); // nothing new was drawn
         Assert.Equal(shows, fx.Host.ShowCalls.Count);
         Assert.Equal(1, fx.Host.CreateMenuCalls);            // no re-create after dispose
+    }
+
+    /// <summary>ILogger ghi lại message ≥ Warning để xác nhận Start() log khi window menu không được tạo. Records warning+ messages to confirm Start() logs when the menu window is not created.</summary>
+    private sealed class RecordingLogger<T> : ILogger<T>
+    {
+        public List<string> Warnings { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel >= LogLevel.Warning)
+            {
+                Warnings.Add(formatter(state, exception));
+            }
+        }
     }
 }

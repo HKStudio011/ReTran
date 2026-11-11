@@ -167,6 +167,17 @@ public sealed class FloatingMenuService : IDisposable
             if (_disposed) return;
             _workAreas = WorkAreasOverride ?? QueryMonitorWorkAreas(); // real areas once at start-up
             _host.CreateMenu(); // the window exists even when the menu starts hidden (idempotent)
+            // Win32OverlayHost never throws out of CreateMenu — a worker-thread fault or the ≤5 s wait
+            // timing out is swallowed into its Debug.WriteLine — and ShowMenu then no-ops on a 0 hwnd, so
+            // without this check the menu would silently never appear with nothing in the app log.
+            // Win32OverlayHost không bao giờ ném ra khỏi CreateMenu — lỗi worker thread hay lần chờ ≤5 s
+            // bị nuốt vào Debug.WriteLine của host — và ShowMenu sau đó no-op khi hwnd = 0, nên nếu không
+            // có check này menu sẽ im lặng không hiện mà log app trống trơn.
+            if (!_host.MenuCreated)
+            {
+                _log.LogWarning(
+                    "Floating menu window not created: the overlay worker thread \"ReTranOverlayHost\" did not create the \"ReTranMenu\" window within its 5 s wait (CreateMenu never throws); the menu will stay invisible — see Debug output for the host failure. Cửa sổ menu nổi không được tạo: worker thread overlay \"ReTranOverlayHost\" đã không tạo cửa sổ \"ReTranMenu\" trong lần chờ 5 giây (CreateMenu không bao giờ ném lỗi); menu sẽ không hiện — xem output Debug để biết lỗi của host.");
+            }
             if (_settings.Load().FloatingMenuOn) ShowLocked(); // show only when the switch is on
         }
     }
@@ -436,10 +447,10 @@ public sealed class FloatingMenuService : IDisposable
     }
 
     /// <summary>
-    /// Fetches the capturable sources (the ONLY caller of ListSourcesAsync — spec D11), builds the
-    /// menu list and opens it under the Source row.
-    /// Lấy các nguồn có thể capture (DUY NHẤT caller của ListSourcesAsync — spec D11), dựng danh sách
-    /// và mở nó dưới row Nguồn.
+    /// Fetches the capturable sources (the ONLY caller of ListSourcesAsync within the menu — spec D11;
+    /// Home.razor also calls it once at page load), builds the menu list and opens it under the Source row.
+    /// Lấy các nguồn có thể capture (caller duy nhất của ListSourcesAsync TRONG MENU — spec D11;
+    /// Home.razor cũng gọi một lần khi tải trang), dựng danh sách và mở nó dưới row Nguồn.
     /// </summary>
     public async Task OpenSourceListAsync()
     {
