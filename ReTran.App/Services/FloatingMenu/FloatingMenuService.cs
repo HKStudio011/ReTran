@@ -129,6 +129,12 @@ public sealed class FloatingMenuService : IDisposable
         _pipeline.PipelineStateChanged += OnPipelineLoopChanged;
         _settings.Changed += OnSettingsChanged;
         _stats.Changed += OnStatsChanged;
+        // Host click/drag intents arrive on the overlay worker thread; without these two lines every
+        // menu click and drag fell into the void (the host raised, nobody listened).
+        // Intent click/kéo từ host đến trên worker thread overlay; thiếu hai dòng này mọi click và
+        // thao tác kéo menu rơi vào hư không (host phát, không ai nghe).
+        _host.PanelClicked += OnPanelClicked;
+        _host.DragFinished += OnDragFinished;
     }
 
     /// <summary>Whether the menu window is currently shown (not merely created). Cửa sổ menu đang được hiện hay không (chưa phải chỉ đã tạo).</summary>
@@ -644,6 +650,8 @@ public sealed class FloatingMenuService : IDisposable
             _pipeline.PipelineStateChanged -= OnPipelineLoopChanged;
             _settings.Changed -= OnSettingsChanged;
             _stats.Changed -= OnStatsChanged;
+            _host.PanelClicked -= OnPanelClicked;
+            _host.DragFinished -= OnDragFinished;
             foreach (SD.Bitmap surface in _surfaces.Values) surface.Dispose();
             _surfaces.Clear();
         }

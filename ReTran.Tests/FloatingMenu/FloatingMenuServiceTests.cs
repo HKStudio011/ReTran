@@ -32,12 +32,36 @@ public class FloatingMenuServiceTests
         public void HideMenu() => HideCalls++;
         public void DrawMenu(Bitmap bitmap) => DrawnBitmaps.Add(bitmap);
 
-        // The service does not subscribe to the host events itself (wiring is Task 23); tests call
-        // OnPanelClicked/OnDragFinished directly, so these accessors stay empty (avoids CS0067).
-        // Service tự KHÔNG đăng ký event host (việc nối là Task 23); test gọi thẳng
-        // OnPanelClicked/OnDragFinished nên accessor để rỗng (tránh CS0067).
-        public event Action<int, int>? PanelClicked { add { } remove { } }
-        public event Action<int, int>? DragFinished { add { } remove { } }
+        // Real accessors so the service's two host-event subscriptions are actually exercised: the
+        // add/remove counts back the subscribe-at-ctor / unsubscribe-at-Dispose assertions, and the
+        // Raise* helpers fire the events exactly the way Win32OverlayHost does. Accessor thật để hai
+        // đăng ký event host của service được chạy thực sự: số đếm add/remove phục vụ assert
+        // subscribe-khi-dựng / unsubscribe-khi-Dispose; Raise* phát event đúng như Win32OverlayHost.
+        public int PanelClickedAdds { get; private set; }
+        public int PanelClickedRemoves { get; private set; }
+        public int DragFinishedAdds { get; private set; }
+        public int DragFinishedRemoves { get; private set; }
+
+        private Action<int, int>? _panelClicked;
+        private Action<int, int>? _dragFinished;
+
+        public event Action<int, int>? PanelClicked
+        {
+            add { _panelClicked += value; PanelClickedAdds++; }
+            remove { _panelClicked -= value; PanelClickedRemoves++; }
+        }
+
+        public event Action<int, int>? DragFinished
+        {
+            add { _dragFinished += value; DragFinishedAdds++; }
+            remove { _dragFinished -= value; DragFinishedRemoves++; }
+        }
+
+        /// <summary>Fires PanelClicked as the host does on a click (panel coordinates). Phát PanelClicked như host khi click (toạ độ panel).</summary>
+        public void RaisePanelClicked(int x, int y) => _panelClicked?.Invoke(x, y);
+
+        /// <summary>Fires DragFinished as the host does after a drag (desktop coordinates). Phát DragFinished như host sau khi kéo (toạ độ desktop).</summary>
+        public void RaiseDragFinished(int x, int y) => _dragFinished?.Invoke(x, y);
     }
 
     /// <summary>Overlay toggle fake: records calls and mirrors the enabled state. Fake công tắc overlay: ghi log và phản chiếu trạng thái.</summary>
@@ -551,6 +575,86 @@ public class FloatingMenuServiceTests
         s = fx.Settings.Load();
         Assert.Equal(-1000, s.FloatingMenuX);
         Assert.Equal(300, s.FloatingMenuY);
+    }
+
+    [Fact]
+    public void Ctor_SubscribesHostClickAndDragEvents()
+    {
+        using var fx = Fixture.Create();
+
+        Assert.Equal(1, fx.Host.PanelClickedAdds);
+        Assert.Equal(1, fx.Host.DragFinishedAdds);
+    }
+
+    [Fact]
+    public void RaisePanelClicked_ViaHostEvent_ExpandsChipAndPersists()
+    {
+        // Production-bug guard: the chip is expanded by a click RAISED THROUGH the host event — a
+        // service that never subscribed leaves the chip collapsed and the settings untouched.
+        // Chốt bug production: chip được mở bằng click PHÁT QUA event host — service không đăng ký
+        // sẽ để chip thu gọn và cài đặt nguyên vẹn.
+        using var fx = Fixture.Create();
+        fx.Save(new AppSettings("google", "auto", "vi", null, FloatingMenuCollapsed: true));
+        fx.Service.Start();  // window cỡ chip
+        (int x0, int y0, int w0, int h0) = fx.Host.ShowCalls.Single();
+        Assert.Equal(FloatingMenuLayout.ChipSize + 2 * FloatingMenuLayout.ShadowMargin, w0);
+        fx.Advance();
+
+        fx.Host.RaisePanelClicked(20, 20);  // giữa chip (toạ độ PANEL — host đã trừ shadow)
+
+        Assert.False(fx.Settings.Load().FloatingMenuCollapsed);
+        MenuState state = fx.Service.LastDrawnState!;
+        Assert.False(state.Collapsed);
+        var last = fx.Host.ShowCalls[^1];
+        Assert.True(last.W > w0, "expanding must resize the window to the full panel");
+    }
+
+    [Fact]
+    public void RaiseDragFinished_ViaHostEvent_ClampsAndPersists()
+    {
+        // Mirror of OnDragFinished_ClampsAgainstInjectedWorkAreas, raised through the host event: a
+        // missing subscription means no persisted position and no clamp re-show.
+        // Gương của OnDragFinished_ClampsAgainstInjectedWorkAreas nhưng phát qua event host: thiếu
+        // đăng ký thì vị trí không được lưu và không có lần đặt-lại-cửa-sổ khi kẹp.
+        using var fx = Fixture.Create();
+        fx.Service.WorkAreasOverride = [(0, 0, 2560, 1440), (-1280, 0, 0, 1440)];
+        fx.Service.Start();
+
+        // Inside the primary area: no clamp, no re-show. Trong vùng chính: không kẹp, không hiện lại.
+        fx.Host.RaiseDragFinished(2000, 300);
+        AppSettings s = fx.Settings.Load();
+        Assert.Equal(2000, s.FloatingMenuX);
+        Assert.Equal(300, s.FloatingMenuY);
+        int shows = fx.Host.ShowCalls.Count;
+
+        // Overshoot right: clamped to area.Right − windowW and the window is re-positioned.
+        // Vượt mép phải: kẹp về Right − rộng window và cửa sổ được đặt lại.
+        fx.Host.RaiseDragFinished(2500, 300);
+        s = fx.Settings.Load();
+        Assert.Equal(2560 - 336, s.FloatingMenuX); // 2224 — not the fallback area's 1584
+        Assert.Equal(300, s.FloatingMenuY);
+        Assert.Equal(shows + 1, fx.Host.ShowCalls.Count);
+    }
+
+    [Fact]
+    public void Dispose_UnsubscribesAndRaisingAfterDispose_IsSafe()
+    {
+        using var fx = Fixture.Create();
+        fx.Save(new AppSettings("google", "auto", "vi", null, FloatingMenuCollapsed: true));
+        fx.Service.Start();
+        fx.Advance();
+
+        fx.Service.Dispose();
+
+        Assert.Equal(fx.Host.PanelClickedAdds, fx.Host.PanelClickedRemoves); // unsubscribe at Dispose
+        Assert.Equal(fx.Host.DragFinishedAdds, fx.Host.DragFinishedRemoves);
+
+        // Raises after Dispose must be safe no-ops and must not touch the settings file.
+        // Raise sau Dispose phải là no-op an toàn và không đụng file cài đặt.
+        string before = File.ReadAllText(fx.SettingsPath);
+        fx.Host.RaisePanelClicked(20, 20);
+        fx.Host.RaiseDragFinished(2000, 300);
+        Assert.Equal(before, File.ReadAllText(fx.SettingsPath));
     }
 
     [Fact]

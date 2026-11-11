@@ -1,5 +1,4 @@
 ﻿using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Maui.LifecycleEvents;
 using ReTran_App.Core;
@@ -126,13 +125,17 @@ namespace ReTran_App
             builder.Services.AddSingleton<IAppShutdown, MauiAppShutdown>();
 
             // First-run setup wizard (spec 2026-11-04): WMI adapter inventory, uv sync runner over the
-            // real process runner, the core restart bridge and the coordinator itself. "Bỏ qua" closes
-            // the app through the host lifetime (spec §3.6); the disk/network seams are fail-safe — an
-            // unreadable value fails the wizard's gate with a clear message instead of assuming OK.
+            // real process runner, the core restart bridge and the coordinator itself. "Bỏ qua" (spec
+            // §3.6) quits through the same clean tray-exit path as the tray's "Thoát": BeginExit on the
+            // window bridge, then stop the services/core tree and quit — StopApplication alone only
+            // stopped the host and left the MAUI window open. The disk/network seams are fail-safe —
+            // an unreadable value fails the wizard's gate with a clear message instead of assuming OK.
             // Wizard setup chạy lần đầu (spec 2026-11-04): danh sách adapter WMI, runner uv sync trên
-            // process runner thật, bridge restart core và chính coordinator. "Bỏ qua" đóng app qua host
-            // lifetime (spec §3.6); seam đĩa/mạng fail-safe — giá trị không đọc được làm wizard fail
-            // cổng kèm thông báo rõ thay vì giả định OK.
+            // process runner thật, bridge restart core và chính coordinator. "Bỏ qua" (spec §3.6)
+            // thoát qua đúng đường thoát sạch của tray ("Thoát"): BeginExit trên bridge cửa sổ, rồi
+            // dừng service/cây core và quit — riêng StopApplication chỉ dừng host và để cửa sổ MAUI
+            // mở. Seam đĩa/mạng fail-safe — giá trị không đọc được làm wizard fail cổng kèm thông báo
+            // rõ thay vì giả định OK.
             builder.Services.AddSingleton<IVideoAdapterSource, VideoAdapterSource>();
             builder.Services.AddSingleton<IProcessRunner, ProcessRunner>();
             builder.Services.AddSingleton(sp => new UvSyncRunner(sp.GetRequiredService<IProcessRunner>()));
@@ -144,7 +147,17 @@ namespace ReTran_App
                 sp.GetRequiredService<UvSyncRunner>(),
                 sp.GetRequiredService<ISetupCoreBridge>(),
                 sp.GetRequiredService<AppSettingsService>(),
-                () => sp.GetRequiredService<IHostApplicationLifetime>().StopApplication(),
+                () =>
+                {
+                    // Same order as AppTrayActions.ExitApp — a hard requirement, not a detail: without
+                    // BeginExit the bridge's Closing handler turns IAppShutdown.Quit() back into
+                    // hide-to-tray, so the app would stay alive in the tray instead of quitting.
+                    // Cùng thứ tự như AppTrayActions.ExitApp — yêu cầu cứng, không phải chi tiết: nếu
+                    // thiếu BeginExit, handler Closing của bridge biến IAppShutdown.Quit() trở lại
+                    // thành ẩn xuống khay, app sẽ sống tiếp trong khay thay vì thoát.
+                    sp.GetRequiredService<AppWindowBridge>().BeginExit();
+                    _ = sp.GetRequiredService<ITrayExit>().ExitAsync(CancellationToken.None);
+                },
                 logger: sp.GetRequiredService<ILogger<SetupCoordinator>>()));
 
 #if DEBUG
@@ -218,9 +231,17 @@ namespace ReTran_App
             return app;
         }
 
-        // Probe client riêng cho bước Checking của setup: timeout 3 s — khác HttpClient chung (100 s),
-        // vì check mạng phải trả lời nhanh để wizard không treo ở màn kiểm tra.
-        private static readonly HttpClient NetworkProbeClient = new() { Timeout = TimeSpan.FromSeconds(3) };
+        // Dedicated probe client for the setup Checking step: 15 s timeout — the slow paddle host
+        // (www.paddlepaddle.org.cn answered in ~8.2 s, measured live 2026-11-11, while pypi ~1.5 s and
+        // pytorch ~0.25 s stayed fast) made the old 3 s value fail the wizard's network gate
+        // spuriously 3/3 times. Offline still fails fast (DNS errors immediately); only a hung host
+        // can sit out the full 15 s, which is an acceptable worst case for a one-time wizard check.
+        // Probe client riêng cho bước Checking của setup: timeout 15 s — host paddle chậm
+        // (www.paddlepaddle.org.cn trả lời ~8,2 s, đo thật 2026-11-11, trong khi pypi ~1,5 s và
+        // pytorch ~0,25 s vẫn nhanh) làm mốc 3 s cũ chặn oan cổng mạng của wizard 3/3 lần. Offline
+        // vẫn fail nhanh (DNS lỗi ngay); chỉ host treo mới chờ đủ 15 s — trường hợp xấu nhất chấp nhận
+        // được cho một lần kiểm tra wizard.
+        private static readonly HttpClient NetworkProbeClient = new() { Timeout = TimeSpan.FromSeconds(15) };
 
         /// <summary>
         /// Free bytes on the volume containing <paramref name="path"/>; 0 when unreadable (fail-safe:
