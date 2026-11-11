@@ -69,7 +69,11 @@ public class FloatingMenuServiceTests
     {
         public bool IsEnabled { get; set; }
         public List<bool> Calls { get; } = new();
-        public void SetEnabled(bool on) { Calls.Add(on); IsEnabled = on; }
+
+        /// <summary>Optional hook run inside SetEnabled — lets the lock-discipline test block the caller while probing the menu gate. Hook tùy chọn chạy trong SetEnabled — để test kỷ luật khoá chặn bên gọi trong lúc thăm dò gate menu.</summary>
+        public Action? OnSetEnabled { get; set; }
+
+        public void SetEnabled(bool on) { OnSetEnabled?.Invoke(); Calls.Add(on); IsEnabled = on; }
     }
 
     /// <summary>
@@ -309,6 +313,44 @@ public class FloatingMenuServiceTests
         fx.Service.ToggleOverlay();
         Assert.False(fx.OverlayToggle.IsEnabled);
         Assert.Equal([true, false], fx.OverlayToggle.Calls);
+    }
+
+    // T23e lock-discipline regression (reviewer, task 23d): the Overlay row must dispatch
+    // ToggleOverlay OUTSIDE _gate. ToggleOverlay chains into the overlay service's gate and its
+    // save fires settings.Changed synchronously back into RequestRedraw (needs OUR gate) — calling
+    // it under the gate is the menu-gate ↔ overlay-gate ABBA pair. Proof: while a click's
+    // SetEnabled call is blocked mid-flight, another thread must still acquire the menu gate.
+    // Regression kỷ luật khoá (reviewer, task 23d): row Lớp phủ phải dispatch ToggleOverlay NGOÀI
+    // _gate. ToggleOverlay nối vào gate của service overlay và lần lưu của nó phát settings.Changed
+    // đồng bộ trở lại RequestRedraw (cần gate CỦA TA) — gọi nó dưới gate là cặp ABBA gate menu ↔
+    // gate overlay. Chốt: khi lời gọi SetEnabled của một cú click đang bị chặn giữa chừng, một
+    // thread khác vẫn phải lấy được gate menu.
+    [Fact]
+    public async Task OnPanelClicked_OverlayRow_DoesNotHoldTheGateAcrossSetEnabled()
+    {
+        using var fx = Fixture.Create();
+        fx.Pipeline.IsRunning = true; // ToggleOverlay is a no-op while stopped (spec §7.1)
+        fx.Service.Start();
+
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using var inSetEnabled = new ManualResetEventSlim(false);
+        using var release = new ManualResetEventSlim(false);
+        fx.OverlayToggle.OnSetEnabled = () => { inSetEnabled.Set(); release.Wait(TimeSpan.FromSeconds(5), ct); };
+
+        // Centre of the Overlay row in panel coords (header 36, rows 44 px: StartStop, Source, Overlay).
+        Task click = Task.Run(() => fx.Service.OnPanelClicked(160, 146), ct);
+        Assert.True(inSetEnabled.Wait(TimeSpan.FromSeconds(5), ct), "the click never reached the overlay toggle");
+
+        // With ToggleOverlay called under the gate this second intent hangs until release; dispatched
+        // outside the gate it must complete immediately. Always release before asserting, so the
+        // click task can never outlive the events it is blocked on.
+        Task other = Task.Run(() => fx.Service.ToggleStats(), ct);
+        bool gateFree = await Task.WhenAny(other, Task.Delay(TimeSpan.FromSeconds(2), ct)) == other;
+        release.Set();
+        Assert.True(gateFree, "the menu gate was held across SetEnabled — menu-gate ↔ overlay-gate ABBA pair");
+
+        Assert.Same(click, await Task.WhenAny(click, Task.Delay(TimeSpan.FromSeconds(5), ct)));
+        Assert.Equal([true], fx.OverlayToggle.Calls);
     }
 
     [Fact]

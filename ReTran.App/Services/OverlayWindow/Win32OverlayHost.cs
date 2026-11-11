@@ -54,13 +54,18 @@ public sealed class Win32OverlayHost : IOverlayHost, IMenuWindowHost
     private int _grabOffsetX; // press point minus window top-left at WM_LBUTTONDOWN
     private int _grabOffsetY;
 
-    // Roots the menu WNDPROC delegate (instance method — it needs drag state) so the native
-    // callback cannot be collected while the menu window lives. Assigned in
-    // CreateMenuWindowOnWorker, right before the window is created.
-    // Giữ delegate WNDPROC của menu (instance method — cần state kéo) sống để callback native
-    // không bị thu hồi khi cửa sổ menu còn tồn tại. Được gán trong CreateMenuWindowOnWorker, ngay
-    // trước khi tạo cửa sổ.
-    private NativeMethods.WNDPROC? MenuWndProcDelegate;
+    // Menu WNDPROC routing: a Windows class is registered ONCE per process, so a class-wide
+    // instance delegate would serve every menu window of the process with the FIRST host
+    // instance's state (stored size, drag state, events) — wrong as soon as a second host exists
+    // (real-Win32 tests). The static dispatcher looks the owning host up by hwnd instead; being
+    // static, the native callback is also rooted for the process lifetime (no GC thunk hazard).
+    // Định tuyến WNDPROC của menu: một class của Windows chỉ đăng ký MỘT LẦN mỗi process, nên
+    // delegate instance cấp-class sẽ phục vụ mọi cửa sổ menu của process bằng state của host ĐẦU
+    // TIÊN (cỡ đã lưu, state kéo, event) — sai ngay khi có host thứ hai (test real-Win32). Dispatcher
+    // tĩnh tra host sở hữu theo hwnd; vì tĩnh, callback native cũng được giữ suốt process (không
+    // còn rủi ro thunk bị GC thu hồi).
+    private static readonly ConcurrentDictionary<nint, Win32OverlayHost> MenuHostsByHwnd = new();
+    private static readonly NativeMethods.WNDPROC MenuWndProcDispatcher = DispatchMenuWndProc;
 
     /// <summary>
     /// Whether the native window has been created on the worker thread. Native window đã được tạo trên worker thread hay chưa.
@@ -364,11 +369,15 @@ public sealed class Win32OverlayHost : IOverlayHost, IMenuWindowHost
     }
 
     // Creates the second window on the worker thread: the floating menu. Unlike the box it is NOT
-    // WS_EX_TRANSPARENT — the menu must receive clicks — and its WNDPROC is an instance method
-    // (drag state) rooted in MenuWndProcDelegate so the GC cannot collect the callback.
+    // WS_EX_TRANSPARENT — the menu must receive clicks. Its class is registered with the static
+    // MenuWndProcDispatcher, which routes each window's messages to its owning host instance
+    // (see MenuHostsByHwnd) — an instance delegate cannot be registered directly because a class
+    // is registered once per process and later hosts' windows would keep calling the first one.
     // Tạo cửa sổ thứ hai trên worker thread: menu nổi. Khác với box, nó KHÔNG mang
-    // WS_EX_TRANSPARENT — menu phải nhận click — và WNDPROC là instance method (state kéo) được
-    // giữ trong MenuWndProcDelegate để GC không thu hồi callback.
+    // WS_EX_TRANSPARENT — menu phải nhận click. Class của nó đăng ký với MenuWndProcDispatcher
+    // tĩnh, dispatcher này định tuyến message của từng cửa sổ về đúng host sở hữu (xem
+    // MenuHostsByHwnd) — không thể đăng ký thẳng delegate instance vì một class chỉ đăng ký một
+    // lần mỗi process và cửa sổ của host sau sẽ mãi gọi host đầu tiên.
     private void CreateMenuWindowOnWorker()
     {
         if (_menuHwnd != 0)
@@ -378,12 +387,10 @@ public sealed class Win32OverlayHost : IOverlayHost, IMenuWindowHost
         }
 
         nint hInstance = NativeMethods.GetModuleHandleW(null);
-        NativeMethods.WNDPROC wndProc = MenuWndProc;
-        MenuWndProcDelegate = wndProc; // root: the window's lifetime is bounded by this field
         var wc = new NativeMethods.WNDCLASSEX
         {
             cbSize = (uint)Marshal.SizeOf<NativeMethods.WNDCLASSEX>(),
-            lpfnWndProc = wndProc,
+            lpfnWndProc = MenuWndProcDispatcher,
             hInstance = hInstance,
             lpszClassName = MenuWindowClassName,
         };
@@ -396,8 +403,20 @@ public sealed class Win32OverlayHost : IOverlayHost, IMenuWindowHost
             NativeMethods.WS_POPUP,
             0, 0, 0, 0,
             IntPtr.Zero, IntPtr.Zero, hInstance, IntPtr.Zero);
+        if (_menuHwnd != 0) MenuHostsByHwnd[_menuHwnd] = this; // bind the window to THIS host
         _menuCreated = _menuHwnd != 0;
     }
+
+    // Routes a menu window's messages to its owning host (bound in CreateMenuWindowOnWorker).
+    // Windows can deliver messages during CreateWindowExW — before the binding exists — so an
+    // unbound hwnd falls back to DefWindowProc.
+    // Định tuyến message của cửa sổ menu về host sở hữu (được gắn trong CreateMenuWindowOnWorker).
+    // Windows có thể gửi message ngay trong CreateWindowExW — trước khi có gắn kết — nên hwnd chưa
+    // gắn rơi về DefWindowProc.
+    private static nint DispatchMenuWndProc(nint hWnd, uint msg, nint wParam, nint lParam) =>
+        MenuHostsByHwnd.TryGetValue(hWnd, out Win32OverlayHost? host)
+            ? host.MenuWndProc(hWnd, msg, wParam, lParam)
+            : NativeMethods.DefWindowProc(hWnd, msg, wParam, lParam);
 
     /// <summary>
     /// Extended window styles of the menu window: tool window (no Alt+Tab entry), topmost, layered
@@ -724,21 +743,34 @@ public sealed class Win32OverlayHost : IOverlayHost, IMenuWindowHost
                 _pressActive = false;
                 _dragging = false;
                 return IntPtr.Zero;
+
+            case NativeMethods.WM_NCDESTROY:
+                // The window is gone — drop the hwnd → host binding taken in CreateMenuWindowOnWorker.
+                // Cửa sổ không còn — bỏ gắn kết hwnd → host đã lấy trong CreateMenuWindowOnWorker.
+                MenuHostsByHwnd.TryRemove(hWnd, out _);
+                return NativeMethods.DefWindowProc(hWnd, msg, wParam, lParam);
         }
 
         return NativeMethods.DefWindowProc(hWnd, msg, wParam, lParam);
     }
 
-    // Decodes the packed screen point in a mouse/hit-test lParam: two signed 32-bit values on
-    // modern Windows (Vista+); legacy 16-bit encodings sign-extend into the dwords, so this is
-    // correct either way.
-    // Giải mã điểm desktop đóng gói trong lParam của message chuột/hit-test: hai giá trị có dấu
-    // 32-bit trên Windows hiện đại (Vista+); mã hóa 16-bit cũ được sign-extend vào dword nên cách
-    // này đúng cả hai trường hợp.
+    // Decodes the packed screen point in a mouse/hit-test lParam: two SIGNED 16-BIT words with X
+    // in the low word and Y in the high word — the packing Windows itself uses for WM_NCHITTEST
+    // and the mouse messages (the shape MAKELPARAM produces and GET_X_LPARAM/GET_Y_LPARAM read;
+    // negative coordinates sign-extend within their own 16-bit word). Reading it as two 32-bit
+    // dwords — the shape a previous revision assumed — decoded every real message into garbage
+    // (Y always 0, X the whole packed value), so every hit-test point fell outside the panel and
+    // every click fell through the menu (fixed 2026-11-12, T23e).
+    // Giải mã điểm desktop đóng gói trong lParam của message chuột/hit-test: hai từ 16-BIT có dấu
+    // với X ở word thấp và Y ở word cao — đúng cách Windows đóng gói cho WM_NCHITTEST và các
+    // message chuột (dạng MAKELPARAM tạo ra và GET_X_LPARAM/GET_Y_LPARAM đọc; toạ độ âm
+    // sign-extend trong chính word 16-bit của nó). Đọc thành hai dword 32-bit — dạng một bản sửa
+    // trước từng giả định — làm mọi message thật giải mã thành rác (Y luôn 0, X là cả giá trị đóng
+    // gói), nên mọi điểm hit-test rơi ngoài panel và mọi click rơi xuyên menu (sửa 2026-11-12, T23e).
     private static (int X, int Y) PointFromLParam(nint lParam)
     {
         long lp = lParam.ToInt64();
-        return ((int)(lp & 0xFFFFFFFF), (int)(lp >> 32));
+        return ((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF));
     }
 
     /// <summary>
@@ -773,6 +805,7 @@ public sealed class Win32OverlayHost : IOverlayHost, IMenuWindowHost
 
         internal const uint WM_QUIT = 0x0012;
         internal const uint WM_ERASEBKGND = 0x0014;
+        internal const uint WM_NCDESTROY = 0x0082;
         internal const uint WM_MOUSEMOVE = 0x0200;
         internal const uint WM_LBUTTONDOWN = 0x0201;
         internal const uint WM_LBUTTONUP = 0x0202;

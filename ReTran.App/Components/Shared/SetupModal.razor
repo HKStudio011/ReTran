@@ -268,5 +268,22 @@
         }
     }
 
-    private void Skip() => Coordinator.Skip();
+    private void Skip()
+    {
+        // Same _busy guard as the sibling buttons: Skip fires closeApp, so the modal must not take
+        // a second command while that is in flight.
+        // Cùng guard _busy như các nút sibling: Skip gọi closeApp, modal không được nhận lệnh thứ
+        // hai trong lúc lệnh đó đang chạy.
+        if (_busy) return;
+        _busy = true;
+        try
+        {
+            Coordinator.Skip();
+        }
+        finally
+        {
+            _busy = false;
+            StateHasChanged();
+        }
+    }
 }

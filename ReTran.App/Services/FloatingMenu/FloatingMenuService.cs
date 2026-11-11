@@ -32,6 +32,8 @@ namespace ReTran_App.Services.FloatingMenu;
 /// commit their result under it. Never take another service's gate while holding ours: the overlay
 /// service's IsEnabled getter and SetEnabled both take theirs, and its save fires settings.Changed
 /// synchronously back into our handler — so read what is needed under our gate and act on the outside.
+/// <see cref="OnPanelClicked"/>'s Overlay row follows the same discipline: it raises an intent flag
+/// under the gate and calls <see cref="ToggleOverlay"/> only after releasing it.
 /// Rendered bitmaps are cached per window size and handed to the host,
 /// which consumes them asynchronously on its worker thread — they are therefore kept alive (and
 /// reused) until <see cref="Dispose"/>, never disposed per draw.
@@ -44,7 +46,9 @@ namespace ReTran_App.Services.FloatingMenu;
 /// quả DƯỚI lock. Không bao giờ lấy gate của service khác khi đang giữ gate của mình: cả getter
 /// IsEnabled lẫn SetEnabled của service overlay đều lấy gate riêng của chúng, và lần lưu của nó phát
 /// settings.Changed đồng bộ trở lại handler của ta — nên đọc những gì cần dưới gate của mình rồi
-/// hành động ở bên ngoài. Bitmap render được cache theo cỡ window và đưa cho host — host tiêu thụ
+/// hành động ở bên ngoài; row Lớp phủ của <see cref="OnPanelClicked"/> theo đúng kỷ luật đó — dựng cờ
+/// intent dưới gate rồi chỉ gọi <see cref="ToggleOverlay"/> sau khi nhả gate.
+/// Bitmap render được cache theo cỡ window và đưa cho host — host tiêu thụ
 /// chúng bất đồng bộ trên worker thread — nên chúng được giữ sống (và tái sử dụng) đến Dispose,
 /// không dispose sau mỗi lần vẽ.
 /// </remarks>
@@ -90,8 +94,11 @@ public sealed class FloatingMenuService : IDisposable
     private bool _disposed;
 
     /// <summary>
-    /// Creates the service and subscribes to the pipeline, settings and stats change events.
-    /// Tạo service và đăng ký event thay đổi của pipeline, cài đặt và thống kê.
+    /// Creates the service and subscribes to the pipeline, settings and stats change events plus
+    /// the host's two window intents (<see cref="IMenuWindowHost.PanelClicked"/> and
+    /// <see cref="IMenuWindowHost.DragFinished"/>).
+    /// Tạo service và đăng ký event thay đổi của pipeline, cài đặt và thống kê cùng hai intent cửa
+    /// sổ của host (<see cref="IMenuWindowHost.PanelClicked"/> và <see cref="IMenuWindowHost.DragFinished"/>).
     /// </summary>
     /// <param name="settings">Settings store — every intent persists through it immediately. Nơi lưu cài đặt — mỗi intent lưu qua nó ngay.</param>
     /// <param name="overlay">Overlay toggle surface (the local game overlay window). Bề mặt bật/tắt lớp phủ (cửa sổ overlay game local).</param>
@@ -531,6 +538,15 @@ public sealed class FloatingMenuService : IDisposable
     /// <param name="y">Click Y in panel coordinates. Toạ độ Y click trong hệ panel.</param>
     public void OnPanelClicked(int x, int y)
     {
+        // The Overlay row is dispatched AFTER the gate (flag → call below): ToggleOverlay chains into
+        // the overlay service's gate and its save fires settings.Changed synchronously back into
+        // RequestRedraw, which needs our gate — calling it while we hold ours would form the ABBA
+        // pair (menu gate ↔ overlay gate) with whichever thread is mid-save in the overlay service.
+        // Row Lớp phủ được dispatch SAU gate (cờ → gọi bên dưới): ToggleOverlay nối vào gate của
+        // service overlay và lần lưu của nó phát settings.Changed đồng bộ trở lại RequestRedraw cần
+        // gate của ta — gọi nó trong lúc ta đang giữ gate sẽ tạo cặp ABBA (gate menu ↔ gate overlay)
+        // với bất kỳ thread nào đang lưu giữa chừng trong service overlay.
+        bool toggleOverlay = false;
         lock (_gate)
         {
             if (_disposed || !_visible) return;
@@ -570,7 +586,7 @@ public sealed class FloatingMenuService : IDisposable
                     break;
 
                 case FloatingMenuLayout.RowOverlay:
-                    ToggleOverlay();
+                    toggleOverlay = true; // dispatched below, outside _gate — see the method's first remark
                     break;
 
                 case FloatingMenuLayout.RowDst:
@@ -612,6 +628,8 @@ public sealed class FloatingMenuService : IDisposable
                     break;
             }
         }
+
+        if (toggleOverlay) ToggleOverlay(); // outside _gate — the ABBA pair with the overlay service
     }
 
     /// <summary>
