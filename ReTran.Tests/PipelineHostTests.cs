@@ -1237,4 +1237,68 @@ public class PipelineHostTests
         Assert.Equal("ko", sent["src"]!.GetValue<string>());
         Assert.Equal("""{"src":"ko"}""", parented.ToJsonString()); // caller's node untouched
     }
+
+    //
+    // sidecar.ping / sidecar.device proxies — the setup wizard's liveness and GPU-CC probes
+    // go through the core; without these proxies serve mode answers -32601 and the
+    // VerifyingSidecar step can never pass (smoke-blocker, task 23c).
+    // Proxy sidecar.ping / sidecar.device — phép thử sống và phép dò CC GPU của wizard thiết
+    // lập đi qua core; thiếu các proxy này serve mode trả -32601 và bước VerifyingSidecar
+    // không bao giờ qua được (smoke-blocker, task 23c).
+    //
+
+    [Fact]
+    public async Task SidecarPing_ForwardsAndReturnsPong()
+    {
+        var rpc = new FakeSidecarRpc();
+        rpc.ResultsByMethod["sidecar.ping"] = JsonValue.Create("pong");
+        await using var host = CreateHost(rpc, RegistryWith(new CountingTranslator()), new JsonRpcServer());
+
+        JsonNode? result = await host.SidecarPingAsync(null, CancellationToken.None);
+
+        Assert.Equal("pong", result!.GetValue<string>());
+
+        // The sidecar must see exactly the verb the wizard sends, with no params.
+        // Sidecar phải thấy đúng verb mà wizard gửi, không params.
+        (string method, JsonNode? sent) = Assert.Single(rpc.Calls.Where(c => c.Method == "sidecar.ping").ToArray());
+        Assert.Equal("sidecar.ping", method);
+        Assert.Null(sent);
+    }
+
+    [Fact]
+    public async Task SidecarDevice_ForwardsAndReturnsCapability()
+    {
+        var rpc = new FakeSidecarRpc();
+        rpc.ResultsByMethod["sidecar.device"] = JsonNode.Parse(
+            """{"device":"gpu:0","capability":[12,0]}""")!;
+        await using var host = CreateHost(rpc, RegistryWith(new CountingTranslator()), new JsonRpcServer());
+
+        JsonNode? result = await host.SidecarDeviceAsync(null, CancellationToken.None);
+
+        Assert.Equal("gpu:0", result!["device"]!.GetValue<string>());
+        Assert.Equal(12, result["capability"]![0]!.GetValue<int>());
+        Assert.Equal(0, result["capability"]![1]!.GetValue<int>());
+
+        // Forwarded verbatim: same method, no params — the reply rides back untouched.
+        // Chuyển tiếp nguyên văn: đúng method, không params — phản hồi quay về nguyên trạng.
+        (string method, JsonNode? sent) = Assert.Single(rpc.Calls.Where(c => c.Method == "sidecar.device").ToArray());
+        Assert.Equal("sidecar.device", method);
+        Assert.Null(sent);
+    }
+
+    [Fact]
+    public async Task SidecarProxies_NullRpc_Throw32603()
+    {
+        await using var host = CreateHost(rpc: null, RegistryWith(new CountingTranslator()), new JsonRpcServer());
+
+        var ping = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.SidecarPingAsync(null, CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InternalError, ping.Code);
+        Assert.Equal("sidecar not available (python/venv missing or spawn failed).", ping.Message);
+
+        var device = await Assert.ThrowsAsync<RpcMethodException>(
+            () => host.SidecarDeviceAsync(null, CancellationToken.None));
+        Assert.Equal(RpcErrorCodes.InternalError, device.Code);
+        Assert.Equal("sidecar not available (python/venv missing or spawn failed).", device.Message);
+    }
 }

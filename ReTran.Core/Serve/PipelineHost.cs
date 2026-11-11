@@ -439,6 +439,32 @@ public sealed class PipelineHost : IAsyncDisposable
         ForwardToSidecarAsync("ocr.models.recommend", @params, ct);
 
     /// <summary>
+    /// Proxies <c>sidecar.ping</c> to the sidecar: forwards the verb verbatim and returns
+    /// <c>"pong"</c> while the sidecar is alive — the setup wizard's liveness probe.
+    /// Proxy <c>sidecar.ping</c> sang sidecar: chuyển tiếp verb nguyên văn và trả
+    /// <c>"pong"</c> khi sidecar còn sống — phép thử sống của wizard thiết lập.
+    /// </summary>
+    /// <param name="params">Ignored by the sidecar; forwarded verbatim. Sidecar không dùng; chuyển tiếp nguyên văn.</param>
+    /// <param name="ct">Token for the sidecar call. Token cho lời gọi sidecar.</param>
+    /// <returns>The sidecar's <c>"pong"</c> reply, unchanged. Phản hồi <c>"pong"</c> của sidecar, nguyên trạng.</returns>
+    /// <exception cref="RpcMethodException">-32603 when the sidecar is unavailable. -32603 khi sidecar không sẵn sàng.</exception>
+    public Task<JsonNode?> SidecarPingAsync(JsonNode? @params, CancellationToken ct) =>
+        ForwardToSidecarAsync("sidecar.ping", @params, ct);
+
+    /// <summary>
+    /// Proxies <c>sidecar.device</c> to the sidecar: the active device plus its GPU compute
+    /// capability <c>{device, capability:[major,minor]}</c> — the setup wizard's CC gate probe.
+    /// Proxy <c>sidecar.device</c> sang sidecar: thiết bị đang hoạt động kèm compute capability
+    /// GPU <c>{device, capability:[major,minor]}</c> — phép dò cổng CC của wizard thiết lập.
+    /// </summary>
+    /// <param name="params">Ignored by the sidecar; forwarded verbatim. Sidecar không dùng; chuyển tiếp nguyên văn.</param>
+    /// <param name="ct">Token for the sidecar call. Token cho lời gọi sidecar.</param>
+    /// <returns>The sidecar's <c>{device, capability}</c> reply, unchanged. Phản hồi <c>{device, capability}</c> của sidecar, nguyên trạng.</returns>
+    /// <exception cref="RpcMethodException">-32603 when the sidecar is unavailable. -32603 khi sidecar không sẵn sàng.</exception>
+    public Task<JsonNode?> SidecarDeviceAsync(JsonNode? @params, CancellationToken ct) =>
+        ForwardToSidecarAsync("sidecar.device", @params, ct);
+
+    /// <summary>
     /// Tells whether a pipeline session currently occupies the slot (evaluated under the
     /// session lock, so it cannot race the start/stop state toggles).
     /// Cho biết slot hiện có phiên pipeline đang chạy hay không (đánh giá dưới lock phiên,
