@@ -625,15 +625,19 @@ public sealed class Win32OverlayHost : IOverlayHost, IMenuWindowHost
     /// <summary>
     /// Menu window procedure (instance method — it owns the drag state). Handles: WM_ERASEBKGND
     /// (layered → never erase), WM_NCHITTEST (HTTRANSPARENT outside the rounded panel, HTCLIENT
-    /// inside), and the press/drag/click state machine on WM_LBUTTONDOWN / WM_MOUSEMOVE /
-    /// WM_LBUTTONUP with mouse capture held for the duration of a press. Everything else goes to
-    /// DefWindowProc. Deliberately never calls SetForegroundWindow/Activate — the menu must not
-    /// steal focus from a game.
+    /// inside), WM_MOUSEACTIVATE (MA_NOACTIVATE — a real click must not activate the window) and
+    /// the press/drag/click state machine on WM_LBUTTONDOWN / WM_MOUSEMOVE / WM_LBUTTONUP with
+    /// mouse capture held for the duration of a press. Mouse-message points arrive in CLIENT
+    /// coordinates and are translated to screen coordinates before entering that state machine.
+    /// Everything else goes to DefWindowProc. Deliberately never calls
+    /// SetForegroundWindow/Activate — the menu must not steal focus from a game.
     /// Thủ tục cửa sổ của menu (instance method — sở hữu state kéo). Xử lý: WM_ERASEBKGND
     /// (layered → không bao giờ xóa nền), WM_NCHITTEST (HTTRANSPARENT ngoài panel bo tròn,
-    /// HTCLIENT bên trong) và máy trạng thái nhấn/kéo/click trên WM_LBUTTONDOWN / WM_MOUSEMOVE /
-    /// WM_LBUTTONUP. Phần còn lại chuyển DefWindowProc. Cố ý KHÔNG gọi SetForegroundWindow/Activate
-    /// — menu không được cướp focus của game.
+    /// HTCLIENT bên trong), WM_MOUSEACTIVATE (MA_NOACTIVATE — click thật không được kích hoạt cửa
+    /// sổ) và máy trạng thái nhấn/kéo/click trên WM_LBUTTONDOWN / WM_MOUSEMOVE / WM_LBUTTONUP, giữ
+    /// mouse capture suốt thời gian nhấn. Điểm trong message chuột đến theo toạ độ CLIENT và được
+    /// dịch sang toạ độ màn hình trước khi vào máy trạng thái đó. Phần còn lại chuyển DefWindowProc.
+    /// Cố ý KHÔNG gọi SetForegroundWindow/Activate — menu không được cướp focus của game.
     /// </summary>
     private nint MenuWndProc(nint hWnd, uint msg, nint wParam, nint lParam)
     {
@@ -658,9 +662,11 @@ public sealed class Win32OverlayHost : IOverlayHost, IMenuWindowHost
 
             case NativeMethods.WM_LBUTTONDOWN:
             {
-                // A press can only arrive inside the rounded panel (WM_NCHITTEST filters the rest).
-                // Nhấn chỉ có thể đến khi nằm trong panel bo tròn (WM_NCHITTEST lọc phần còn lại).
-                var (sx, sy) = PointFromLParam(lParam);
+                // A press can only arrive inside the rounded panel (WM_NCHITTEST filters the rest),
+                // and its lParam carries CLIENT coordinates — see ScreenPointFromMouseLParam.
+                // Nhấn chỉ có thể đến khi nằm trong panel bo tròn (WM_NCHITTEST lọc phần còn lại), và
+                // lParam của nó mang toạ độ CLIENT — xem ScreenPointFromMouseLParam.
+                var (sx, sy) = ScreenPointFromMouseLParam(hWnd, lParam);
                 _pressActive = true;
                 _dragging = false;
                 _pressScreenX = sx;
@@ -694,7 +700,7 @@ public sealed class Win32OverlayHost : IOverlayHost, IMenuWindowHost
                 if (!_pressActive)
                     return NativeMethods.DefWindowProc(hWnd, msg, wParam, lParam);
 
-                var (sx, sy) = PointFromLParam(lParam);
+                var (sx, sy) = ScreenPointFromMouseLParam(hWnd, lParam);
                 int dx = sx - _pressScreenX;
                 int dy = sy - _pressScreenY;
 
@@ -712,7 +718,7 @@ public sealed class Win32OverlayHost : IOverlayHost, IMenuWindowHost
 
             case NativeMethods.WM_LBUTTONUP:
             {
-                var (sx, sy) = PointFromLParam(lParam);
+                var (sx, sy) = ScreenPointFromMouseLParam(hWnd, lParam);
                 bool dragged = _dragging;
                 _pressActive = false; // reset before firing — handlers may re-enter the host
                 _dragging = false;
@@ -744,6 +750,19 @@ public sealed class Win32OverlayHost : IOverlayHost, IMenuWindowHost
                 _dragging = false;
                 return IntPtr.Zero;
 
+            case NativeMethods.WM_MOUSEACTIVATE:
+                // MA_NOACTIVATE: deliver the click but never activate — WS_EX_NOACTIVATE alone did
+                // not prevent it (the DefWindowProc default answer is MA_ACTIVATE, and a real click
+                // made the system activate the menu window: WM_ACTIVATEAPP(WA_ACTIVE) +
+                // WM_ACTIVATE(WA_CLICKACTIVE) + WM_SETFOCUS reached this WndProc, dragging the app
+                // and the keyboard focus away from the game). Verified live 2026-11-12, T23f.
+                // MA_NOACTIVATE: gửi click nhưng không bao giờ kích hoạt — chỉ WS_EX_NOACTIVATE là
+                // không đủ (câu trả lời mặc định của DefWindowProc là MA_ACTIVATE, và một click thật
+                // làm hệ thống kích hoạt cửa sổ menu: WM_ACTIVATEAPP(WA_ACTIVE) +
+                // WM_ACTIVATE(WA_CLICKACTIVE) + WM_SETFOCUS đã đến WndProc này, kéo app và focus bàn
+                // phím khỏi game). Đã đo trực tiếp 2026-11-12, T23f.
+                return new nint(NativeMethods.MA_NOACTIVATE);
+
             case NativeMethods.WM_NCDESTROY:
                 // The window is gone — drop the hwnd → host binding taken in CreateMenuWindowOnWorker.
                 // Cửa sổ không còn — bỏ gắn kết hwnd → host đã lấy trong CreateMenuWindowOnWorker.
@@ -754,23 +773,50 @@ public sealed class Win32OverlayHost : IOverlayHost, IMenuWindowHost
         return NativeMethods.DefWindowProc(hWnd, msg, wParam, lParam);
     }
 
-    // Decodes the packed screen point in a mouse/hit-test lParam: two SIGNED 16-BIT words with X
-    // in the low word and Y in the high word — the packing Windows itself uses for WM_NCHITTEST
-    // and the mouse messages (the shape MAKELPARAM produces and GET_X_LPARAM/GET_Y_LPARAM read;
-    // negative coordinates sign-extend within their own 16-bit word). Reading it as two 32-bit
-    // dwords — the shape a previous revision assumed — decoded every real message into garbage
-    // (Y always 0, X the whole packed value), so every hit-test point fell outside the panel and
-    // every click fell through the menu (fixed 2026-11-12, T23e).
-    // Giải mã điểm desktop đóng gói trong lParam của message chuột/hit-test: hai từ 16-BIT có dấu
-    // với X ở word thấp và Y ở word cao — đúng cách Windows đóng gói cho WM_NCHITTEST và các
-    // message chuột (dạng MAKELPARAM tạo ra và GET_X_LPARAM/GET_Y_LPARAM đọc; toạ độ âm
-    // sign-extend trong chính word 16-bit của nó). Đọc thành hai dword 32-bit — dạng một bản sửa
-    // trước từng giả định — làm mọi message thật giải mã thành rác (Y luôn 0, X là cả giá trị đóng
-    // gói), nên mọi điểm hit-test rơi ngoài panel và mọi click rơi xuyên menu (sửa 2026-11-12, T23e).
+    // Decodes the packed point in a mouse/hit-test lParam: two SIGNED 16-BIT words with X in the
+    // low word and Y in the high word — the packing Windows itself uses for WM_NCHITTEST and the
+    // mouse messages (the shape MAKELPARAM produces and GET_X_LPARAM/GET_Y_LPARAM read; negative
+    // coordinates sign-extend within their own 16-bit word). Reading it as two 32-bit dwords — the
+    // shape a previous revision assumed — decoded every real message into garbage (Y always 0, X
+    // the whole packed value), so every hit-test point fell outside the panel and every click fell
+    // through the menu (fixed 2026-11-12, T23e). The two message families differ in SPACE, not in
+    // packing: WM_NCHITTEST packs a SCREEN point, the mouse messages pack a CLIENT point — see
+    // ScreenPointFromMouseLParam (fixed 2026-11-12, T23f).
+    // Giải mã điểm đóng gói trong lParam của message chuột/hit-test: hai từ 16-BIT có dấu với X ở
+    // word thấp và Y ở word cao — đúng cách Windows đóng gói cho WM_NCHITTEST và các message chuột
+    // (dạng MAKELPARAM tạo ra và GET_X_LPARAM/GET_Y_LPARAM đọc; toạ độ âm sign-extend trong chính
+    // word 16-bit của nó). Đọc thành hai dword 32-bit — dạng một bản sửa trước từng giả định — làm
+    // mọi message thật giải mã thành rác (Y luôn 0, X là cả giá trị đóng gói), nên mọi điểm hit-test
+    // rơi ngoài panel và mọi click rơi xuyên menu (sửa 2026-11-12, T23e). Hai họ message khác nhau ở
+    // KHÔNG GIAN, không ở cách đóng gói: WM_NCHITTEST đóng gói điểm MÀN HÌNH, còn message chuột đóng
+    // gói điểm CLIENT — xem ScreenPointFromMouseLParam (sửa 2026-11-12, T23f).
     private static (int X, int Y) PointFromLParam(nint lParam)
     {
         long lp = lParam.ToInt64();
         return ((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF));
+    }
+
+    /// <summary>
+    /// Screen point of a MOUSE message (WM_MOUSEMOVE / WM_LBUTTONDOWN / WM_LBUTTONUP): those pack
+    /// the cursor position in CLIENT coordinates — relative to the window's client area — while the
+    /// press/drag/click math works in screen coordinates, so the window origin is added back here.
+    /// WM_NCHITTEST and the wheel messages are the ones that already carry screen coordinates and
+    /// must NOT go through this helper. The origin is read at this moment, which is exactly the
+    /// origin Windows used to pack the message.
+    /// Điểm màn hình của message CHUỘT (WM_MOUSEMOVE / WM_LBUTTONDOWN / WM_LBUTTONUP): chúng đóng gói
+    /// vị trí con trỏ theo toạ độ CLIENT — tương đối với vùng client của cửa sổ — trong khi phép tính
+    /// nhấn/kéo/click làm việc theo toạ độ màn hình, nên gốc cửa sổ được cộng lại ở đây. WM_NCHITTEST
+    /// và các message bánh xe mới là loại đã mang toạ độ màn hình — KHÔNG được đi qua helper này. Gốc
+    /// được đọc ngay lúc này, đúng bằng gốc Windows đã dùng để đóng gói message.
+    /// </summary>
+    /// <param name="hWnd">The menu window that received the message. Cửa sổ menu nhận message.</param>
+    /// <param name="lParam">The message's lParam (two signed 16-bit client coordinates). lParam của message (hai toạ độ client 16-bit có dấu).</param>
+    /// <returns>The same point in desktop physical pixels, or the raw point when the rect is unavailable. Cùng điểm đó theo pixel vật lý desktop, hoặc điểm thô khi không đọc được rect.</returns>
+    private static (int X, int Y) ScreenPointFromMouseLParam(nint hWnd, nint lParam)
+    {
+        var (cx, cy) = PointFromLParam(lParam);
+        if (!NativeMethods.GetWindowRect(hWnd, out NativeMethods.RECT rect)) return (cx, cy);
+        return (cx + rect.Left, cy + rect.Top);
     }
 
     /// <summary>
@@ -803,14 +849,23 @@ public sealed class Win32OverlayHost : IOverlayHost, IMenuWindowHost
         internal const int HTCLIENT = 1;
         internal const int HTTRANSPARENT = -1;
 
+        // WM_MOUSEACTIVATE answer: hand the click over without activating the window.
+        // Câu trả lời WM_MOUSEACTIVATE: nhận click mà không kích hoạt cửa sổ.
+        internal const int MA_NOACTIVATE = 3;
+
         internal const uint WM_QUIT = 0x0012;
         internal const uint WM_ERASEBKGND = 0x0014;
+        internal const uint WM_MOUSEACTIVATE = 0x0021;
         internal const uint WM_NCDESTROY = 0x0082;
+        internal const uint WM_NCHITTEST = 0x0084;
         internal const uint WM_MOUSEMOVE = 0x0200;
         internal const uint WM_LBUTTONDOWN = 0x0201;
         internal const uint WM_LBUTTONUP = 0x0202;
-        internal const uint WM_CAPTURECHANGED = 0x0210;
-        internal const uint WM_NCHITTEST = 0x0084;
+        // 0x0215 — the previous value 0x0210 is WM_PARENTNOTIFY, so the capture-lost reset below
+        // never ran; the live trace showed 0x0215 arriving on every release (fixed 2026-11-12, T23f).
+        // 0x0215 — giá trị cũ 0x0210 là WM_PARENTNOTIFY nên nhánh xoá state khi mất capture bên dưới
+        // chưa bao giờ chạy; trace trực tiếp cho thấy 0x0215 đến ở mọi lần nhả (sửa 2026-11-12, T23f).
+        internal const uint WM_CAPTURECHANGED = 0x0215;
         internal const uint PM_REMOVE = 0x0001;
 
         // ULW_ALPHA (not ULW_OPAQUE): the overlay is per-pixel transparent over the game.
