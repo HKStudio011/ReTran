@@ -14,9 +14,10 @@
 
 - **Không `git add -A`.** Repo có nhiều file WIP của user. Mỗi commit chỉ `git add` đúng các file của task. Không push. Branch `master`.
 - Build chuẩn: `dotnet build "ReTran Project.slnx"` → 0 error (warning `xUnit1051` có sẵn).
-- Test chuẩn: `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj" -- --filter-class "<TênĐầyĐủ>"`. Test Core mang prefix `RetranCore.Tests.`; test App/root ở global namespace. **Baseline đã đo 2026-11-13: 486 passed / 0 failed.** Mọi task phải giữ nguyên con số đó trở lên.
+- Test chuẩn: `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj" -- --filter-class "<TênĐầyĐủ>"`. Test Core mang prefix `RetranCore.Tests.`; test App/root ở global namespace. **Baseline đã đo lại 2026-11-13 sau merge floating-menu (9934b51): 742 passed / 0 failed.** Mọi task phải giữ nguyên con số đó trở lên.
 - **Hai bản `BoxAnnotationStyle` (Core + App) phải giống nhau từng dòng logic** — sửa bản nào thì chép sang bản kia ngay trong cùng task; có test `BoxAnnotationStyleSyncTests` ghim hằng số (Task 2).
 - `Fit` signature mới (bỏ `maxLines`, `shrink`): cập nhật **mọi** call site — `FrameAnnotator.cs`, `Win32OverlayHost.cs`, `BoxAnnotationStyleTests.cs` (helper). `TruncateToFit` **giữ nguyên chữ ký**, chỉ còn dùng ở guard viewport.
+- Bản App `BoxAnnotationStyle` đang được **menu nổi + tray dùng chung** (`FloatingMenuRenderer`, `TrayIconSource`: màu, `GetFont`, `CreateTextFormat`, `BuildRoundedRect`, `TruncateToFit`, `PadX/PadY`, `DecorationScale` — vừa merge 9934b51). Plan này **chỉ đổi chữ ký `Fit`** (+ logic `Measure`); không được đổi các API còn lại, không đụng phần menu trong `Win32OverlayHost`.
 - Không đổi màu/mockup/viền/bo góc/vị trí box; không đổi wire; không thêm settings.
 - Ngân sách `AGENTS.md`: annotate ≤ 40 ms/khung @ ~60 box — chạy lại `dotnet run -c Debug --project Tools/Perf/annotbench` ở Task 4.
 - Trang OBS không có harness JS ⇒ Task 3 verify bằng checklist tay (mục "DEFERRED TO CONTROLLER"); không đụng `ReTran.App/wwwroot/build/`.
@@ -83,7 +84,7 @@ Năm failure mode spec ngụ ý nhưng không task nào tự phủ — mỗi dò
 
 **Files:**
 - Modify: `ReTran.App/Services/OverlayWindow/BoxAnnotationStyle.cs` (chép y hệt Task 1, giữ `internal`)
-- Modify: `ReTran.App/Services/OverlayWindow/Win32OverlayHost.cs` (`DrawBoxes` :232-292)
+- Modify: `ReTran.App/Services/OverlayWindow/Win32OverlayHost.cs` (`DrawBoxes` :509-569 — chỉ khối này + doc của nó; file cũng chứa host menu nổi, không đụng phần menu)
 - Modify: `ReTran.Tests/Overlay/Win32OverlayHostRenderTests.cs` (+1 test)
 - Create: `ReTran.Tests/BoxAnnotationStyleSyncTests.cs`
 
@@ -101,8 +102,8 @@ Năm failure mode spec ngụ ý nhưng không task nào tự phủ — mỗi dò
   - `BoxAnnotationStyleSyncTests` (file mới, namespace `ReTran.Tests`, alias `Core` = `ReTran.Core.Serve.BoxAnnotationStyle`, `App` = `ReTran_App.Services.OverlayWindow.BoxAnnotationStyle` — cả hai internal, ReTran.Tests đã có InternalsVisibleTo hai bên):
     - `ConstantsMatch`: `Assert.Equal` cho `Inset`, `MinFontSize`, `MaxFontSize`, `FontHeightRatio`, `PadX(20)`, `PadY(20)`.
 - [ ] **Step 2: Chạy test — xác nhận fail** (`Win32OverlayHostRenderTests`, `BoxAnnotationStyleSyncTests`).
-- [ ] **Step 3: Implement** — chép `Fit`/`Measure`/doc từ bản Core sang bản App (giữ nguyên namespace/`internal`); sửa `DrawBoxes` (xoá `maxLines`, guard viewport). `Fit_FontSizeGrowsWithBoxHeight`... helper trong test không đổi. Cập nhật comment "tối đa hai dòng wrap — bốn dòng..." ở doc `DrawBoxes` :220-227 cho khớp hành vi mới.
-- [ ] **Step 4: Chạy test — pass** + full suite ≥ 486 + ~9 test mới/task nhóm này.
+- [ ] **Step 3: Implement** — chép `Fit`/`Measure`/doc từ bản Core sang bản App (giữ nguyên namespace/`internal`); sửa `DrawBoxes` (xoá `maxLines`, guard viewport). `Fit_FontSizeGrowsWithBoxHeight`... helper trong test không đổi. Cập nhật comment "tối đa hai dòng wrap — bốn dòng..." ở doc `DrawBoxes` :496-503 cho khớp hành vi mới.
+- [ ] **Step 4: Chạy test — pass** + full suite ≥ 742 + ~9 test mới/task nhóm này.
 - [ ] **Step 5: Commit**
   ```bash
   git add "ReTran.App/Services/OverlayWindow/BoxAnnotationStyle.cs" "ReTran.App/Services/OverlayWindow/Win32OverlayHost.cs" "ReTran.Tests/Overlay/Win32OverlayHostRenderTests.cs" "ReTran.Tests/BoxAnnotationStyleSyncTests.cs"
@@ -141,7 +142,7 @@ Năm failure mode spec ngụ ý nhưng không task nào tự phủ — mỗi dò
 
 - [ ] **Step 1: Sửa `overlay.css` + `overlay.js`** theo Interfaces (giữ IIFE/ES5 style hiện có, không external resource).
 - [ ] **Step 2: Kiểm tra cú pháp** — `node --check "ReTran.App/wwwroot/overlay-feed/overlay.js"` → exit 0.
-- [ ] **Step 3: Checklist tay — DEFERRED TO CONTROLLER** (subagent không thấy desktop; mở app, Start pipeline, mở URL overlay trên thẻ OBS trang Home bằng Chrome):
+- [ ] **Step 3: Checklist tay — DEFERRED TO CONTROLLER** (subagent không thấy desktop; mở app, Start pipeline, **bật công tắc `Lớp phủ`** — mới từ merge 9934b51: tắt thì feed gửi `boxes:[]` — rồi mở `http://127.0.0.1:17863/overlay` (URL/port thật trên thẻ OBS trang Home) bằng Chrome):
   1. Box gộp nhiều dòng: chữ to hơn rõ và dùng gần hết bề dọc box (không còn nửa dưới trống như trước).
   2. Box nhỏ + bản dịch dài: pill nở xuống dưới đáy box, chữ đọc được, **không bị cắt** trên/dưới (khác hẳn trước).
   3. Resize cửa sổ Chrome 1920×1080: box cao nhận font tới ~60px (cap scale theo canvas); 1280×720: cap 40px.
@@ -161,7 +162,7 @@ Năm failure mode spec ngụ ý nhưng không task nào tự phủ — mỗi dò
 - Modify: `Docs/performance.md` (mục ngắn "overlay text fit")
 - No code.
 
-- [ ] **Step 1: Build + test full** — `dotnet build "ReTran Project.slnx"` (0 error); `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj"` ⇒ toàn bộ PASS, ≥ 486 + ~10 test mới.
+- [ ] **Step 1: Build + test full** — `dotnet build "ReTran Project.slnx"` (0 error); `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj"` ⇒ toàn bộ PASS, ≥ 742 + ~10 test mới.
 - [ ] **Step 2: Chạy annotbench** — `dotnet run -c Debug --project Tools/Perf/annotbench` ⇒ annotate ≤ 40 ms/khung (benchmark code thật, frame 1920×1080); đối chiếu số cũ trong `Docs/performance.md` §annotate.
 - [ ] **Step 3: Smoke có tương tác — DEFERRED TO CONTROLLER** (đối chiếu bảng §1 spec): preview trong app + overlay trên game + OBS — box gộp cao chữ to hơn/không thừa chỗ; box nhỏ chữ không bị cắt "…" nữa (pill nở); không có hồi quy màu/viền/tick.
 - [ ] **Step 4: Ghi `Docs/performance.md`** — mục ngắn: công thức fit mới (vẫn binary search, số bước tương đương); số annotbench đo được; trang OBS thêm 1 phép đo layout/box (element đo tái sử dụng).

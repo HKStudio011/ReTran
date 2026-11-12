@@ -14,8 +14,8 @@
 
 - **Không `git add -A`.** Repo có nhiều file WIP của user. Mỗi commit chỉ `git add` đúng các file của task. Không push. Branch `master`.
 - Build chuẩn: `dotnet build "ReTran Project.slnx"` → 0 error (warning `xUnit1051` có sẵn).
-- Test chuẩn: `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj" -- --filter-class "<TênĐầyĐủ>"`. Test Core mang prefix `RetranCore.Tests.`; test App ở global namespace. **Baseline đã đo 2026-11-13: 486 passed / 0 failed.** Mọi task phải giữ nguyên con số đó trở lên.
-- `ITranslator` là interface public — **default interface implementation** bắt buộc để 486 test hiện có xanh nguyên (stub cũ chỉ implement `TranslateAsync`).
+- Test chuẩn: `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj" -- --filter-class "<TênĐầyĐủ>"`. Test Core mang prefix `RetranCore.Tests.`; test App ở global namespace. **Baseline đã đo lại 2026-11-13 sau merge floating-menu (9934b51): 742 passed / 0 failed.** Mọi task phải giữ nguyên con số đó trở lên.
+- `ITranslator` là interface public — **default interface implementation** bắt buộc để 742 test hiện có xanh nguyên (stub cũ chỉ implement `TranslateAsync`).
 - Không đổi hành vi đường lẻ `TranslateAsync`/`Parse` (test cũ phải xanh không sửa assert; chỉ được phép sửa comment).
 - Hằng số lô `MaxBatchUrlLength = 1800` là `public const` (đo được: URL 1.474 ký tự OK với 12 dòng; test không truy cập private).
 - Fallback CHỈ khi `FormatException` (mapping/parse sai). Lỗi HTTP/timeout/429 → cả lô thất bại, ghi stderr, không retry trong phiên (giữ nguyên M4 §4.2).
@@ -159,7 +159,7 @@ Năm failure mode spec ngụ ý nhưng không task nào tự phủ — mỗi dò
 - Modify: `Docs/performance.md` (mục ngắn "M4-batch")
 - No code.
 
-- [ ] **Step 1: Build + test full** — `dotnet build "ReTran Project.slnx"` (0 error); `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj"` ⇒ toàn bộ PASS, ≥ 486 + ~11 test mới.
+- [ ] **Step 1: Build + test full** — `dotnet build "ReTran Project.slnx"` (0 error); `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj"` ⇒ toàn bộ PASS, ≥ 742 + ~11 test mới.
 - [ ] **Step 2: Smoke có tương tác — DEFERRED TO CONTROLLER** (subagent không thấy desktop):
   1. Start pipeline trên cửa sổ nhiều text mới (menu game) → bản dịch vẫn hiện đủ từng box sau 1–2 chu kỳ.
   2. Text cố định (cache hit) → không phát sinh request; text mới đổi liên tục → vẫn mượt, không log "falling back to per-text" liên tục.
