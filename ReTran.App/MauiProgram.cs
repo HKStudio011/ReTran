@@ -4,6 +4,7 @@ using Microsoft.Maui.LifecycleEvents;
 using ReTran_App.Core;
 using ReTran_App.Data;
 using ReTran_App.Services;
+using ReTran_App.Services.Diagnostics;
 using ReTran_App.Services.FloatingMenu;
 using ReTran_App.Services.OverlayFeed;
 using ReTran_App.Services.OverlayWindow;
@@ -162,7 +163,19 @@ namespace ReTran_App
 
 #if DEBUG
     		builder.Services.AddBlazorWebViewDeveloperTools();
-    		builder.Logging.AddDebug();
+    		// App logs must be observable in a Debug build. AddDebug cannot do that here: its
+    		// Debug.WriteLine calls live in a Release-built NuGet assembly, so [Conditional("DEBUG")]
+    		// strips them and every ILogger write vanishes without a trace (the 2026-11-13 tray
+    		// investigation ran blind on exactly that — three captured sessions, zero app log lines).
+    		// TraceLoggerProvider writes through Trace.WriteLine instead, compiled into this app's own
+    		// Debug build, so the text reaches OutputDebugString/DebugView.
+    		// Log của app phải quan sát được trong build Debug. AddDebug không làm được điều đó ở đây:
+    		// các lời gọi Debug.WriteLine của nó nằm trong assembly NuGet build Release nên bị
+    		// [Conditional("DEBUG")] strip, mọi lần ghi ILogger biến mất không dấu vết (cuộc điều tra
+    		// tray 2026-11-13 đi mù đúng vì điều này — ba phiên capture, không một dòng log app nào).
+    		// TraceLoggerProvider ghi qua Trace.WriteLine, được compile vào chính build Debug của app,
+    		// nên nội dung tới được OutputDebugString/DebugView.
+    		builder.Logging.AddProvider(new TraceLoggerProvider());
 #endif
 
             // Hook the primary window: pressing X hides it to the tray, and the tray icon is
@@ -180,42 +193,66 @@ namespace ReTran_App
                 var ordinal = Interlocked.Increment(ref windowOrdinal);
                 if (!WindowHooks.ShouldHookWindow(ordinal)) return; // chỉ window chính (Review Focus #5)
 
+                IServiceProvider? services = IPlatformApplication.Current?.Services; // pattern repo, xem App.xaml.cs:10
+                if (services is null) return;
+
+                // The close-to-tray bridge and the tray icon start in SEPARATE try blocks, on purpose:
+                // they fail independently. Attach activates WinRT (GetWindowHandle/GetWindowIdFromWindow)
+                // and can throw; sharing one try made every Attach failure skip TrayIconService.Start()
+                // entirely — the icon would never reach the shell while the floating menu (its own try)
+                // still started: exactly the "menu OK, tray missing" shape this hook must not be able
+                // to produce (investigation 2026-11-13; live instrumentation caught no Attach throw on
+                // that build, so the split removes the latent failure mode, it was not the observed
+                // cause). A failed bridge now costs only close-to-tray (the icon still appears), and a
+                // failed icon start no longer costs close-to-tray. Neither branch may kill the app:
+                // both are conveniences, the app is not.
+                // Bridge close-to-tray và icon khay start trong HAI try RIÊNG, có chủ đích: chúng hỏng
+                // độc lập. Attach kích hoạt WinRT (GetWindowHandle/GetWindowIdFromWindow) và có thể ném
+                // lỗi; khi còn chung một try, mọi lỗi Attach đều bỏ qua TrayIconService.Start() — icon
+                // không bao giờ tới được shell trong khi menu nổi (try riêng) vẫn start: đúng hình dạng
+                // "menu OK, tray không có" mà hook này không được phép tạo ra (điều tra 2026-11-13;
+                // instrumentation live không bắt được lỗi Attach nào trên build đó, nên việc tách try
+                // loại bỏ một failure mode tiềm ẩn, không phải nguyên nhân đã quan sát). Bridge hỏng giờ
+                // chỉ mất close-to-tray (icon vẫn hiện), và lần start icon hỏng không còn kéo theo
+                // close-to-tray. Không nhánh nào được giết app: cả hai đều là tiện ích, app thì không.
                 try
                 {
-                    IServiceProvider? services = IPlatformApplication.Current?.Services; // pattern repo, xem App.xaml.cs:10
-                    if (services is null) return;
                     services.GetRequiredService<AppWindowBridge>().Attach(window);
-                    services.GetRequiredService<TrayIconService>().Start();
                 }
                 catch (Exception ex)
                 {
-                    // Khởi động phải sống sót khi hook tray hỏng: tray là tiện ích, app mới là thứ
-                    // được bảo vệ. Attach kích hoạt WinRT (GetWindowHandle/GetWindowIdFromWindow)
-                    // có thể ném lỗi, và Start cũng vậy — không gì ở nhánh này được giết app.
-                    // Startup must survive a failed tray hook: the tray is a convenience, the app is
-                    // not. Attach activates WinRT (GetWindowHandle/GetWindowIdFromWindow) and can
-                    // throw, and so can Start — nothing in this branch may kill the app.
                     IPlatformApplication.Current?.Services?
                         .GetService<ILoggerFactory>()?
                         .CreateLogger("ReTran.App.Tray")
-                        .LogError(ex, "The tray/close-to-tray hook failed on window creation; the app continues without it.");
+                        .LogError(ex, "The close-to-tray window hook (AppWindowBridge.Attach) failed on window creation; the app continues without close-to-tray.");
                 }
 
                 try
                 {
-                    // Menu nổi: cùng pattern resolve và cùng cửa sổ chính. Start() tạo cửa sổ menu
+                    services.GetRequiredService<TrayIconService>().Start();
+                }
+                catch (Exception ex)
+                {
+                    IPlatformApplication.Current?.Services?
+                        .GetService<ILoggerFactory>()?
+                        .CreateLogger("ReTran.App.Tray")
+                        .LogError(ex, "The tray icon start failed on window creation; the app continues without the tray icon.");
+                }
+
+                try
+                {
+                    // Menu nổi: cùng services đã resolve và cùng cửa sổ chính. Start() tạo cửa sổ menu
                     // (idempotent) trên worker thread của host overlay rồi hiện nó ở vị trí đã lưu khi
                     // cờ FloatingMenuOn bật. try riêng: hỏng ở đây không được giết app (menu là tiện
                     // ích, như nhánh tray trên), và không được ghi log bằng message của tray — tray đã
                     // chạy xong nên message đó sẽ báo sai thứ đã hỏng.
-                    // Floating menu: same resolve pattern, same primary window. Start() creates the menu
-                    // window (idempotent) on the overlay host's worker thread and shows it at the
+                    // Floating menu: same resolved services and same primary window. Start() creates the
+                    // menu window (idempotent) on the overlay host's worker thread and shows it at the
                     // persisted position when FloatingMenuOn is on. Separate try: a failure here must not
-                    // kill the app (the menu is a convenience, like the tray branch above) and must not
+                    // kill the app (the menu is a convenience, like the tray branches above) and must not
                     // be logged with the tray's message — the tray already finished, so that message
                     // would misreport what failed.
-                    IServiceProvider? services = IPlatformApplication.Current?.Services;
-                    services?.GetRequiredService<FloatingMenuService>().Start();
+                    services.GetRequiredService<FloatingMenuService>().Start();
                 }
                 catch (Exception ex)
                 {
