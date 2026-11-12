@@ -22,7 +22,17 @@ namespace ReTran.Core.Cli;
 /// serve start (<c>annotatorFps</c> của <c>PipelineHost</c>).
 /// </param>
 /// <param name="MergeLines">Group multi-line OCR spots before translation (--merge-lines). Gom spot OCR đa dòng trước khi dịch (--merge-lines).</param>
-public sealed record OcrLoopOptions(bool UseWindow, int Monitor, nint Hwnd, int Fps, int MaxFrames, int CaptureFps = 10, bool MergeLines = false);
+/// <param name="Merge">
+/// Line-merge caps from <c>--merge-gap</c>/<c>--merge-height</c>/<c>--merge-overlap</c>; <see langword="null"/>
+/// means <see cref="MergeThresholds.Default"/>. Nullable on purpose: a <see cref="MergeThresholds"/>
+/// value is not a compile-time constant, so it cannot be an optional parameter default (CS1736), and
+/// <c>default(MergeThresholds)</c> (0/0/0) sits outside the allowed range.
+/// Ngưỡng gộp dòng lấy từ <c>--merge-gap</c>/<c>--merge-height</c>/<c>--merge-overlap</c>; <see langword="null"/>
+/// nghĩa là <see cref="MergeThresholds.Default"/>. Để dạng null có chủ ý: giá trị <see cref="MergeThresholds"/>
+/// không phải hằng số lúc biên dịch nên không làm giá trị mặc định của tham số được (CS1736), và
+/// <c>default(MergeThresholds)</c> (0/0/0) thì ngoài dải cho phép.
+/// </param>
+public sealed record OcrLoopOptions(bool UseWindow, int Monitor, nint Hwnd, int Fps, int MaxFrames, int CaptureFps = 10, bool MergeLines = false, MergeThresholds? Merge = null);
 
 /// <summary>
 /// Continuous OCR loop engine: capture buffer -> periodic tick -> pipeline -> cycle sink.
@@ -31,15 +41,47 @@ public sealed record OcrLoopOptions(bool UseWindow, int Monitor, nint Hwnd, int 
 public static class OcrLoop
 {
     /// <summary>
+    /// Names of the three line-merge threshold flags accepted by <c>ocr</c> and <c>ocr loop</c>.
+    /// Holding them in one place keeps the parser, the validation messages and both usage lines in
+    /// agreement about what the user may type.
+    /// Tên ba cờ ngưỡng gộp dòng mà <c>ocr</c> và <c>ocr loop</c> chấp nhận. Giữ chung một chỗ để
+    /// trình parse, message kiểm tra và hai dòng usage luôn khớp những gì người dùng được gõ.
+    /// </summary>
+    internal static class MergeFlags
+    {
+        /// <summary>Gap-ratio flag. Cờ ngưỡng khoảng cách.</summary>
+        public const string Gap = "--merge-gap";
+
+        /// <summary>Height-ratio flag. Cờ ngưỡng tỷ lệ chiều cao.</summary>
+        public const string Height = "--merge-height";
+
+        /// <summary>Overlap-ratio flag. Cờ ngưỡng độ chồng ngang.</summary>
+        public const string Overlap = "--merge-overlap";
+
+        /// <summary>
+        /// Bracketed block appended to both usage lines. Khối đặt trong ngoặc vuông nối vào cả hai dòng usage.
+        /// </summary>
+        public static string UsageSuffix => $"[{Gap} N] [{Height} N] [{Overlap} N]";
+    }
+
+    /// <summary>
     /// Usage line for the <c>loop</c> subcommand. Dòng hướng dẫn dùng cho subcommand <c>loop</c>.
     /// </summary>
     public static string Usage =>
-        "usage: ReTran.Core ocr loop (--monitor N | --hwnd 0xHEX) [--fps 1..60] [--max-frames N] [--merge-lines]";
+        "usage: ReTran.Core ocr loop (--monitor N | --hwnd 0xHEX) [--fps 1..60] [--max-frames N] [--merge-lines] " + MergeFlags.UsageSuffix;
 
     /// <summary>
     /// Parses loop arguments; exactly one source flag is required.
     /// Phân tích đối số loop; phải có đúng một cờ nguồn.
     /// </summary>
+    /// <remarks>
+    /// The merge flags (<see cref="MergeFlags.Gap"/>, <see cref="MergeFlags.Height"/>,
+    /// <see cref="MergeFlags.Overlap"/>) are optional in any order; absent, the parsed
+    /// <see cref="OcrLoopOptions.Merge"/> is exactly <see cref="MergeThresholds.Default"/>.
+    /// Các cờ gộp (<see cref="MergeFlags.Gap"/>, <see cref="MergeFlags.Height"/>,
+    /// <see cref="MergeFlags.Overlap"/>) tùy chọn và không bắt buộc thứ tự; nếu thiếu,
+    /// <see cref="OcrLoopOptions.Merge"/> parse ra đúng <see cref="MergeThresholds.Default"/>.
+    /// </remarks>
     /// <param name="args">Arguments after <c>loop</c>. Đối số sau <c>loop</c>.</param>
     /// <param name="defaultFps">Tick rate used when --fps is absent (CoreConfig.OcrFps). Tần suất dùng khi thiếu --fps.</param>
     /// <param name="error">Null on success; otherwise the reason. Không null khi thành công; ngược lại là lý do.</param>
@@ -56,6 +98,11 @@ public static class OcrLoop
         int fps = defaultFps is < 1 or > 60 ? 3 : defaultFps;
         int maxFrames = 0;
         bool mergeLines = false;
+        // Every merge flag is optional; the starting triple is the shipped default, so flags that
+        // are never typed can never leave a partially-set (or all-zero) threshold behind.
+        // Mọi cờ gộp đều tùy chọn; bộ ba khởi điểm là mặc định gốc, nên cờ không gõ sẽ không để lại
+        // ngưỡng đặt dở (hoặc toàn 0).
+        MergeThresholds merge = MergeThresholds.Default;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -109,6 +156,12 @@ public static class OcrLoop
                 case "--merge-lines":
                     mergeLines = true;
                     break;
+                case MergeFlags.Gap:
+                case MergeFlags.Height:
+                case MergeFlags.Overlap:
+                    if (!TryReadMergeThreshold(args[i], args, ref i, merge, out merge, out error))
+                        return null;
+                    break;
                 default:
                     error = $"unknown argument '{args[i]}'.";
                     return null;
@@ -120,7 +173,83 @@ public static class OcrLoop
             error = "exactly one source required: --monitor N or --hwnd 0xHEX.";
             return null;
         }
-        return new OcrLoopOptions(hasWindow, monitor, hwnd, fps, maxFrames, MergeLines: mergeLines);
+        return new OcrLoopOptions(hasWindow, monitor, hwnd, fps, maxFrames,
+            MergeLines: mergeLines, Merge: merge);
+    }
+
+    /// <summary>
+    /// Reads the value of one merge-threshold flag and folds it into <paramref name="current"/>. The
+    /// number is parsed with <see cref="CultureInfo.InvariantCulture"/> (the CLI always takes "0.6",
+    /// never the vi-VN "0,6"), and the assembled triple must satisfy
+    /// <see cref="MergeThresholds.IsValid"/>; a missing value, a non-number, or an out-of-range value
+    /// yields a message naming that flag and its range, built from the <see cref="MergeThresholds"/>
+    /// bounds so no range literal is restated here.
+    /// Đọc giá trị của một cờ ngưỡng gộp và gộp vào <paramref name="current"/>. Số được parse theo
+    /// <see cref="CultureInfo.InvariantCulture"/> (CLI luôn nhận "0.6", không nhận "0,6" kiểu vi-VN), và
+    /// bộ ba sau khi gộp phải thoả <see cref="MergeThresholds.IsValid"/>; thiếu giá trị, giá trị không
+    /// phải số hoặc ngoài dải đều cho message nêu tên cờ đó cùng dải của nó, lấy từ hằng số của
+    /// <see cref="MergeThresholds"/> nên không phải nhắc lại dải ở đây.
+    /// </summary>
+    /// <param name="flag">The flag being read — one of the <see cref="MergeFlags"/> names. Cờ đang đọc, một trong các tên <see cref="MergeFlags"/>.</param>
+    /// <param name="args">The full argument array. Toàn bộ mảng đối số.</param>
+    /// <param name="index">
+    /// Position of <paramref name="flag"/> in <paramref name="args"/>; moved past the value.
+    /// Vị trí của <paramref name="flag"/> trong <paramref name="args"/>; được dời qua giá trị.
+    /// </param>
+    /// <param name="current">Thresholds collected so far. Ngưỡng đã thu thập tới lúc này.</param>
+    /// <param name="updated">
+    /// The triple to keep on success; <paramref name="current"/> unchanged when the call fails.
+    /// Bộ ba giữ lại khi thành công; vẫn là <paramref name="current"/> khi call thất bại.
+    /// </param>
+    /// <param name="error">Null on success; otherwise the reason. Không null khi thành công; ngược lại là lý do.</param>
+    /// <returns>True when the flag carries an in-range value. True khi cờ mang giá trị trong dải.</returns>
+    internal static bool TryReadMergeThreshold(string flag, string[] args, ref int index,
+        MergeThresholds current, out MergeThresholds updated, out string? error)
+    {
+        updated = current;
+        if (index + 1 >= args.Length)
+        {
+            error = $"missing value for {flag}.";
+            return false;
+        }
+        if (!double.TryParse(args[++index], NumberStyles.Float, CultureInfo.InvariantCulture, out double value))
+        {
+            error = MergeRangeError(flag);
+            return false;
+        }
+
+        MergeThresholds candidate = flag switch
+        {
+            MergeFlags.Gap => current with { GapRatio = value },
+            MergeFlags.Height => current with { HeightRatio = value },
+            _ => current with { MinOverlapRatio = value },
+        };
+        if (!candidate.IsValid())
+        {
+            error = MergeRangeError(flag);
+            return false;
+        }
+        updated = candidate;
+        error = null;
+        return true;
+    }
+
+    /// <summary>
+    /// "invalid --merge-gap (expected a number 0.1..2.0)." — the range always comes from
+    /// <see cref="MergeThresholds"/>, and "0.0##" keeps a whole bound printed as "2.0" instead of "2".
+    /// Message luôn lấy dải từ <see cref="MergeThresholds"/>, và "0.0##" giữ nguyên số biên chẵn in ra
+    /// "2.0" thay vì "2".
+    /// </summary>
+    private static string MergeRangeError(string flag)
+    {
+        (double Low, double High) range = flag switch
+        {
+            MergeFlags.Gap => (MergeThresholds.GapRatioLow, MergeThresholds.GapRatioHigh),
+            MergeFlags.Height => (MergeThresholds.HeightRatioLow, MergeThresholds.HeightRatioHigh),
+            _ => (MergeThresholds.OverlapRatioLow, MergeThresholds.OverlapRatioHigh),
+        };
+        string Invariant(double value) => value.ToString("0.0##", CultureInfo.InvariantCulture);
+        return $"invalid {flag} (expected a number {Invariant(range.Low)}..{Invariant(range.High)}).";
     }
 
     /// <summary>

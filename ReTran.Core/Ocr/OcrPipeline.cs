@@ -13,6 +13,7 @@ public sealed class OcrPipeline
     private readonly ISidecarRpc _rpc;
     private readonly OcrDiff _diff;
     private readonly bool _mergeLines;
+    private readonly MergeThresholds _merge;
 
     /// <summary>
     /// Per-call timeout including first-time model load (spec: 30s).
@@ -34,13 +35,20 @@ public sealed class OcrPipeline
     /// When true, group OCR lines into blocks before diffing (merged spots carry "paragraph": true).
     /// Khi true, gộp các dòng OCR thành khối trước khi diff (spot gộp mang "paragraph": true).
     /// </param>
-    public OcrPipeline(ISidecarRpc rpc, OcrDiff diff, bool mergeLines = false)
+    /// <param name="merge">
+    /// Line-merge caps used while <paramref name="mergeLines"/> is on; <see langword="null"/> uses
+    /// <see cref="MergeThresholds.Default"/> (the pre-configuration behaviour).
+    /// Ngưỡng gộp dòng dùng khi bật <paramref name="mergeLines"/>; <see langword="null"/> dùng
+    /// <see cref="MergeThresholds.Default"/> (đúng hành vi trước khi có cấu hình).
+    /// </param>
+    public OcrPipeline(ISidecarRpc rpc, OcrDiff diff, bool mergeLines = false, MergeThresholds? merge = null)
     {
         ArgumentNullException.ThrowIfNull(rpc);
         ArgumentNullException.ThrowIfNull(diff);
         _rpc = rpc;
         _diff = diff;
         _mergeLines = mergeLines;
+        _merge = merge ?? MergeThresholds.Default;
     }
 
     /// <summary>
@@ -117,7 +125,7 @@ public sealed class OcrPipeline
             throw new InvalidOperationException("sidecar returned no 'spots' array.");
 
         // Grouping happens before the diff so a changed line re-translates its whole block, not just itself.
-        JsonArray effectiveSpots = _mergeLines ? LineGrouper.Group(spotsArr) : spotsArr;
+        JsonArray effectiveSpots = _mergeLines ? LineGrouper.Group(spotsArr, _merge) : spotsArr;
         obj["spots"] = effectiveSpots;
 
         var texts = new List<string>();

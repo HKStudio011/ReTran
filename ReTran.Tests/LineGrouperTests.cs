@@ -236,4 +236,131 @@ public class LineGrouperTests
             Assert.True(HasParagraph((JsonObject)item!));
         Assert.True(sw.ElapsedMilliseconds < 5, $"Group took {sw.ElapsedMilliseconds} ms (budget 5 ms)");
     }
+
+    // ---- configurable thresholds: MergeThresholds + Group(spots, thresholds) ----
+
+    [Fact]
+    public void DefaultThresholds_MatchConsts()
+    {
+        Assert.Equal(new MergeThresholds(0.6, 1.35, 0.5), MergeThresholds.Default);
+    }
+
+    [Fact]
+    public void Group_OneArgOverload_EqualsDefaultThresholds()
+    {
+        // gap 14 <= 0.6 * 24 = 14.4 -> merge; gap 20 > 14.4 -> stay apart:
+        // pins that the 1-arg overload uses exactly the consts, not 0/1 defaults.
+        var mergeable = new JsonArray(
+            Spot(100, 100, 300, 24, "HELLO"),
+            Spot(100, 138, 300, 24, "WORLD"));
+        var apart = new JsonArray(
+            Spot(100, 100, 300, 24, "HELLO"),
+            Spot(100, 144, 300, 24, "WORLD"));
+
+        var plainMerged = LineGrouper.Group(mergeable);
+        var cfgMerged = LineGrouper.Group(mergeable, MergeThresholds.Default);
+        var plainSplit = LineGrouper.Group(apart);
+        var cfgSplit = LineGrouper.Group(apart, MergeThresholds.Default);
+
+        Assert.Single(plainMerged);
+        Assert.True(HasParagraph((JsonObject)plainMerged[0]!));
+        Assert.Equal(plainMerged.ToJsonString(), cfgMerged.ToJsonString());
+
+        Assert.Equal(2, plainSplit.Count);
+        foreach (var item in plainSplit)
+            Assert.False(HasParagraph((JsonObject)item!));
+        Assert.Equal(plainSplit.ToJsonString(), cfgSplit.ToJsonString());
+    }
+
+    [Fact]
+    public void Group_GapRatio2_MergesLinesConstsWouldSplit()
+    {
+        // gap 30 > default 0.6 * 24 = 14.4 (see LargeVerticalGap_DoNotMerge) but <= 2.0 * 24 = 48 -> merge
+        var spots = new JsonArray(
+            Spot(100, 100, 300, 24, "A"),
+            Spot(100, 154, 300, 24, "B"));
+
+        var result = LineGrouper.Group(spots, new MergeThresholds(2.0, 1.35, 0.5));
+
+        Assert.Single(result);
+        var block = (JsonObject)result[0]!;
+        Assert.True(HasParagraph(block));
+        Assert.Equal("A B", (string?)block["text"]);
+    }
+
+    [Fact]
+    public void Group_HeightRatio3_MergesBigWithSmall()
+    {
+        // heights 24 and 40 -> ratio 1.67 > default 1.35 (see HeightRatioAbove1p35_DoNotMerge) but <= 3.0 -> merge
+        var spots = new JsonArray(
+            Spot(100, 100, 300, 24, "A"),
+            Spot(100, 130, 300, 40, "B"));
+
+        var result = LineGrouper.Group(spots, new MergeThresholds(0.6, 3.0, 0.5));
+
+        Assert.Single(result);
+        Assert.True(HasParagraph((JsonObject)result[0]!));
+    }
+
+    [Fact]
+    public void Group_HeightRatio1_KeepsThemApart()
+    {
+        // same geometry, gap and overlap relaxed; only the height cap (1.0 < 1.67) keeps them apart
+        var spots = new JsonArray(
+            Spot(100, 100, 300, 24, "A"),
+            Spot(100, 130, 300, 40, "B"));
+
+        var result = LineGrouper.Group(spots, new MergeThresholds(2.0, 1.0, 0.0));
+
+        Assert.Equal(2, result.Count);
+        foreach (var item in result)
+            Assert.False(HasParagraph((JsonObject)item!));
+    }
+
+    [Fact]
+    public void Group_OverlapRatio0_MergesSideBySideColumns()
+    {
+        // same row, columns exactly adjacent (100..300 | 300..500): overlap 0 >= 0 * 200 -> merge
+        // (default 0.5 keeps these apart, see SideBySideColumns_DoNotMerge)
+        var spots = new JsonArray(
+            Spot(100, 100, 200, 24, "LEFT"),
+            Spot(300, 100, 200, 24, "RIGHT"));
+
+        var result = LineGrouper.Group(spots, new MergeThresholds(0.6, 1.35, 0.0));
+
+        Assert.Single(result);
+        var block = (JsonObject)result[0]!;
+        Assert.True(HasParagraph(block));
+        Assert.Equal("LEFT RIGHT", (string?)block["text"]);
+    }
+
+    [Fact]
+    public void Group_OverlapRatio0p9_KeepsColumnsApart()
+    {
+        // same geometry, gap and height relaxed; overlap 0 < 0.9 * 200 -> no merge
+        var spots = new JsonArray(
+            Spot(100, 100, 200, 24, "LEFT"),
+            Spot(300, 100, 200, 24, "RIGHT"));
+
+        var result = LineGrouper.Group(spots, new MergeThresholds(0.6, 1.35, 0.9));
+
+        Assert.Equal(2, result.Count);
+        foreach (var item in result)
+            Assert.False(HasParagraph((JsonObject)item!));
+    }
+
+    [Theory]
+    [InlineData(0.6, 1.35, 0.5, true)]   // defaults
+    [InlineData(0.09, 1.35, 0.5, false)] // gap below 0.1
+    [InlineData(2.01, 1.35, 0.5, false)] // gap above 2.0
+    [InlineData(0.6, 0.99, 0.5, false)]  // height below 1.0
+    [InlineData(0.6, 3.01, 0.5, false)]  // height above 3.0
+    [InlineData(0.6, 1.35, 1.01, false)] // overlap above 1.0
+    [InlineData(0.6, 1.35, 0.0, true)]   // overlap floor is allowed
+    [InlineData(0.1, 1.0, 1.0, true)]    // lower bounds inclusive
+    [InlineData(2.0, 3.0, 1.0, true)]    // upper bounds inclusive
+    public void IsValid_Ranges(double gap, double height, double overlap, bool expected)
+    {
+        Assert.Equal(expected, new MergeThresholds(gap, height, overlap).IsValid());
+    }
 }

@@ -82,7 +82,8 @@ jobs:
           Remove-Item -Recurse publish-core
 
       # Updater bắt buộc phải cạnh app exe (InstallUpdateAsync tìm theo tên) và
-      # Core phải nằm cạnh App.exe — fail sớm nếu mất
+      # Core phải nằm cạnh App.exe — fail sớm nếu mất; wizard first-run cần
+      # uv.exe + source ReTran.OCR trong zip (spec 2026-11-03-first-run-setup-wizard §5.3)
       - name: Verify executables in publish output
         shell: pwsh
         run: |
@@ -95,6 +96,12 @@ jobs:
           if (-not (Test-Path "${{ env.OUTPUT_DIR }}/ReTran.Core.exe")) {
             throw "ReTran.Core.exe missing from publish output"
           }
+          if (-not (Test-Path "${{ env.OUTPUT_DIR }}/runtimes/win-x64/uv.exe")) {
+            throw "uv.exe missing from publish output"
+          }
+          if (-not (Test-Path "${{ env.OUTPUT_DIR }}/ReTran.OCR/pyproject.toml")) {
+            throw "ReTran.OCR source missing from publish output"
+          }
 
       # OIDC (workload identity federation) thay client secret lâu dài —
       # cần federated credential trên Entra app trỏ repo + environment 'release'
@@ -106,6 +113,7 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      # Ký luôn uv.exe — wizard first-run chạy binary lạ lần đầu, không ký sẽ bị SmartScreen chặn
       - name: Sign binaries (optional)
         if: env.HAS_AZURE_SECRETS == 'true'
         env:
@@ -123,7 +131,8 @@ jobs:
             -kvc "$env:AZURE_CERT_NAME" `
             -tr "http://timestamp.digicert.com" `
             -v "${{ env.OUTPUT_DIR }}/ReTran.App.exe" `
-            "${{ env.OUTPUT_DIR }}/ReTran.Updater.exe"
+            "${{ env.OUTPUT_DIR }}/ReTran.Updater.exe" `
+            "${{ env.OUTPUT_DIR }}/runtimes/win-x64/uv.exe"
 
       - name: Package zip
         shell: pwsh

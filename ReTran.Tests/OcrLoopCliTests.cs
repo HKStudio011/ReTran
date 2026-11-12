@@ -1,7 +1,6 @@
 using System.Text.Json.Nodes;
 using ReTran.Core.Capture;
 using ReTran.Core.Cli;
-using ReTran.Core.Config;
 using ReTran.Core.Ocr;
 using ReTran.Core.OcrClient;
 using Xunit;
@@ -65,16 +64,115 @@ public class OcrLoopCliTests
     }
 
     [Fact]
+    public void TryParse_MergeFlags_SetsThresholds()
+    {
+        var options = OcrLoop.TryParse(
+            ["--monitor", "0", "--merge-lines", "--merge-gap", "0.25", "--merge-height", "2", "--merge-overlap", "0"],
+            3, out string? error);
+        Assert.Null(error);
+        Assert.NotNull(options);
+        Assert.Equal(new MergeThresholds(0.25, 2.0, 0.0), options!.Merge);
+    }
+
+    [Fact]
+    public void TryParse_MergeFlagsAbsent_DefaultThresholds()
+    {
+        // A missing flag set must land on MergeThresholds.Default, never on the record struct's
+        // zero value (0/0/0), which is out of range and would change the merge behaviour.
+        // Thiếu bộ cờ phải ra MergeThresholds.Default, không phải giá trị 0 của record struct
+        // (0/0/0) — ngoài dải và làm thay đổi hành vi gộp dòng.
+        var options = OcrLoop.TryParse(["--monitor", "0"], 3, out string? error);
+        Assert.Null(error);
+        Assert.NotNull(options);
+        Assert.Equal(MergeThresholds.Default, options!.Merge);
+    }
+
+    [Fact]
+    public void TryParse_MergeFlagMissingValue_Errors()
+    {
+        (string[] Args, string Flag)[] cases =
+        [
+            (["--merge-gap"], "--merge-gap"),
+            (["--monitor", "0", "--merge-height"], "--merge-height"),
+            (["--monitor", "0", "--merge-overlap"], "--merge-overlap"),
+        ];
+        foreach ((string[] args, string flag) in cases)
+        {
+            Assert.Null(OcrLoop.TryParse(args, 3, out string? error));
+            Assert.Contains(flag, error, StringComparison.Ordinal);
+            Assert.Contains("missing value", error, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
+    public void TryParse_MergeFlagOutOfRange_Errors()
+    {
+        (string[] Args, string Flag)[] cases =
+        [
+            (["--monitor", "0", "--merge-gap", "2.5"], "--merge-gap"),       // above GapRatioHigh
+            (["--monitor", "0", "--merge-gap", "0.05"], "--merge-gap"),      // below GapRatioLow
+            (["--monitor", "0", "--merge-height", "3.5"], "--merge-height"), // above HeightRatioHigh
+            (["--monitor", "0", "--merge-overlap", "1.5"], "--merge-overlap"), // above OverlapRatioHigh
+            (["--monitor", "0", "--merge-gap", "abc"], "--merge-gap"),       // not a number
+            (["--monitor", "0", "--merge-gap", "0,6"], "--merge-gap"),       // vi-VN comma decimal (R12)
+        ];
+        foreach ((string[] args, string flag) in cases)
+        {
+            Assert.Null(OcrLoop.TryParse(args, 3, out string? error));
+            Assert.Contains(flag, error, StringComparison.Ordinal);
+            Assert.Contains("invalid", error, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // The range bounds are inclusive, and the message quotes them from MergeThresholds'
+        // consts in InvariantCulture ("2.0", never "2").
+        // Biên dải được bao gồm, và message lấy dải từ hằng số của MergeThresholds theo
+        // InvariantCulture ("2.0", không bao giờ "2").
+        Assert.NotNull(OcrLoop.TryParse(["--monitor", "0", "--merge-gap", "2.0", "--merge-overlap", "0"], 3, out string? edgeError));
+        Assert.Null(edgeError);
+        Assert.Null(OcrLoop.TryParse(["--monitor", "0", "--merge-gap", "2.5"], 3, out string? rangeError));
+        Assert.Contains("2.0", rangeError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Usage_MentionsEveryMergeFlag()
+    {
+        string[] flags = ["--merge-gap", "--merge-height", "--merge-overlap"];
+        foreach (string flag in flags)
+            Assert.Contains(flag, OcrLoop.Usage, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TryParseOneShot_MergeLinesFlag_SetsOption()
     {
-        Assert.True(OcrCommands.TryParseOneShot(["a.png", "--merge-lines"], out string? input, out bool mergeLines, out string? error));
+        Assert.True(OcrCommands.TryParseOneShot(["a.png", "--merge-lines"],
+            out string? input, out bool mergeLines, out MergeThresholds merge, out string? error));
         Assert.Null(error);
         Assert.Equal("a.png", input);
         Assert.True(mergeLines);
+        Assert.Equal(MergeThresholds.Default, merge); // no threshold flags -> defaults
 
-        Assert.True(OcrCommands.TryParseOneShot(["a.png"], out input, out mergeLines, out _));
+        Assert.True(OcrCommands.TryParseOneShot(["a.png"], out input, out mergeLines, out merge, out _));
         Assert.Equal("a.png", input);
         Assert.False(mergeLines); // default off
+        Assert.Equal(MergeThresholds.Default, merge);
+    }
+
+    [Fact]
+    public void TryParseOneShot_MergeFlags_SetsThresholdsOrErrors()
+    {
+        Assert.True(OcrCommands.TryParseOneShot(["a.png", "--merge-lines", "--merge-gap", "0.3"],
+            out string? input, out bool mergeLines, out MergeThresholds merge, out string? error));
+        Assert.Null(error);
+        Assert.Equal("a.png", input);
+        Assert.True(mergeLines);
+        Assert.Equal(0.3, merge.GapRatio);
+        Assert.Equal(MergeThresholds.Default.HeightRatio, merge.HeightRatio); // untouched flag keeps its default
+
+        Assert.False(OcrCommands.TryParseOneShot(["a.png", "--merge-gap"], out _, out _, out _, out string? missing));
+        Assert.Contains("--merge-gap", missing, StringComparison.Ordinal);
+
+        Assert.False(OcrCommands.TryParseOneShot(["a.png", "--merge-height", "0.5"], out _, out _, out _, out string? range));
+        Assert.Contains("--merge-height", range, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -88,25 +186,66 @@ public class OcrLoopCliTests
         ];
         foreach (string[] args in cases)
         {
-            Assert.False(OcrCommands.TryParseOneShot(args, out _, out _, out string? error));
+            Assert.False(OcrCommands.TryParseOneShot(args, out _, out _, out _, out string? error));
             Assert.False(string.IsNullOrEmpty(error), $"no error for: [{string.Join(' ', args)}]");
         }
     }
 
     [Fact]
+    public async Task Ocr_Loop_MergeFlagOutOfRange_UsageExit2()
+    {
+        var d = new CommandDispatcher();
+        OcrCommands.Register(d);
+        var (_, stderr, exit) = await OcrTestSupport.RunDispatcherAsync(d,
+            ["ocr", "loop", "--monitor", "0", "--merge-gap", "2.5"]);
+        Assert.Equal(2, exit);
+        Assert.Contains("--merge-gap", stderr, StringComparison.Ordinal);
+        Assert.Contains("usage", stderr, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("[--merge-gap N]", stderr, StringComparison.Ordinal); // every flag is documented
+    }
+
+    [Fact]
+    public async Task Ocr_Loop_MergeFlagMissingValue_UsageExit2()
+    {
+        var d = new CommandDispatcher();
+        OcrCommands.Register(d);
+        var (_, stderr, exit) = await OcrTestSupport.RunDispatcherAsync(d,
+            ["ocr", "loop", "--monitor", "0", "--merge-overlap"]);
+        Assert.Equal(2, exit);
+        Assert.Contains("--merge-overlap", stderr, StringComparison.Ordinal);
+        Assert.Contains("usage", stderr, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Ocr_OneShot_MergeFlagMissingValue_UsageExit2()
+    {
+        // Parse failure exits 2 before the sidecar is spawned, so this stays environment-free.
+        // Lỗi parse thoát 2 trước khi spawn sidecar, nên test không phụ thuộc môi trường.
+        var d = new CommandDispatcher();
+        OcrCommands.Register(d);
+        var (_, stderr, exit) = await OcrTestSupport.RunDispatcherAsync(d, ["ocr", "a.png", "--merge-gap"]);
+        Assert.Equal(2, exit);
+        Assert.Contains("--merge-gap", stderr, StringComparison.Ordinal);
+        Assert.Contains("usage", stderr, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("[--merge-gap N] [--merge-height N] [--merge-overlap N]", stderr, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task OcrLoop_RealSidecar_FakeSource_EmitsTwoJsonLines()
     {
-        // Infra gate: repo + venv + paddle warm-up — otherwise skip (never fail on environment).
-        if (!OperatingSystem.IsWindows()) return;
-        string? repoRoot = OcrBootstrap.FindRepoRoot();
-        if (repoRoot is null) return;
-        string python = OcrBootstrap.ResolvePythonExe(new CoreConfig(), repoRoot) ?? "";
-        if (python.Length == 0 || !File.Exists(python)) return;
+        // Infra gate: repo+venv (resolved from AppContext.BaseDirectory, see TryResolveRepoWithVenv) +
+        // paddle warm-up — otherwise report a skip with a reason (never fail on environment, never a
+        // silent return that xUnit counts as passed with zero sidecar coverage).
+        if (!OperatingSystem.IsWindows())
+            Assert.Skip("real-sidecar E2E is Windows-only (venv layout + sidecar spawn)");
+        if (!OcrTestSupport.TryResolveRepoWithVenv(out string repoRoot, out string python))
+            Assert.Skip("no ancestor of AppContext.BaseDirectory has both ReTran.OCR/pyproject.toml and ReTran.OCR/.venv/Scripts/python.exe (repo layout or uv venv missing)");
 
         string fixture = OcrTestSupport.CreateTextFixturePng();
         try
         {
-            if (!await OcrTestSupport.TryWarmUpModel(python, repoRoot, fixture)) return;
+            if (!await OcrTestSupport.TryWarmUpModel(python, repoRoot, fixture))
+                Assert.Skip("PaddleOCR import or model warm-up failed (paddle/model download unavailable or broken venv)");
 
             await using var sp = await SidecarProcess.StartAsync(python, repoRoot, CancellationToken.None);
             var pipeline = new OcrPipeline(sp, new OcrDiff());

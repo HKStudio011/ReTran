@@ -33,8 +33,10 @@ public sealed class OverlayState
     private OverlayFrame? _latest;
 
     /// <summary>
-    /// The latest published frame, or <see langword="null"/> when nothing was published yet.
-    /// Khung hình mới nhất đã xuất bản, hoặc <see langword="null"/> khi chưa có gì được xuất bản.
+    /// The latest published frame, or <see langword="null"/> when nothing was published yet or the
+    /// feed was cleared by <see cref="Clear"/>. <see langword="null"/> means "empty snapshot".
+    /// Khung hình mới nhất đã xuất bản, hoặc <see langword="null"/> khi chưa có gì được xuất bản hay
+    /// feed vừa bị <see cref="Clear"/> xóa. <see langword="null"/> nghĩa là "snapshot rỗng".
     /// </summary>
     public OverlayFrame? Latest
     {
@@ -63,6 +65,33 @@ public sealed class OverlayState
         finally
         {
             Monitor.Exit(_gate);
+        }
+        Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// Drops the latest frame so the overlay feed reads as empty, then invokes <see cref="Changed"/>
+    /// exactly once — and does nothing at all (no event) when nothing was stored. Unlike
+    /// <see cref="Publish"/> this blocks on the lock instead of giving up: <c>Clear</c> is not a
+    /// hot per-frame path, and <c>Publish</c> never invokes handlers while holding the lock, so a
+    /// blocking wait can never be pinned by a frame publisher. <see cref="Latest"/> becoming
+    /// <see langword="null"/> is the contract a late subscriber (e.g. an OBS Browser Source that
+    /// connects after the pipeline stopped) relies on to get an empty snapshot instead of a finished
+    /// session's text.
+    /// Bỏ khung mới nhất để feed overlay đọc như rỗng, rồi kích hoạt <see cref="Changed"/> đúng một
+    /// lần — và hoàn toàn không làm gì (không nổ event) khi chưa có gì được lưu. Khác
+    /// <see cref="Publish"/>, method này chặn trên khóa thay vì bỏ qua: <c>Clear</c> không phải
+    /// đường nóng cho từng khung hình, và <c>Publish</c> không gọi handler khi đang giữ khóa nên
+    /// việc chờ blocking không thể bị một bên publish khung giữ mãi. <see cref="Latest"/> thành
+    /// <see langword="null"/> là hợp đồng mà một subscriber kết nối muộn (ví dụ OBS Browser Source
+    /// kết nối sau khi pipeline đã dừng) dựa vào để nhận snapshot rỗng thay vì chữ của phiên cũ.
+    /// </summary>
+    public void Clear()
+    {
+        lock (_gate)
+        {
+            if (_latest is null) return;
+            _latest = null;
         }
         Changed?.Invoke();
     }

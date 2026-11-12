@@ -87,9 +87,11 @@ public sealed record OcrConfigSetResult(
 /// Bộ điều phối phía App trên <see cref="ICorePeer"/>: start/dừng pipeline của Core
 /// (<c>core.start</c>/<c>core.stop</c>/<c>core.list_sources</c>), trả lời yêu cầu cache của Core
 /// từ cache dịch thuật SQLite, và biến thông báo của Core thành khung <see cref="OverlayState"/>
-/// cùng <see cref="PipelineStateChanged"/>.
+/// cùng <see cref="PipelineStateChanged"/>. Implements <see cref="IPipelineControl"/> so UI surfaces
+/// can depend on the interface instead of this concrete type.
+/// Implement <see cref="IPipelineControl"/> để các bề mặt UI phụ thuộc vào interface thay vì type cụ thể này.
 /// </summary>
-public sealed class PipelineController
+public sealed class PipelineController : IPipelineControl
 {
     /// <summary>Stop reason relayed when the core process ends on its own. Lý do dừng khi tiến trình core tự kết thúc.</summary>
     public const string CoreExitedReason = "core-exited";
@@ -238,6 +240,12 @@ public sealed class PipelineController
         var ocr = new JsonObject { ["det"] = settings.OcrDet, ["rec"] = settings.OcrRec };
         // mergeLines luôn gửi — Core cũ bỏ qua key lạ.
         ocr["mergeLines"] = settings.OcrMergeLines;
+        // Ba ngưỡng gộp dòng (spec K2) cũng luôn gửi — AppSettings lúc nào cũng mang giá trị,
+        // và Core đọc đúng trong khối "ocr" (PipelineHost.ParseStart). App chuyển nguyên vẹn,
+        // không clamp: Core là nơi duy nhất chặn dải ngoài 0.1..2.0 / 1.0..3.0 / 0.0..1.0.
+        ocr["mergeGapRatio"] = settings.OcrMergeGap;
+        ocr["mergeHeightRatio"] = settings.OcrMergeHeight;
+        ocr["mergeOverlapRatio"] = settings.OcrMergeOverlap;
         JsonObject? ocrParams = BuildOcrParams(settings.OcrEngine ?? new Dictionary<string, JsonNode?>());
         if (ocrParams is not null) ocr["params"] = ocrParams;
 
@@ -277,9 +285,11 @@ public sealed class PipelineController
 
     /// <summary>
     /// Sends <c>core.stop</c> to end the current session; Core treats it as idempotent (Core sends
-    /// no <c>pipeline.state</c> for a normal stop).
+    /// no <c>pipeline.state</c> for a normal stop). Also clears the overlay feed, since a session
+    /// that ended must not keep serving its text to a subscriber that connects later.
     /// Gửi <c>core.stop</c> để kết thúc phiên hiện tại; Core coi lệnh này là idempotent (Core
-    /// không gửi <c>pipeline.state</c> khi dừng bình thường).
+    /// không gửi <c>pipeline.state</c> khi dừng bình thường). Đồng thời xóa feed overlay, vì một
+    /// phiên đã dừng không được tiếp tục phục vụ chữ của nó cho subscriber kết nối sau.
     /// </summary>
     /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
     /// <returns>A task that completes once Core acknowledges the stop. Task hoàn tất khi Core xác nhận dừng.</returns>
@@ -288,6 +298,7 @@ public sealed class PipelineController
         await _peer.CallAsync("core.stop", null, ct).ConfigureAwait(false);
         IsRunning = false;
         ActiveSource = null;
+        ClearOverlayFrames();
         StateChanged?.Invoke();
     }
 
@@ -624,9 +635,16 @@ public sealed class PipelineController
         _log.LogWarning("Core process exited with code {ExitCode}; the pipeline is gone.", exitCode);
         IsRunning = false;
         ActiveSource = null;
+        ClearOverlayFrames();
         PipelineStateChanged?.Invoke(false, CoreExitedReason);
         StateChanged?.Invoke();
     }
+
+    // Mọi đường chuyển sang không-chạy (StopAsync, core exit, notification running:false) đều xóa
+    // feed overlay: OBS Browser Source kết nối muộn phải thấy snapshot rỗng, không dựng lại chữ
+    // của phiên đã tắt. Clear idempotent nên các đường dừng chồng nhau (exit ngay sau Stop) chỉ nổ
+    // một payload rỗng. Không gọi khi Start — preview/overlay của phiên mới bắt đầu bằng khung mới.
+    private void ClearOverlayFrames() => _overlay.Clear();
 
     private async Task<JsonNode?> HandleRequestAsync(string method, JsonNode? @params)
     {
@@ -821,6 +839,7 @@ public sealed class PipelineController
             ? reasonValue.GetValue<string>()
             : null;
         IsRunning = running;
+        if (!running) ClearOverlayFrames();
         PipelineStateChanged?.Invoke(running, reason);
         StateChanged?.Invoke();
     }

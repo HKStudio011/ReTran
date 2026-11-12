@@ -10,7 +10,7 @@ public class Win32TrayHostSmokeTests
         using var icon = new TrayIconSource();
         using var host = new Win32TrayHost();
         Assert.False(host.IsCreated);
-        host.Create(icon.Handle, "ReTran", () => TrayMenuModel.Build("a", "b", "c", false));
+        host.Create(icon.Handle, "ReTran", () => TrayMenuModel.Build("a", "b", "c", "d", false, false));
 
         // Window creation NEVER needs a shell — assert always, so the WM_NCCREATE/DefWindowProc
         // regression class is caught even on CI without an explorer/tray.
@@ -18,7 +18,7 @@ public class Win32TrayHostSmokeTests
         // WM_NCCREATE/DefWindowProc kể cả CI không có explorer/tray.
         Assert.True(host.WindowCreated);
 
-        host.Create(icon.Handle, "ReTran", () => TrayMenuModel.Build("a", "b", "c", false)); // idempotent
+        host.Create(icon.Handle, "ReTran", () => TrayMenuModel.Build("a", "b", "c", "d", false, false)); // idempotent
 
         // NIM_ADD needs a running shell (notification area). With explorer present the FIRST Create
         // must REALLY register (window + NIM_ADD) — not an unconditionally set flag. Without a

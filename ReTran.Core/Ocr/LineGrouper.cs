@@ -39,7 +39,19 @@ public static class LineGrouper
     /// A new array in the same shape; a merged block (≥ 2 lines) carries "paragraph": true and its union box.
     /// Mảng mới cùng shape; khối gộp (≥ 2 dòng) có thêm "paragraph": true và box hợp nhất của các dòng thành viên.
     /// </returns>
-    public static JsonArray Group(JsonArray spots)
+    public static JsonArray Group(JsonArray spots) => Group(spots, MergeThresholds.Default);
+
+    /// <summary>
+    /// Merges nearby lines in the spot array into paragraph blocks, keeping reading order, using caller-supplied merge thresholds.
+    /// Gộp các dòng gần nhau trong mảng spot thành khối đoạn văn, giữ nguyên thứ tự đọc, theo ngưỡng gộp do nơi gọi cung cấp.
+    /// </summary>
+    /// <param name="spots">OCR spots shaped as {box: [[x,y]×4] pixels, text, score}. Các spot OCR dạng {box: [[x,y]×4] pixel, text, score}.</param>
+    /// <param name="thresholds">Merge caps to apply instead of the constants. Ngưỡng gộp được dùng thay cho các hằng số.</param>
+    /// <returns>
+    /// A new array in the same shape; a merged block (≥ 2 lines) carries "paragraph": true and its union box.
+    /// Mảng mới cùng shape; khối gộp (≥ 2 dòng) có thêm "paragraph": true và box hợp nhất của các dòng thành viên.
+    /// </returns>
+    public static JsonArray Group(JsonArray spots, MergeThresholds thresholds)
     {
         ArgumentNullException.ThrowIfNull(spots);
 
@@ -76,7 +88,7 @@ public static class LineGrouper
             List<Line>? target = null;
             foreach (var g in groups)
             {
-                if (CanMerge(g[^1].Box, line.Box)) { target = g; break; }
+                if (CanMerge(g[^1].Box, line.Box, thresholds)) { target = g; break; }
             }
             if (target is null)
             {
@@ -142,17 +154,17 @@ public static class LineGrouper
         return true;
     }
 
-    /// <summary>Applies the three merge conditions (design spec D4) between a candidate line and the last line of a group.</summary>
-    private static bool CanMerge(Box a, Box b)
+    /// <summary>Applies the three merge conditions (design spec D4) with the given thresholds between a candidate line and the last line of a group.</summary>
+    private static bool CanMerge(Box a, Box b, MergeThresholds t)
     {
         // (a) vertical gap — no lower bound: overlapping lines are fine.
-        if (b.Y - (a.Y + a.H) > MaxGapRatio * Math.Min(a.H, b.H)) return false;
+        if (b.Y - (a.Y + a.H) > t.GapRatio * Math.Min(a.H, b.H)) return false;
         // (b) height ratio.
         double minH = Math.Min(a.H, b.H);
-        if (minH <= 0 || Math.Max(a.H, b.H) / minH > MaxHeightRatio) return false;
+        if (minH <= 0 || Math.Max(a.H, b.H) / minH > t.HeightRatio) return false;
         // (c) horizontal overlap.
         double overlapX = Math.Min(a.X + a.W, b.X + b.W) - Math.Max(a.X, b.X);
-        return overlapX >= MinOverlapRatio * Math.Min(a.W, b.W);
+        return overlapX >= t.MinOverlapRatio * Math.Min(a.W, b.W);
     }
 
     /// <summary>Builds the merged block spot: union box as a rectangle quad, trimmed texts joined by space, min score.</summary>

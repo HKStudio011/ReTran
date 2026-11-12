@@ -1,9 +1,15 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 using ReTran_App.Core;
+using ReTran_App.Data;
+using ReTran_App.Services;
 using ReTran_App.Services.OverlayFeed;
 
 namespace ReTran.Tests;
@@ -114,6 +120,143 @@ public sealed class OverlayFeedServerTests
             throw;
         }
     }
+
+    // Drains an /events stream into a queue. Tests need both "the next event is X" and "nothing more
+    // for a while" on the SAME connection; cancelling a read on an HttpClient response stream aborts
+    // the connection (ObjectDisposedException on the next read), so the drain never takes a token and
+    // the assertions wait on the queue instead.
+    // Xả luồng /events vào một hàng đợi. Test cần cả "event kế tiếp là X" lẫn "không gì thêm trong một
+    // khoảng" trên CÙNG kết nối; hủy một lệnh đọc trên response stream của HttpClient sẽ hủy kết nối
+    // (ObjectDisposedException ở lệnh đọc sau), nên vòng xả không nhận token và các assert chờ trên hàng
+    // đợi thay vào đó.
+    private sealed class SseCollector : IAsyncDisposable
+    {
+        private readonly HttpResponseMessage _response;
+        private readonly Task _drain;
+        private readonly ConcurrentQueue<string> _events = new();
+        private readonly SemaphoreSlim _arrived = new(0);
+
+        private SseCollector(HttpResponseMessage response)
+        {
+            _response = response;
+            _drain = Task.Run(DrainAsync);
+        }
+
+        public static async Task<SseCollector> OpenAsync(HttpClient http, int port)
+        {
+            HttpResponseMessage response = await http.GetAsync(
+                $"http://127.0.0.1:{port}/events", HttpCompletionOption.ResponseHeadersRead);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            return new SseCollector(response);
+        }
+
+        private async Task DrainAsync()
+        {
+            try
+            {
+                using var reader = new StreamReader(await _response.Content.ReadAsStreamAsync());
+                while (true)
+                {
+                    string? line = await reader.ReadLineAsync();
+                    if (line is null) break;
+                    if (line.StartsWith("data: ", StringComparison.Ordinal))
+                    {
+                        _events.Enqueue(line["data: ".Length..]);
+                        _arrived.Release();
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // A dropped connection ends the drain; the assertions below report it as "closed".
+                // Kết nối bị drop kết thúc vòng xả; các assert bên dưới báo nó là "đã đóng".
+            }
+            finally
+            {
+                // One permit so a waiter can notice the stream ended.
+                // Một permit để waiter thấy luồng đã kết thúc.
+                _arrived.Release();
+            }
+        }
+
+        /// <summary>
+        /// The next data event, failing when none arrives within 10 s or the connection closed first.
+        /// Event data kế tiếp, fail khi không có event nào trong 10 giây hoặc kết nối đóng trước.
+        /// </summary>
+        public async Task<string> NextEventAsync(string because)
+        {
+            bool arrived = await _arrived.WaitAsync(TimeSpan.FromSeconds(10));
+            if (arrived && _events.TryDequeue(out string? payload)) return payload;
+            Assert.Fail(arrived
+                ? $"The connection closed before another data event ({because}). " +
+                  $"/ Kết nối đóng trước khi có event data nữa ({because})."
+                : $"No data event within 10 s ({because}). / Không có event data trong 10 giây ({because}).");
+            return string.Empty; // Assert.Fail always throws / Assert.Fail luôn ném
+        }
+
+        /// <summary>
+        /// The next data event that actually carries boxes — a hidden→shown transition may send an
+        /// empty snapshot first when the session has not produced a frame yet.
+        /// Event data kế tiếp thực sự mang box — transition ẩn→hiện có thể gửi snapshot rỗng trước khi
+        /// phiên kịp có khung hình.
+        /// </summary>
+        public async Task<string> NextBoxEventAsync(string because)
+        {
+            while (true)
+            {
+                string payload = await NextEventAsync(because);
+                if (BoxCount(payload) > 0) return payload;
+            }
+        }
+
+        /// <summary>
+        /// Fails if any data event arrives inside the window — the "no wasted SSE traffic" half of
+        /// spec K9.
+        /// Fail nếu có event data nào tới trong khoảng chờ — nửa "không tốn traffic SSE vô ích" của
+        /// spec K9.
+        /// </summary>
+        public async Task AssertSilenceAsync(TimeSpan window, string because)
+        {
+            if (await _arrived.WaitAsync(window))
+            {
+                string payload = _events.TryDequeue(out string? dequeued) ? dequeued : "(connection closed)";
+                Assert.Fail($"Unexpected SSE data event while none was allowed ({because}): {payload} " +
+                            $"/ Bất ngờ có sự kiện data khi không được phép có ({because}): {payload}");
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            _response.Dispose(); // ends the drain / kết thúc vòng xả
+            try { await _drain; } catch { }
+            _arrived.Dispose();
+        }
+    }
+
+    private static int BoxCount(string payload)
+    {
+        using var doc = JsonDocument.Parse(payload);
+        return doc.RootElement.GetProperty("boxes").GetArrayLength();
+    }
+
+    private static string FirstBoxText(string payload)
+    {
+        using var doc = JsonDocument.Parse(payload);
+        return doc.RootElement.GetProperty("boxes")[0].GetProperty("text").GetString() ?? string.Empty;
+    }
+
+    // The feed's own sequence number — a suppressed payload must not move it.
+    // Số seq của chính feed — một payload bị chặn không được làm nó chạy.
+    private static long SeqOf(string payload)
+    {
+        using var doc = JsonDocument.Parse(payload);
+        return doc.RootElement.GetProperty("seq").GetInt64();
+    }
+
+    // One frame holding a single named box — the name is what a test matches the SSE payload against.
+    // Một khung hình chứa đúng một box có tên — tên là thứ test dùng để so với payload SSE.
+    private static OverlayFrame FrameWithBox(string text) => new(1920, 1080, DateTime.UtcNow,
+        [new OverlayBox(0.5, 0.25, 0.2, 0.1, text, "dịch của " + text)]);
 
     [Fact]
     public async Task Start_ServesOverlayPage()
@@ -454,6 +597,257 @@ public sealed class OverlayFeedServerTests
         }
     }
 
+    // ---------- visibility gate (spec K8/K9/K10) ----------
+
+    [Fact]
+    public async Task Hidden_BroadcastsOneEmptyPayload_ThenNothing()
+    {
+        var state = new OverlayState();
+        var visibility = new FakeVisibility { Shown = true };
+        await using var server = new OverlayFeedServer(state, FreePort(), visibility: visibility);
+        await server.StartAsync(CancellationToken.None);
+
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        await using var events = await SseCollector.OpenAsync(http, server.Port);
+        Assert.Equal(0, BoxCount(await events.NextEventAsync("initial snapshot")));
+
+        state.Publish(FrameWithBox("A"));
+        Assert.Equal("A", FirstBoxText(await events.NextEventAsync("published box A")));
+
+        visibility.Shown = false; // one edge ⇒ exactly one clear payload / một edge ⇒ đúng một payload xóa
+        Assert.Equal(0, BoxCount(await events.NextEventAsync("the hidden edge")));
+
+        for (var i = 0; i < 3; i++)
+        {
+            state.Publish(FrameWithBox($"hidden-{i}"));
+        }
+        // Frames really were published and OverlayState does hold them — only the gate may keep them
+        // off the wire. Khung hình thật sự được xuất bản và OverlayState có giữ chúng — chỉ gate mới
+        // được phép giữ chúng ra khỏi wire.
+        Assert.Single(state.Latest!.Boxes);
+        Assert.Equal("hidden-2", state.Latest!.Boxes[0].Text);
+
+        await events.AssertSilenceAsync(TimeSpan.FromMilliseconds(1500), "3 frames published while hidden");
+    }
+
+    [Fact]
+    public async Task Shown_AfterHidden_BroadcastsCurrentSnapshot()
+    {
+        var state = new OverlayState();
+        var visibility = new FakeVisibility { Shown = true };
+        await using var server = new OverlayFeedServer(state, FreePort(), visibility: visibility);
+        await server.StartAsync(CancellationToken.None);
+
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        await using var events = await SseCollector.OpenAsync(http, server.Port);
+        Assert.Equal(0, BoxCount(await events.NextEventAsync("initial snapshot")));
+
+        state.Publish(FrameWithBox("first"));
+        Assert.Equal("first", FirstBoxText(await events.NextEventAsync("published box first")));
+
+        visibility.Shown = false;
+        Assert.Equal(0, BoxCount(await events.NextEventAsync("the hidden edge")));
+
+        state.Publish(FrameWithBox("while-hidden")); // gated / bị chặn ở gate
+        await events.AssertSilenceAsync(TimeSpan.FromMilliseconds(500), "frame published while hidden");
+
+        visibility.Shown = true; // bật lại khi pipeline vẫn chạy ⇒ snapshot hiện tại tới ngay
+        string shown = await events.NextEventAsync("the shown edge");
+        Assert.Equal(1, BoxCount(shown));
+        Assert.Equal("while-hidden", FirstBoxText(shown));
+    }
+
+    [Fact]
+    public async Task FramePreemptedBetweenGateCheckAndEnqueue_NeverLandsAfterTheClear()
+    {
+        // The reported interleaving, made deterministic: the publish thread's own gate read is parked, so
+        // the hidden edge and its clear payload land while that thread still sits between the check and
+        // the enqueue. The payload it wanted to queue must be dropped by the gate re-check under the
+        // client lock, and it must not have burned a sequence number either.
+        // Đúng interleaving bị báo lỗi, được làm cho tất định: phép đọc gate của thread publish bị kẹt, nên
+        // edge ẩn và payload xóa của nó rơi xuống khi thread đó vẫn còn nằm giữa kiểm tra và xếp hàng.
+        // Payload nó muốn xếp phải bị phép đọc lại gate dưới khóa client bỏ, và cũng không được tiêu tốn
+        // số seq.
+        var state = new OverlayState();
+        var gate = new ParkingGateVisibility();
+        await using var server = new OverlayFeedServer(state, FreePort(), visibility: gate);
+        await server.StartAsync(TestContext.Current.CancellationToken);
+
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        await using var events = await SseCollector.OpenAsync(http, server.Port);
+        await events.NextEventAsync("initial snapshot");
+
+        gate.ParkNextRead();
+        // The publish runs on its own thread: parking its gate read must not starve the thread pool.
+        // Publish chạy trên thread riêng: việc kẹt phép đọc gate của nó không được làm đói thread pool.
+        var published = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var publisher = new Thread(() =>
+        {
+            state.Publish(FrameWithBox("preempted"));
+            published.TrySetResult();
+        })
+        { IsBackground = true };
+        publisher.Start();
+
+        await gate.Parked.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        // The user turns the overlay off while that publish is parked inside its gate check.
+        // Người dùng tắt overlay ngay lúc lệnh publish đang kẹt trong phép kiểm tra gate của nó.
+        gate.HideWithoutEdge();
+        gate.RaiseEdge();
+        string clear = await events.NextEventAsync("the hidden edge's clear");
+        Assert.Equal(0, BoxCount(clear));
+        long clearSeq = SeqOf(clear);
+
+        gate.Release();
+        var resumed = await Task.WhenAny(published.Task, Task.Delay(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+        Assert.True(resumed == published.Task, "The parked publish never resumed. / Publish bị kẹt không bao giờ chạy tiếp.");
+
+        await events.AssertSilenceAsync(TimeSpan.FromMilliseconds(1000), "the preempted frame after the clear");
+
+        // Turning the overlay back on delivers the frame that was waiting with the number right after the
+        // clear: the dropped payload left the counter untouched.
+        // Bật overlay lại trả chính khung hình đã chờ với số ngay sau lệnh xóa: payload bị bỏ không đụng gì
+        // bộ đếm.
+        gate.ShowWithoutEdge();
+        gate.RaiseEdge();
+        string shown = await events.NextEventAsync("the shown edge");
+        Assert.Equal("preempted", FirstBoxText(shown));
+        Assert.Equal(clearSeq + 1, SeqOf(shown));
+    }
+
+    [Fact]
+    public async Task ClientConnecting_WhileHidden_GetsEmptySnapshot()
+    {
+        // Latest still holds a frame (a frame.translated queued on stdio can repopulate it after
+        // Clear — Task 8), so a hidden feed must answer from the gate, not from Latest.
+        // Latest vẫn giữ khung hình (frame.translated còn xếp hàng trên stdio có thể đổ lại nó sau
+        // Clear — Task 8), nên feed đang ẩn phải trả lời theo gate, không theo Latest.
+        var state = new OverlayState();
+        var visibility = new FakeVisibility(); // hidden from the start / ẩn từ đầu
+        await using var server = new OverlayFeedServer(state, FreePort(), visibility: visibility);
+        await server.StartAsync(CancellationToken.None);
+
+        state.Publish(FrameWithBox("stale"));
+        Assert.NotNull(state.Latest);            // Latest is NOT empty — the gate is what answers
+        Assert.Single(state.Latest!.Boxes);      // Latest không rỗng — gate mới là thứ trả lời
+
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        await using var events = await SseCollector.OpenAsync(http, server.Port);
+        // Empty boxes even though Latest is not null. / Boxes rỗng dù Latest không phải null.
+        Assert.Equal(0, BoxCount(await events.NextEventAsync("hidden snapshot for a late client")));
+    }
+
+    [Fact]
+    public async Task ClientConnecting_AfterClear_GetsEmptySnapshot()
+    {
+        // The switch is ON and the pipeline ran: K10 makes Clear() the reason a late subscriber sees
+        // an empty stage, not the gate.
+        // Công tắc BẬT và pipeline đã chạy: K10 lấy Clear() làm lý do subscriber đến muộn thấy sân
+        // khấu rỗng, không phải gate.
+        var state = new OverlayState();
+        var visibility = new FakeVisibility { Shown = true };
+        await using var server = new OverlayFeedServer(state, FreePort(), visibility: visibility);
+        await server.StartAsync(CancellationToken.None);
+
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        await using var running = await SseCollector.OpenAsync(http, server.Port);
+        Assert.Equal(0, BoxCount(await running.NextEventAsync("initial snapshot")));
+
+        state.Publish(FrameWithBox("session"));
+        Assert.Equal("session", FirstBoxText(await running.NextEventAsync("published session frame")));
+
+        state.Clear();
+        // Stage cleared on the wire. / Sân khấu đã xóa trên wire.
+        Assert.Equal(0, BoxCount(await running.NextEventAsync("the Clear() event")));
+        Assert.Null(state.Latest);
+
+        await using var late = await SseCollector.OpenAsync(http, server.Port);
+        Assert.Equal(0, BoxCount(await late.NextEventAsync("snapshot after Clear")));
+    }
+
+    [Fact]
+    public async Task NoVisibility_BroadcastsEveryPublish()
+    {
+        // Regression for every existing feed test: with no visibility injected nothing is gated.
+        // Regression cho toàn bộ test feed hiện có: không truyền visibility thì không có gì bị chặn.
+        var state = new OverlayState();
+        await using var server = new OverlayFeedServer(state, FreePort());
+        await server.StartAsync(CancellationToken.None);
+
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        await using var events = await SseCollector.OpenAsync(http, server.Port);
+        Assert.Equal(0, BoxCount(await events.NextEventAsync("initial snapshot")));
+
+        for (var i = 1; i <= 3; i++)
+        {
+            state.Publish(FrameWithBox($"frame-{i}"));
+            string payload = await events.NextEventAsync($"published frame {i}");
+            Assert.Equal(1, BoxCount(payload));
+            Assert.Equal($"frame-{i}", FirstBoxText(payload));
+        }
+    }
+
+    [Fact]
+    public async Task UserStop_ClearsFeed_WithExactlyOneEmptyPayload()
+    {
+        // StopAsync raises ONLY StateChanged (PipelineController:297-300): the Clear() that precedes
+        // it must not add a second empty payload on top of the hidden edge.
+        // StopAsync chỉ nổ StateChanged (PipelineController:297-300): Clear() đứng trước nó không được
+        // cộng thêm payload rỗng thứ hai lên edge ẩn.
+        await using var harness = new PipelineFeedHarness();
+        await harness.Server.StartAsync(CancellationToken.None);
+
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        await using var events = await SseCollector.OpenAsync(http, harness.Server.Port);
+        // Nothing is running yet, so the snapshot is empty. / Chưa chạy gì nên snapshot rỗng.
+        Assert.Equal(0, BoxCount(await events.NextEventAsync("snapshot before the pipeline ran")));
+
+        await harness.StartPipelineAsync();
+        harness.PushTranslatedFrame("HELLO");
+        Assert.Equal("HELLO", FirstBoxText(await events.NextBoxEventAsync("the translated frame")));
+
+        await harness.Pipeline.StopAsync(CancellationToken.None);
+
+        Assert.False(harness.Visibility.ShouldShowObs);
+        Assert.Null(harness.State.Latest);
+        // Exactly one clear payload, then silence. / Đúng một payload xóa, rồi im lặng.
+        Assert.Equal(0, BoxCount(await events.NextEventAsync("the stop's clear payload")));
+        await events.AssertSilenceAsync(TimeSpan.FromMilliseconds(1500), "anything after the stop");
+    }
+
+    [Fact]
+    public async Task CoreSideStop_ClearsFeed_WithExactlyOneEmptyPayload()
+    {
+        // One unexpected stop raises PipelineStateChanged AND StateChanged back to back
+        // (PipelineController:839-842) — Review Focus #4: still exactly one empty payload.
+        // Một lần dừng đột xuất nổ PipelineStateChanged VÀ StateChanged liền nhau
+        // (PipelineController:839-842) — Review Focus #4: vẫn đúng một payload rỗng.
+        await using var harness = new PipelineFeedHarness();
+        await harness.Server.StartAsync(CancellationToken.None);
+
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        await using var events = await SseCollector.OpenAsync(http, harness.Server.Port);
+        // Nothing is running yet, so the snapshot is empty. / Chưa chạy gì nên snapshot rỗng.
+        Assert.Equal(0, BoxCount(await events.NextEventAsync("snapshot before the pipeline ran")));
+
+        await harness.StartPipelineAsync();
+        harness.PushTranslatedFrame("HELLO");
+        Assert.Equal("HELLO", FirstBoxText(await events.NextBoxEventAsync("the translated frame")));
+
+        harness.Peer.RaiseNotification("pipeline.state", new JsonObject
+        {
+            ["running"] = false,
+            ["reason"] = "sidecar-exited",
+        });
+
+        Assert.False(harness.Visibility.ShouldShowObs);
+        Assert.Null(harness.State.Latest);
+        // Exactly one clear payload, then silence. / Đúng một payload xóa, rồi im lặng.
+        Assert.Equal(0, BoxCount(await events.NextEventAsync("the stop's clear payload")));
+        await events.AssertSilenceAsync(TimeSpan.FromMilliseconds(1500), "anything after the stop");
+    }
+
     [Fact]
     public async Task SseClient_BlockedWrite_FillsQueue_DropsClientWithoutBlocking()
     {
@@ -546,5 +940,200 @@ public sealed class OverlayFeedServerTests
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) { }
+    }
+
+    /// <summary>
+    /// Test double for the visibility gate: a plain value whose <see cref="Changed"/> only fires when
+    /// the value flips, exactly like the real <see cref="OverlayVisibility"/> (spec 5.14).
+    /// Bản thử cho gate hiển thị: giá trị thường với <see cref="Changed"/> chỉ nổ khi giá trị đổi, đúng
+    /// như <see cref="OverlayVisibility"/> thật (spec 5.14).
+    /// </summary>
+    private sealed class FakeVisibility : IOverlayVisibility
+    {
+        private int _shown;
+
+        public event Action? Changed;
+
+        public bool ShouldShowObs => Volatile.Read(ref _shown) == 1;
+
+        public bool Shown
+        {
+            get => Volatile.Read(ref _shown) == 1;
+            set
+            {
+                int flag = value ? 1 : 0;
+                if (Interlocked.Exchange(ref _shown, flag) == flag) return; // edge only / chỉ khi edge đổi
+                Changed?.Invoke();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gate double that parks one chosen read inside <see cref="ShouldShowObs"/>: it answers from the value
+    /// it read <em>before</em> parking, which is exactly the state of a thread preempted between its gate
+    /// check and the enqueue. <see cref="HideWithoutEdge"/>/<see cref="ShowWithoutEdge"/> change the value
+    /// with no edge — the flip that parked read is stale about — and <see cref="RaiseEdge"/> announces it
+    /// the way the real <see cref="OverlayVisibility"/> does.
+    /// Bản thử gate kẹt một lần đọc được chọn bên trong <see cref="ShouldShowObs"/>: nó trả lời theo giá trị
+    /// đọc <em>trước</em> lúc kẹt, đúng bằng trạng thái của một thread bị preempt giữa kiểm tra gate và việc
+    /// xếp hàng. <see cref="HideWithoutEdge"/>/<see cref="ShowWithoutEdge"/> đổi giá trị mà không nổ edge —
+    /// cú lật mà lần đọc đang kẹt bị cũ so với nó — còn <see cref="RaiseEdge"/> báo lại edge đó đúng như
+    /// <see cref="OverlayVisibility"/> thật.
+    /// </summary>
+    private sealed class ParkingGateVisibility : IOverlayVisibility
+    {
+        // Monitor (not a Task) for the hold: the parked getter answers inside a property, and a bounded
+        // Monitor wait cannot hang the suite even if the feed never resumes it.
+        // Dùng Monitor (không phải Task) cho chỗ kẹt: getter bị kẹt chạy bên trong một property, và một
+        // Monitor wait có giới hạn không thể treo cả bộ test kể cả khi feed không chạy tiếp.
+        private readonly object _holdLock = new();
+        private TaskCompletionSource _parked = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _armed;
+        private int _released;
+        private int _shown = 1;
+
+        public event Action? Changed;
+
+        /// <summary>Completes once the armed read is parked. / Hoàn tất khi lần đọc đã được vũ trang đang kẹt.</summary>
+        public Task Parked => _parked.Task;
+
+        public bool ShouldShowObs
+        {
+            get
+            {
+                bool shown = Volatile.Read(ref _shown) == 1;
+                if (Interlocked.Exchange(ref _armed, 0) != 1) return shown;
+
+                _parked.TrySetResult();
+                lock (_holdLock)
+                {
+                    while (Volatile.Read(ref _released) == 0 && Monitor.Wait(_holdLock, TimeSpan.FromSeconds(5)))
+                    {
+                    }
+                }
+                return shown; // the value from before the flip / giá trị trước cú lật
+            }
+        }
+
+        /// <summary>Arms the next read to park. / Vũ trang để lần đọc kế tiếp kẹt lại.</summary>
+        public void ParkNextRead()
+        {
+            Volatile.Write(ref _released, 0);
+            _parked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            Volatile.Write(ref _armed, 1);
+        }
+
+        /// <summary>Frees the parked read. / Giải phóng lần đọc đang kẹt.</summary>
+        public void Release()
+        {
+            Volatile.Write(ref _released, 1);
+            lock (_holdLock)
+            {
+                Monitor.PulseAll(_holdLock);
+            }
+        }
+
+        /// <summary>Flips the gate off without an edge. / Lật gate sang ẩn mà không nổ edge.</summary>
+        public void HideWithoutEdge() => Volatile.Write(ref _shown, 0);
+
+        /// <summary>Flips the gate back on without an edge. / Lật gate sang hiện mà không nổ edge.</summary>
+        public void ShowWithoutEdge() => Volatile.Write(ref _shown, 1);
+
+        /// <summary>Announces the current value as an edge, like the real gate. / Báo giá trị hiện tại như một edge, giống gate thật.</summary>
+        public void RaiseEdge() => Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// Real pipeline + real <see cref="OverlayVisibility"/> + the feed bound to a loopback port, so
+    /// both stop paths run exactly as in the app (<c>IsRunning = false</c> → <c>Clear()</c> → pipeline
+    /// events) and the payload count on the wire is what gets asserted.
+    /// Pipeline thật + <see cref="OverlayVisibility"/> thật + feed bind cổng loopback, để cả hai đường
+    /// dừng chạy đúng như trong app (<c>IsRunning = false</c> → <c>Clear()</c> → event pipeline) và con
+    /// số bị assert là số payload trên wire.
+    /// </summary>
+    private sealed class PipelineFeedHarness : IAsyncDisposable
+    {
+        private readonly string _settingsPath;
+
+        public OverlayState State { get; } = new();
+        public FakeCorePeer Peer { get; } = new() { IsStarted = true };
+        public AppSettingsService Settings { get; }
+        public PipelineController Pipeline { get; }
+        public OverlayVisibility Visibility { get; }
+        public OverlayFeedServer Server { get; }
+
+        public PipelineFeedHarness()
+        {
+            _settingsPath = Path.Combine(Path.GetTempPath(), $"retran-feed-{Guid.NewGuid():N}.json");
+            Settings = new AppSettingsService(_settingsPath);
+            Settings.Save(AppSettings.Default with { OverlayOnGame = true });
+
+            // The context is never queried here (no translate.* notification), so no migration runs
+            // and the db file is never created.
+            // Context không bao giờ bị truy vấn ở đây (không có notification translate.*), nên không
+            // migrate và file db không bao giờ được tạo.
+            var dbOptions = new DbContextOptionsBuilder<RetranDbContext>()
+                .UseSqlite($"Data Source={Path.Combine(Path.GetTempPath(), $"retran-feed-{Guid.NewGuid():N}.db")};Pooling=False")
+                .Options;
+            Pipeline = new PipelineController(
+                Peer,
+                Settings,
+                new TranslationCache(new RetranDbContext(dbOptions)),
+                State,
+                NullLogger<PipelineController>.Instance);
+            Visibility = new OverlayVisibility(Settings, Pipeline, NullLogger<OverlayVisibility>.Instance);
+            Server = new OverlayFeedServer(State, FreePort(), visibility: Visibility);
+        }
+
+        public Task StartPipelineAsync()
+            => Pipeline.StartAsync(new SourceSelection(UseWindow: false, Monitor: 0, HwndHex: null), CancellationToken.None);
+
+        /// <summary>
+        /// Pushes one <c>frame.translated</c> through the wired handler so the feed has real boxes to
+        /// lose. Đẩy một <c>frame.translated</c> qua handler đã gắn để feed có box thật cần mất.
+        /// </summary>
+        public void PushTranslatedFrame(string text) => Peer.RaiseNotification("frame.translated", new JsonObject
+        {
+            ["seq"] = 1,
+            ["w"] = 1920,
+            ["h"] = 1080,
+            ["boxes"] = new JsonArray(new JsonObject
+            {
+                ["x"] = 0.10, ["y"] = 0.20, ["w"] = 0.30, ["h"] = 0.05,
+                ["text"] = text, ["translated"] = "dịch của " + text,
+            }),
+        });
+
+        public async ValueTask DisposeAsync()
+        {
+            await Server.DisposeAsync();
+            Visibility.Dispose();
+            try { File.Delete(_settingsPath); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    private sealed class FakeCorePeer : ICorePeer
+    {
+        public bool IsStarted { get; set; }
+
+        public event Action<string, JsonNode?>? NotificationReceived;
+        public event Action<Exception>? HandlerError;
+        public event Action<int>? Exited;
+
+        public Task StartCoreAsync(CancellationToken ct) => Task.CompletedTask;
+
+        public Task<JsonNode?> CallAsync(string method, JsonNode? @params, CancellationToken ct)
+            => Task.FromResult<JsonNode?>(new JsonObject { ["running"] = method == "core.start" });
+
+        public void SetRequestHandler(Func<string, JsonNode?, Task<JsonNode?>> handler) { }
+
+        public void RaiseNotification(string method, JsonNode? @params)
+            => NotificationReceived?.Invoke(method, @params);
+
+        public void RaiseHandlerError(Exception ex) => HandlerError?.Invoke(ex);
+
+        public void RaiseExited(int exitCode) => Exited?.Invoke(exitCode);
     }
 }

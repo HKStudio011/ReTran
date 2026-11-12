@@ -7,6 +7,9 @@
 @inject ReTran_App.Services.I18nService L
 @inject ReTran_App.Services.AppSettingsService SettingsStore
 @inject PipelineController Pipeline
+@* Fully-qualified: the Setup namespace also defines OcrModelInfo, which would clash with
+   ReTran_App.Core.OcrModelInfo used throughout this panel. *@
+@inject ReTran_App.Services.Setup.SetupCoordinator Setup
 @inject UpdateCheckService Check
 @inject UpdateCoordinator Coordinator
 @inject ToastService Toast
@@ -220,6 +223,30 @@
             <input type="checkbox" @bind="_mergeLines" aria-label="@L["deck.ocr.mergeLines.label"]" />
             <p class="rt-hint">@(L["deck.ocr.mergeLines.hint"])</p>
         </div>
+        @* Ba ngưỡng gộp dòng: chỉ nhập được khi Gộp nhiều dòng đang bật; giá trị vẫn được lưu
+           kể cả khi tắt (hành vi như hôm nay). type="text" + inputmode có chủ đích — ô number
+           không nhận dạng dấu phẩy thập phân ("0,6") mà TryParseRatio chấp nhận. *@
+        <div class="rt-srow rt-srow--num">
+            <span>@(L["deck.ocr.mergeGap.label"])</span>
+            <input type="text" class="rt-input rt-mono" inputmode="decimal"
+                   aria-label="@(L["deck.ocr.mergeGap.label"])"
+                   disabled="@(!_mergeLines)" @bind="_mergeGapText" />
+            <p class="rt-hint">@(L["deck.ocr.mergeGap.hint"])</p>
+        </div>
+        <div class="rt-srow rt-srow--num">
+            <span>@(L["deck.ocr.mergeHeight.label"])</span>
+            <input type="text" class="rt-input rt-mono" inputmode="decimal"
+                   aria-label="@(L["deck.ocr.mergeHeight.label"])"
+                   disabled="@(!_mergeLines)" @bind="_mergeHeightText" />
+            <p class="rt-hint">@(L["deck.ocr.mergeHeight.hint"])</p>
+        </div>
+        <div class="rt-srow rt-srow--num">
+            <span>@(L["deck.ocr.mergeOverlap.label"])</span>
+            <input type="text" class="rt-input rt-mono" inputmode="decimal"
+                   aria-label="@(L["deck.ocr.mergeOverlap.label"])"
+                   disabled="@(!_mergeLines)" @bind="_mergeOverlapText" />
+            <p class="rt-hint">@(L["deck.ocr.mergeOverlap.hint"])</p>
+        </div>
         <div class="rt-field-row" style="flex-wrap: wrap; gap: 10px; margin-top: 10px; position: sticky; bottom: 0; z-index: 1; background: var(--rt-panel); padding: 8px 0; border-top: 1px solid var(--rt-line);">
             <button type="button" class="rt-btn rt-btn-primary" disabled="@_ocrParamsBusy" @onclick="SaveOcrParamsAsync">@(L["deck.ocr.params.save"])</button>
             <button type="button" class="rt-btn rt-mini" disabled="@_ocrParamsBusy" @onclick="RestoreOcrParamsAsync">@(L["deck.ocr.params.restore"])</button>
@@ -230,6 +257,18 @@
         </div>
     }
 </section>
+
+@if (Setup.IsComplete)
+{
+    @* "Chạy lại setup" (smoke #8): chỉ hiện khi wizard đã xong — bước đã done được skip nên máy
+       không đổi gì sẽ hoàn tất gần tức thì. Khi wizard chưa xong, modal che màn hình thay nút này. *@
+    <section class="rt-sect">
+        <h3>@(L["setup.section"])</h3>
+        <div class="rt-field-row" style="flex-wrap: wrap; gap: 10px;">
+            <button type="button" class="rt-btn rt-mini" disabled="@_rerunStarted" @onclick="RerunSetup">@(L["setup.rerun"])</button>
+        </div>
+    </section>
+}
 
 <section class="rt-sect">
     <h3>@(L["deck.settings.section.look"])</h3>
@@ -330,6 +369,10 @@
     private string _ocrFpsText = "3";
     private string _captureFpsText = "10";
     private bool _mergeLines = true; // Gộp nhiều dòng thành một khối trước khi dịch (áp dụng từ lần Start kế tiếp).
+    // Ngưỡng gộp dòng ở dạng text thô cho ô nhập — parse+range check lúc Lưu (OcrMergeThresholds).
+    private string _mergeGapText = "0.6";
+    private string _mergeHeightText = "1.35";
+    private string _mergeOverlapText = "0.5";
     private string _ocrStatusText = string.Empty;
     private bool _ocrStatusError;
 
@@ -352,12 +395,16 @@
         _ocrDetPick = current.OcrDet;
         _ocrRecPick = current.OcrRec;
         _mergeLines = current.OcrMergeLines;
+        _mergeGapText = FormatThreshold(current.OcrMergeGap);
+        _mergeHeightText = FormatThreshold(current.OcrMergeHeight);
+        _mergeOverlapText = FormatThreshold(current.OcrMergeOverlap);
         _appVersion = AppVersionFormatter.Format(Updates.CurrentVersion);
         // File ghi tay có thể chứa giá trị ngoài danh sách — thêm vào để select không bị trống.
         if (Array.IndexOf(_srcOptions, current.Src) < 0) _srcOptions = [current.Src, .. _srcOptions];
         if (Array.IndexOf(_dstOptions, current.Dst) < 0) _dstOptions = [current.Dst, .. _dstOptions];
         L.Changed += OnStateChanged;
         Js.OnWebViewReady += OnStateChanged;
+        Setup.Changed += OnSetupChanged; // theo dõi wizard để hiện/ẩn section + bật lại nút rerun
         _ = LoadOcrModelsAsync(); // nạp catalog model từ Core (fire-and-forget như Home)
         _ = LoadOcrSchemaAsync(); // nạp schema tham số engine từ Core (fire-and-forget)
         base.OnInitialized();
@@ -599,6 +646,9 @@
         _ocrFpsText = settings.OcrFps.ToString(CultureInfo.InvariantCulture);
         _captureFpsText = settings.CaptureFps.ToString(CultureInfo.InvariantCulture);
         _mergeLines = settings.OcrMergeLines;
+        _mergeGapText = FormatThreshold(settings.OcrMergeGap);
+        _mergeHeightText = FormatThreshold(settings.OcrMergeHeight);
+        _mergeOverlapText = FormatThreshold(settings.OcrMergeOverlap);
         SetOcrStatus(string.Empty, isError: false);
     }
 
@@ -657,6 +707,16 @@
                     L["ocr.param.error.range"]), isError: true);
                 return;
             }
+            // Ngưỡng gộp dòng: parse cả ba trước khi ghi gì cả — sai dải thì không Save,
+            // không ocr.config.set (sheet đang hiển thị theo culture nên "0,6" là hợp lệ).
+            if (!OcrMergeThresholds.TryParseRatio(_mergeGapText, out double mergeGap)
+                || !OcrMergeThresholds.TryParseRatio(_mergeHeightText, out double mergeHeight)
+                || !OcrMergeThresholds.TryParseRatio(_mergeOverlapText, out double mergeOverlap)
+                || !OcrMergeThresholds.AllValid(mergeGap, mergeHeight, mergeOverlap))
+            {
+                SetOcrStatus(L["deck.ocr.mergeThresholds.invalid"], isError: true);
+                return;
+            }
 
             OcrConfigSetResult result = await Pipeline.SetOcrConfigAsync(map, CancellationToken.None);
             SettingsStore.Save(SettingsStore.Load() with
@@ -665,6 +725,9 @@
                 OcrFps = ocrFps,
                 CaptureFps = captureFps,
                 OcrMergeLines = _mergeLines,
+                OcrMergeGap = mergeGap,
+                OcrMergeHeight = mergeHeight,
+                OcrMergeOverlap = mergeOverlap,
             });
             _ocrValues = new Dictionary<string, JsonNode?>(map);
             SetOcrStatus(L[result.Deferred.Count > 0 ? "deck.ocr.params.deferred" : "deck.ocr.params.applied"],
@@ -691,6 +754,9 @@
         _ocrValues.Clear();
         ApplyOcrValuesToControls();
         _mergeLines = AppSettings.Default.OcrMergeLines; // restore đưa cả cờ gộp dòng về mặc định.
+        _mergeGapText = FormatThreshold(OcrMergeThresholds.DefaultGap);
+        _mergeHeightText = FormatThreshold(OcrMergeThresholds.DefaultHeight);
+        _mergeOverlapText = FormatThreshold(OcrMergeThresholds.DefaultOverlap);
         await SaveOcrParamsAsync();
     }
 
@@ -781,6 +847,10 @@
     private static bool TryParseOcrFps(string text, out int value) =>
         int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out value)
         && value is >= 1 and <= 60;
+
+    // Hiển thị ngưỡng trong ô chữ theo invariant culture (inverso của TryParseRatio); giá trị
+    // hiển thị ngắn nhất round-trip nên 0.6 → "0.6", 1.35 → "1.35".
+    private static string FormatThreshold(double value) => value.ToString(CultureInfo.InvariantCulture);
 
     private static bool? ReadBoolNode(JsonNode? node) =>
         node is JsonValue value && value.GetValueKind() is JsonValueKind.True or JsonValueKind.False
@@ -885,9 +955,29 @@
         _ = Coordinator.StartUpdateAsync(release);
     }
 
+    // "Chạy lại setup": force wizard — bước đã done được skip, mọi thứ sẵn sàng thì đi qua trong vài giây.
+    private bool _rerunStarted;
+
+    private void RerunSetup()
+    {
+        if (_rerunStarted) return;
+        _rerunStarted = true;
+        // Bước Checking làm WMI + probe mạng đồng bộ — chạy ngoài UI thread như đường first-run của SetupModal.
+        _ = Task.Run(() => Setup.StartAsync(force: true));
+    }
+
+    // Wizard publish từ luồng nền (pattern UpdateModal) — marshal về UI thread: khi wizard xong lại thì
+    // bật nút rerun trở lại và re-render để section "Cài đặt" hiện/ẩn theo đúng IsComplete.
+    private void OnSetupChanged() => _ = InvokeAsync(() =>
+    {
+        if (Setup.IsComplete) _rerunStarted = false;
+        StateHasChanged();
+    });
+
     public void Dispose()
     {
         L.Changed -= OnStateChanged;
         Js.OnWebViewReady -= OnStateChanged;
+        Setup.Changed -= OnSetupChanged;
     }
 }

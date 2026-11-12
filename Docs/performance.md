@@ -963,3 +963,62 @@ Get-Process ReTran.App | Select-Object Id, CPU, WorkingSet64, PeakWorkingSet64
 # CPU delta / 60 s = contribution khi không có sự kiện tray (kỳ vọng ~0)
 # Bấm X (ẩn xuống tray) rồi đo lại 60 s: kỳ vọng CPU App giảm, Core/sidecar không đổi.
 ```
+
+---
+
+## Menu nổi (floating menu) — footprint (2026-11-11)
+
+### Cấu phần thêm vào (đọc từ code đã commit, plan `2026-11-02-floating-menu`)
+
+| Thành phần | Chi phí thêm vào process App | Nguồn code |
+|---|---|---|
+| Cửa sổ menu | **1 layered window thứ hai** (class `ReTranMenu`) trên **chính worker thread STA `ReTranOverlayHost`** của overlay host — message pump dùng chung với box overlay; **không process mới, không thread thứ hai** | `Win32OverlayHost.CreateMenu/ShowMenu/DrawMenu`, `Pump` |
+| Surface bitmap | **một `Bitmap` 32bpp PArgb cho mỗi cỡ window**, tái sử dụng suốt tuổi thọ service (host tiêu thụ bất đồng bộ trên worker thread nên không tạo/dispose theo từng lần vẽ). Trạng thái mặc định **336×510 px = 685.440 B ≈ 0,65 MB**; chip thu gọn 60×60 ≈ 14 KB | `FloatingMenuService.GetSurface`, `FloatingMenuLayout.WindowSize` |
+| Nhịp vẽ | Snapshot `MenuState` (record) — **chỉ vẽ khi khác khung đã vẽ thật**; throttle **leading-edge 66 ms ⇒ trần ~15 fps**; **không trailing timer, không loop redraw** | `FloatingMenuService.RequestRedraw` + `DefaultRedrawInterval` |
+| Nguồn số | `RunStats` singleton **dùng chung** với rail thống kê trang điều khiển — một công thức fps duy nhất cho toàn app; menu không tự đếm frame | `RunStats`, `Home.razor`, `FloatingMenuService.BuildState` |
+| RPC | `core.list_sources` **chỉ** khi mở hàng Nguồn (`OpenSourceListAsync` là caller duy nhất **trong menu**; `Home.razor` cũng gọi một lần khi tải trang); không poll | `FloatingMenuService.OpenSourceListAsync` |
+| Z-order | Menu tự đặt `HWND_TOPMOST` trong `ShowMenu` và trong lúc kéo; box overlay chèn **sau** hwnd menu ngay trong lần `SetWindowPos` nó vẫn gọi — **không có timer re-assert z-order mới** | `Win32OverlayHost.BoxInsertAfter/ShowMenu`, menu WndProc |
+| Start-up | `FloatingMenuService.Start()` chạy từ hook `OnWindowCreated` của window chính (sau `TrayIconService.Start()`), trong `try` riêng — lỗi menu không giết app và không bị ghi vào log của tray | `MauiProgram` |
+
+- **Thread:** bản thân menu không có thread nào. Worker thread STA `ReTranOverlayHost` (của overlay host, đã tồn tại từ plan overlay) nay được khởi động ngay từ `Start()` của menu qua `CreateMenu()` — trước đây chỉ khi bật overlay; **vẫn đúng một thread cho cả box lẫn menu**.
+- **Steady-state khi menu đang hiện** (pipeline chạy, nội dung không đổi): `RunStats` phát `Changed` **tối đa 4 lần/giây** (throttle leading-edge 250 ms, tính cả lần thử của tick threadpool 1 s); mỗi lần phát đi qua `RequestRedraw` → **một lần `AppSettingsService.Load()` (đọc `settings.json` vài trăm byte) + dựng record + so sánh**. Số không đổi ⇒ **không** render GDI+, **không** `UpdateLayeredWindow`, mốc throttle không dời. Render thật chỉ xảy ra khi state thật đổi (fps đổi theo cửa sổ đo 1 s, số box/dòng đổi theo khung overlay ~3 fps) hoặc người dùng bấm. `RunStats` có timer 1 s (threadpool, không phải thread riêng của menu); bản thân menu không có timer.
+- **Cỡ surface theo trạng thái** (tính từ hằng số `FloatingMenuLayout` — `PanelWidth 320`, `ShadowMargin 8`, `RowHeight 44`, `StatsBlockHeight 92`, `ErrorRowHeight 18`; chưa đo trên process thật): mặc định **336×510 ≈ 0,65 MB** · mở vùng thống kê **336×602 ≈ 0,77 MB** · mở danh sách nguồn (2 màn hình + 8 cửa sổ) + thống kê + dòng lỗi **336×1060 ≈ 1,4 MB**. Surface cache theo cỡ nên vài cỡ cùng tồn tại; tổng footprint tầng menu cỡ **~1 MB**.
+- **Ngân sách AGENTS.md (UI/overlay 10–15 fps):** **không xấu đi** — menu không có redraw định kỳ; trần 66 ms (~15 fps) chỉ bị chạm khi state đổi liên tục, và đường overlay box + OBS feed giữ nguyên như §M5-fix / §Annotate style v2. Menu không thêm frame nào vào pipeline capture/OCR, không đụng stdio IPC (chỉ một RPC khi mở hàng Nguồn).
+- **Tradeoff có chủ đích:** ẩn menu dùng `HideMenu` (không destroy window) để hiện lại nhanh — trả giá bằng một window handle + các surface đã cache, không phải CPU.
+
+### Số đo (disclosure — chưa đo trong session wiring này)
+
+Số ở bảng trên là **hằng số / geometry lấy từ code đã commit**, không phải số đo process. Delta CPU/RAM của App khi menu hiện cần mở app thật (smoke 7 mục của plan, do controller chạy) — task DI wiring này chưa chạy app. Mốc so sánh hợp lệ: §M4 mục C (App idle **0,08 CPU-s / 0,2% 1 core**, RSS 200,4 MB) và §M5 (App **0,49 core / 325 MB** khi pipeline chạy).
+
+Kỳ vọng khi đo thật: CPU App ≈ không đổi khi không tương tác với menu (chỉ có tick 1 s của `RunStats` + tối đa ~4 lần đọc `settings.json`/giây); RAM tăng ≈ 0,65 MB cho surface mặc định, thêm ~0,1–0,8 MB khi mở vùng thống kê / danh sách nguồn (thêm theo cỡ window, không tăng theo thời gian).
+
+### Lệnh đo (khi mở app có menu nổi)
+
+```powershell
+# App chạy, menu nổi hiện; sample per-process rồi so với baseline §M4 C / §M5
+Get-Process ReTran.App | Select-Object Id, CPU, WorkingSet64, PeakWorkingSet64
+Start-Sleep 60
+Get-Process ReTran.App | Select-Object Id, CPU, WorkingSet64, PeakWorkingSet64
+# CPU delta / 60 s = contribution khi menu hiện mà không có tương tác (kỳ vọng ~0)
+# Mở vùng thống kê + danh sách nguồn rồi đo lại WorkingSet: kỳ vọng tăng cỡ ~1 MB và giữ nguyên, không leo dần.
+```
+
+---
+
+## Ngưỡng gộp dòng + gate OBS (2026-11-12)
+
+### Cấu phần thêm vào (đọc từ code đã commit, plan `2026-11-04-merge-thresholds-obs-gate-and-floating-menu`)
+
+| Thành phần | Chi phí thêm vào process App | Nguồn code |
+|---|---|---|
+| Ngưỡng gộp 3 số | Ba `double` trong struct `MergeThresholds` (**value-type** — đi theo struct trong `core.start`, không cấp phát, không state machine mới); phía App là helper thuần `OcrMergeThresholds` (parse/validate, không I/O) + 3 dòng số trong Settings sheet | `ReTran.Core` (`MergeThresholds`, `LineGrouper`), `ReTran.App/Services/OcrMergeThresholds.cs` |
+| Gate OBS | `OverlayVisibility.ShouldShowObs` **tính lại tại mỗi lần đọc** (không cache snapshot, **không timer, không thread**); `OverlayFeedServer` bỏ ngay event khung **tại gate** khi overlay ẩn — bộ đếm `seq` không chạy — và mỗi lần chuyển sang ẩn phát **đúng một** payload `{"boxes":[]}` để OBS xoá scene; gate đọc lại dưới cùng lock queue payload nên frame thua race bị drop, không tiêu số seq | `ReTran.App/Core/OverlayVisibility.cs`, `ReTran.App/Services/OverlayFeed/OverlayFeedServer.cs` |
+| `OverlayState.Clear()` | Xoá snapshot + một `Changed` (raise ngoài lock, idempotent) trên mọi đường Stop; mỗi phiên Stop phát đúng một payload xoá qua gate ở trên | `ReTran.App/Core/OverlayState.cs` + call sites trong `PipelineController` |
+
+- **`LineGrouper` không đổi số phép tính:** ngưỡng chỉ đổi *giá trị so sánh* trong vòng lặp gộp đã có — đối chiếu mục đã đo **§Chi phí LineGrouper** (dòng 921): `LineGrouperTests.ManyLinesTwoColumns_GroupsPerColumn_Fast` — **300 dòng (2 cột × 150) < 5 ms** (có warm-up trước để loại JIT). Không thêm đường nóng nào vào chu kỳ OCR.
+- **Traffic SSE khi overlay ẩn = 0 B/khung:** không broadcast khi ẩn (seq đứng yên), tổng traffic chỉ còn **một payload xoá mỗi transition ẩn** (vài chục byte/transition) — so với mốc đã đo §M2/M5 (8 khung/45 s, **2.550 B/khung** trên `/events`, ~0,17 fps do nhịp OCR giới hạn): gate chỉ **giảm** traffic, không đổi đường nóng.
+- **Ngân sách AGENTS.md không xấu đi:** không process/thread/timer mới; chi phí gate là một phép đọc + so sánh boolean bên trong broadcast vốn đã có; ba ngưỡng là value-type thuần.
+
+### Số đo (disclosure)
+
+Mục này là **mô tả code đã commit**, không phải số đo process mới — các mốc so sánh nêu trên (§Chi phí LineGrouper, §M2/M5 `:408`,`:421`) là số đo thật đã có trong file. Smoke tương tác cho phần ngưỡng/OBS nằm trong **Task 24 Step 2** của plan (controller chạy trên máy thật).

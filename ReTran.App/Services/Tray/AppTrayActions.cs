@@ -1,4 +1,5 @@
 using ReTran_App.Core;
+using ReTran_App.Services.FloatingMenu;
 using ReTran_App.Services.OverlayWindow;
 using ReTran_App.Services.Window;
 
@@ -6,15 +7,15 @@ namespace ReTran_App.Services.Tray;
 
 /// <summary>
 /// The <see cref="ITrayActions"/> the real tray drives: it maps the menu operations onto the app's
-/// own singletons — the game-overlay service, the capture pipeline, the primary-window bridge and
-/// the clean-exit path. Pure glue: every decision (what a toggle means, when a close is allowed,
-/// what stopping the app involves) lives in those services, so this class has no branches and no
-/// state of its own.
+/// own singletons — the floating-menu service, the game-overlay service, the capture pipeline, the
+/// primary-window bridge and the clean-exit path. Pure glue: every decision (what a toggle means,
+/// when a close is allowed, what stopping the app involves) lives in those services, so this class
+/// has no branches and no state of its own.
 /// Cài đặt <see cref="ITrayActions"/> mà khay thật điều khiển: nó ánh xạ các thao tác menu lên
-/// chính các singleton của app — service overlay game, pipeline capture, bridge cửa sổ chính và
-/// đường thoát sạch. Thuần là glue: mọi quyết định (một toggle nghĩa là gì, khi nào cho phép đóng,
-/// dừng app gồm những gì) đều nằm trong các service đó, nên class này không có nhánh rẽ và không
-/// giữ trạng thái.
+/// chính các singleton của app — service menu nổi, service overlay game, pipeline capture, bridge
+/// cửa sổ chính và đường thoát sạch. Thuần là glue: mọi quyết định (một toggle nghĩa là gì, khi nào
+/// cho phép đóng, dừng app gồm những gì) đều nằm trong các service đó, nên class này không có nhánh
+/// rẽ và không giữ trạng thái.
 /// </summary>
 /// <remarks>
 /// Runs on the UI thread: the tray's message-only window is created there, so its commands are
@@ -30,27 +31,47 @@ namespace ReTran_App.Services.Tray;
 /// </remarks>
 public sealed class AppTrayActions : ITrayActions
 {
+    private readonly FloatingMenuService _menu;
     private readonly OverlayWindowService _overlay;
     private readonly PipelineController _pipeline;
     private readonly AppWindowBridge _window;
     private readonly ITrayExit _exit;
 
     /// <summary>
-    /// Wires the tray menu onto the four app services it operates on.
-    /// Nối menu khay với bốn service của app mà nó thao tác lên.
+    /// Wires the tray menu onto the five app services it operates on.
+    /// Nối menu khay với năm service của app mà nó thao tác lên.
     /// </summary>
+    /// <param name="menu">Floating menu whose show/hide entry flips (persists the choice). Menu nổi mà mục hiện/ẩn sẽ bật/tắt (lưu lựa chọn).</param>
     /// <param name="overlay">Game overlay whose toggle entry flips. Overlay game mà mục toggle sẽ bật/tắt.</param>
     /// <param name="pipeline">Capture/OCR pipeline whose run state gates the "next start" notice. Pipeline capture/OCR mà trạng thái chạy quyết định thông báo "lần Start kế tiếp".</param>
     /// <param name="window">Primary window bridge: reopen the window, and flag a real exit. Bridge cửa sổ chính: mở lại cửa sổ, và đánh dấu thoát thật.</param>
     /// <param name="exit">Stops the services and quits the app. Dừng các service rồi thoát app.</param>
-    public AppTrayActions(OverlayWindowService overlay, PipelineController pipeline,
+    public AppTrayActions(FloatingMenuService menu, OverlayWindowService overlay, PipelineController pipeline,
         AppWindowBridge window, ITrayExit exit)
     {
+        _menu = menu;
         _overlay = overlay;
         _pipeline = pipeline;
         _window = window;
         _exit = exit;
     }
+
+    /// <summary>
+    /// Reads the floating menu's live visibility — the tray menu asks on every right-click and never caches it.
+    /// Đọc trạng thái hiện sống của menu nổi — menu khay hỏi mỗi lần click chuột phải, không bao giờ cache.
+    /// </summary>
+    public bool MenuVisible => _menu.IsVisible;
+
+    /// <summary>
+    /// Shows or hides the floating menu through its service, which also persists the choice
+    /// (<c>FloatingMenuOn</c>). Allowed to throw — the tray catches it, logs the detail and shows the
+    /// user one localized error (spec §Báo lỗi, D12).
+    /// Hiện hoặc ẩn menu nổi qua service của nó; service này đồng thời lưu lựa chọn
+    /// (<c>FloatingMenuOn</c>). Được phép ném lỗi — khay bắt lỗi, log chi tiết và cho người dùng một
+    /// thông điệp lỗi đã dịch (spec §Báo lỗi, D12).
+    /// </summary>
+    /// <param name="on">Target visibility. Trạng thái hiện mong muốn.</param>
+    public void SetMenuVisible(bool on) => _menu.SetEnabled(on);
 
     /// <summary>
     /// Reads the overlay's live state — the tray menu asks on every right-click and never caches it.
