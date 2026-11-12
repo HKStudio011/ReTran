@@ -10,6 +10,14 @@ internal static class TrayContract
 {
     internal const uint NifMessage = 0x0001, NifIcon = 0x0002, NifTip = 0x0004, NifInfo = 0x0010;
     internal const uint NimAdd = 0, NimModify = 1, NimDelete = 2;
+    // NIM_SETVERSION (0x00000004) with NOTIFYICON_VERSION_4 (4): MSDN — the shell switches the
+    // callback payload to the v4 layout only when this message is sent; uVersion inside NIM_ADD
+    // alone is not a guaranteed contract.
+    // NIM_SETVERSION (0x00000004) với NOTIFYICON_VERSION_4 (4): MSDN — shell chỉ chuyển payload
+    // callback sang bố cục v4 khi tin nhắn này được gửi; chỉ đặt uVersion trong NIM_ADD không phải
+    // hợp đồng được bảo đảm.
+    internal const uint NimSetVersion = 0x00000004;
+    internal const uint NotifyIconVersion4 = 4;
     internal const int NiifNone = 0, NiifInfo = 1, NiifWarning = 2, NiifError = 3;
     internal const uint WmLbuttonUp = 0x0202, WmLbuttonDblClk = 0x0203, WmRbuttonUp = 0x0205, WmContextMenu = 0x007B;
 
@@ -46,7 +54,7 @@ internal static class TrayContract
     /// <param name="wParamMsg">The WM received: the window message id, or the registered "TaskbarCreated" broadcast id. WM nhận được: mã tin nhắn cửa sổ, hoặc mã broadcast "TaskbarCreated" đã đăng ký.</param>
     /// <param name="taskbarCreatedId">Id returned by RegisterWindowMessage("TaskbarCreated"). Id trả về bởi RegisterWindowMessage("TaskbarCreated").</param>
     /// <param name="callbackMessage">The WM_USER+1 message registered for the icon. Tin nhắn WM_USER+1 đã đăng ký cho icon.</param>
-    /// <param name="lParamMouseMsg">Mouse code in the low word of lParam (v4 shell). Mã chuột trong từ thấp của lParam (shell v4).</param>
+    /// <param name="lParamMouseMsg">Mouse code in the low word of lParam (v4 layout, pinned explicitly by NIM_SETVERSION at every add/re-add). Mã chuột trong từ thấp của lParam (bố cục v4, được ghim tường minh bằng NIM_SETVERSION ở mọi lần add/re-add).</param>
     internal static TrayDispatch Dispatch(uint wParamMsg, uint taskbarCreatedId, uint callbackMessage, uint lParamMouseMsg)
     {
         if (wParamMsg == taskbarCreatedId) return TrayDispatch.ReAddIcon;

@@ -12,6 +12,13 @@ public class TrayContractTests
         Assert.Equal(TrayContract.NifInfo, TrayContract.ModifyUFlags(false));
     }
 
+    // MSDN: NIM_SETVERSION = 0x00000004, NOTIFYICON_VERSION_4 = 4 — the explicit v4 switch after NIM_ADD.
+    [Fact]
+    public void NimSetVersion_PinnedToMsdnValue() => Assert.Equal(0x00000004u, TrayContract.NimSetVersion);
+
+    [Fact]
+    public void NotifyIconVersion4_PinnedToMsdnValue() => Assert.Equal(4u, TrayContract.NotifyIconVersion4);
+
     [Theory]
     [InlineData(BalloonIcon.None, 0)]
     [InlineData(BalloonIcon.Info, 1)]

@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Microsoft.Extensions.Logging;
 
 namespace ReTran_App.Services.Tray;
 
@@ -32,6 +33,7 @@ public sealed class Win32TrayHost : ITrayHost
     private string _tooltip = string.Empty;
     private Func<IReadOnlyList<TrayCommand>>? _menuProvider;
     private uint _taskbarCreatedId;
+    private readonly ILogger<Win32TrayHost>? _log;
 
     // Roots the delegate so the native callback cannot be collected while the window lives.
     // Giữ delegate sống để callback native không bị thu hồi khi cửa sổ còn tồn tại.
@@ -41,8 +43,19 @@ public sealed class Win32TrayHost : ITrayHost
     // WndProc của class dùng chung và static; chuyển tiếp đến instance host đang sống (một mỗi process).
     private static Win32TrayHost? _instance;
 
-    /// <summary>Creates the host; call <see cref="Create"/> from the UI thread to register the icon. Tạo host; gọi <see cref="Create"/> từ UI thread để đăng ký icon.</summary>
-    public Win32TrayHost() => _instance = this;
+    /// <summary>
+    /// Creates the host; call <see cref="Create"/> from the UI thread to register the icon.
+    /// Tạo host; gọi <see cref="Create"/> từ UI thread để đăng ký icon.
+    /// </summary>
+    /// <param name="log">
+    /// Optional logger for best-effort failures (currently a refused NIM_SETVERSION); <see langword="null"/> keeps the host silent in tests.
+    /// Logger tùy chọn cho các lỗi best-effort (hiện tại là NIM_SETVERSION bị từ chối); <see langword="null"/> để host im lặng trong test.
+    /// </param>
+    public Win32TrayHost(ILogger<Win32TrayHost>? log = null)
+    {
+        _log = log;
+        _instance = this;
+    }
 
     /// <inheritdoc/>
     public bool IsCreated => _created;
@@ -152,10 +165,14 @@ public sealed class Win32TrayHost : ITrayHost
             NativeMethods.HWND_MESSAGE, IntPtr.Zero, hInstance, IntPtr.Zero);
     }
 
-    // NIM_ADD with the contract's flags and uVersion = 4 (v4 callback layout). Returns whether the
-    // shell accepted the icon (false when there is no window or Shell_NotifyIconW refused).
-    // NIM_ADD với cờ của contract và uVersion = 4 (bố cục callback v4). Trả về shell có nhận icon
-    // hay không (false khi không có cửa sổ hoặc Shell_NotifyIconW từ chối).
+    // NIM_ADD with the contract's flags, then NIM_SETVERSION pins the v4 callback layout explicitly.
+    // Returns whether the shell accepted the icon (false when there is no window or Shell_NotifyIconW
+    // refused the NIM_ADD); a refused NIM_SETVERSION is logged and does not undo the registration —
+    // the menu position no longer depends on the payload version, so the icon stays fully usable.
+    // NIM_ADD với cờ của contract, rồi NIM_SETVERSION ghim bố cục callback v4 một cách tường minh.
+    // Trả về shell có nhận icon hay không (false khi không có cửa sổ hoặc Shell_NotifyIconW từ chối
+    // NIM_ADD); NIM_SETVERSION bị từ chối thì chỉ ghi log và không hoàn tác đăng ký — vị trí menu
+    // không còn phụ thuộc phiên bản payload nên icon vẫn dùng được trọn vẹn.
     private bool AddIcon()
     {
         if (_hwnd == 0) return false;
@@ -164,8 +181,22 @@ public sealed class Win32TrayHost : ITrayHost
         nid.uFlags = TrayContract.AddUFlags();
         nid.hIcon = _iconHandle;
         nid.szTip = Truncate(_tooltip, TipMax);
-        nid.uVersion = 4;
-        return NativeMethods.Shell_NotifyIconW(TrayContract.NimAdd, ref nid);
+        nid.uVersion = TrayContract.NotifyIconVersion4;
+        if (!NativeMethods.Shell_NotifyIconW(TrayContract.NimAdd, ref nid)) return false;
+
+        // MSDN requires NIM_SETVERSION to switch the callback payload to v4; uVersion inside NIM_ADD
+        // alone is not a guaranteed contract. Re-applied on every successful add, including the
+        // re-add after an explorer restart. cbSize/hWnd/uID (set by BaseNotifyIconData) identify the
+        // icon for the version switch.
+        // MSDN yêu cầu NIM_SETVERSION để chuyển payload callback sang v4; chỉ đặt uVersion trong
+        // NIM_ADD không phải hợp đồng được bảo đảm. Áp dụng lại ở mọi lần add thành công, kể cả
+        // re-add sau khi explorer khởi động lại. cbSize/hWnd/uID (do BaseNotifyIconData đặt) định
+        // danh icon cho lần chuyển phiên bản.
+        if (!NativeMethods.Shell_NotifyIconW(TrayContract.NimSetVersion, ref nid))
+        {
+            _log?.LogWarning("NIM_SETVERSION was refused; the tray callback keeps the default payload.");
+        }
+        return true;
     }
 
     // Common NOTIFYICONDATA identifying this icon (hWnd + uID).
@@ -184,8 +215,12 @@ public sealed class Win32TrayHost : ITrayHost
     private static nint StaticWndProc(nint hWnd, uint msg, nint wParam, nint lParam) =>
         _instance is { } host ? host.HandleMessage(hWnd, msg, wParam, lParam) : 0;
 
-    // v4 shell: LOWORD(lParam) carries the mouse code, screen coordinates live in wParam.
-    // Shell v4: từ thấp của lParam mang mã chuột, tọa độ màn hình nằm trong wParam.
+    // v4 shell (pinned explicitly by NIM_SETVERSION in AddIcon): LOWORD(lParam) carries the mouse
+    // code. The menu opens at GetCursorPos, never at wParam — under a v0 payload wParam is the icon
+    // id, not a coordinate pair.
+    // Shell v4 (được ghim tường minh bằng NIM_SETVERSION trong AddIcon): từ thấp của lParam mang mã
+    // chuột. Menu mở tại GetCursorPos, không bao giờ tại wParam — dưới payload v0, wParam là icon id,
+    // không phải cặp tọa độ.
     // hWnd là THAM SỐ cửa sổ thật, không phải field _hwnd: WM_NCCREATE (và mọi message gửi trong
     // lúc CreateWindowExW còn chạy) đến TRƯỚC khi _hwnd được gán — DefWindowProc với _hwnd==0 trả
     // FALSE, việc tạo bị abort với ERROR_INVALID_WINDOW_HANDLE, và host không bao giờ có cửa sổ.
@@ -215,19 +250,20 @@ public sealed class Win32TrayHost : ITrayHost
                 return 0;
 
             case TrayContract.TrayDispatch.ShowMenu:
-                ShowContextMenu(GetX(wParam), GetY(wParam));
+                // The cursor is always on the icon at right-click time — version-independent, so it
+                // is correct under both the v4 and the v0 payload. Con trỏ luôn nằm trên icon lúc
+                // right-click — độc lập phiên bản, nên đúng cho cả payload v4 lẫn v0.
+                if (NativeMethods.GetCursorPos(out NativeMethods.POINT point))
+                {
+                    ShowContextMenu(point.x, point.y);
+                }
                 return 0;
         }
         return NativeMethods.DefWindowProc(hWnd, msg, wParam, lParam);
     }
 
-    // GET_X_LPARAM / GET_Y_LPARAM equivalents (sign-extended: multi-monitor coords can be negative).
-    // Tương đương GET_X_LPARAM / GET_Y_LPARAM (kéo dài dấu: tọa độ đa màn hình có thể âm).
-    private static int GetX(nint value) => unchecked((short)(value & 0xFFFF));
-    private static int GetY(nint value) => unchecked((short)(((nuint)value >> 16) & 0xFFFF));
-
-    // Builds the menu from the provider, tracks it at the click point and raises CommandSelected.
-    // Dựng menu từ provider, hiện tại điểm click và phát CommandSelected.
+    // Builds the menu from the provider, tracks it at the given point and raises CommandSelected.
+    // Dựng menu từ provider, hiện tại điểm cho trước và phát CommandSelected.
     private void ShowContextMenu(int x, int y)
     {
         if (_menuProvider is not { } provider) return;
@@ -244,9 +280,15 @@ public sealed class Win32TrayHost : ITrayHost
             NativeMethods.AppendMenuW(hmenu, flags, (uint)(i + 1), command.Label);
         }
 
-        // Reset the foreground state so TrackPopupMenu's click-to-dismiss works.
-        // Đặt lại trạng thái foreground để hành vi click-để-đóng của TrackPopupMenu hoạt động.
-        NativeMethods.SetForegroundWindow(NativeMethods.GetForegroundWindow());
+        // Best-effort foreground activation of our own window (the classic tray recipe) so a click
+        // outside the menu dismisses it; a message-only window may never be allowed to take
+        // foreground — the PostMessage(WM_NULL) after TrackPopupMenuEx stays and is what keeps the
+        // dismissing click from being swallowed.
+        // Kích hoạt foreground cho chính cửa sổ của mình (công thức tray cổ điển, best-effort) để cú
+        // click bên ngoài đóng được menu; cửa sổ message-only có thể không bao giờ được nhận
+        // foreground — cú PostMessage(WM_NULL) sau TrackPopupMenuEx vẫn giữ nguyên và là thứ khiến cú
+        // click đóng menu không bị nuốt.
+        NativeMethods.SetForegroundWindow(_hwnd);
 
         int cmd = NativeMethods.TrackPopupMenuEx(hmenu,
             NativeMethods.TPM_RIGHTBUTTON | NativeMethods.TPM_RETURNCMD, x, y, 0, IntPtr.Zero, IntPtr.Zero);
@@ -332,6 +374,15 @@ public sealed class Win32TrayHost : ITrayHost
             internal uint dwInfoFlags;
         }
 
+        // POINT: screen coordinates, origin at the top-left of the primary monitor.
+        // POINT: tọa độ màn hình, gốc tại góc trên-trái của màn hình chính.
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct POINT
+        {
+            internal int x;
+            internal int y;
+        }
+
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
         internal static extern nint GetModuleHandleW(string? moduleName);
 
@@ -358,8 +409,11 @@ public sealed class Win32TrayHost : ITrayHost
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool SetForegroundWindow(nint hWnd);
 
+        // Screen coordinates of the cursor; the tray menu opens here (version-independent).
+        // Tọa độ màn hình của con trỏ; menu tray mở tại đây (độc lập phiên bản).
         [DllImport("user32.dll")]
-        internal static extern nint GetForegroundWindow();
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GetCursorPos(out POINT lpPoint);
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         [return: MarshalAs(UnmanagedType.Bool)]
