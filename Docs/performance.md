@@ -1002,3 +1002,23 @@ Get-Process ReTran.App | Select-Object Id, CPU, WorkingSet64, PeakWorkingSet64
 # CPU delta / 60 s = contribution khi menu hiện mà không có tương tác (kỳ vọng ~0)
 # Mở vùng thống kê + danh sách nguồn rồi đo lại WorkingSet: kỳ vọng tăng cỡ ~1 MB và giữ nguyên, không leo dần.
 ```
+
+---
+
+## Ngưỡng gộp dòng + gate OBS (2026-11-12)
+
+### Cấu phần thêm vào (đọc từ code đã commit, plan `2026-11-04-merge-thresholds-obs-gate-and-floating-menu`)
+
+| Thành phần | Chi phí thêm vào process App | Nguồn code |
+|---|---|---|
+| Ngưỡng gộp 3 số | Ba `double` trong struct `MergeThresholds` (**value-type** — đi theo struct trong `core.start`, không cấp phát, không state machine mới); phía App là helper thuần `OcrMergeThresholds` (parse/validate, không I/O) + 3 dòng số trong Settings sheet | `ReTran.Core` (`MergeThresholds`, `LineGrouper`), `ReTran.App/Services/OcrMergeThresholds.cs` |
+| Gate OBS | `OverlayVisibility.ShouldShowObs` **tính lại tại mỗi lần đọc** (không cache snapshot, **không timer, không thread**); `OverlayFeedServer` bỏ ngay event khung **tại gate** khi overlay ẩn — bộ đếm `seq` không chạy — và mỗi lần chuyển sang ẩn phát **đúng một** payload `{"boxes":[]}` để OBS xoá scene; gate đọc lại dưới cùng lock queue payload nên frame thua race bị drop, không tiêu số seq | `ReTran.App/Core/OverlayVisibility.cs`, `ReTran.App/Services/OverlayFeed/OverlayFeedServer.cs` |
+| `OverlayState.Clear()` | Xoá snapshot + một `Changed` (raise ngoài lock, idempotent) trên mọi đường Stop; mỗi phiên Stop phát đúng một payload xoá qua gate ở trên | `ReTran.App/Core/OverlayState.cs` + call sites trong `PipelineController` |
+
+- **`LineGrouper` không đổi số phép tính:** ngưỡng chỉ đổi *giá trị so sánh* trong vòng lặp gộp đã có — đối chiếu mục đã đo **§Chi phí LineGrouper** (dòng 921): `LineGrouperTests.ManyLinesTwoColumns_GroupsPerColumn_Fast` — **300 dòng (2 cột × 150) < 5 ms** (có warm-up trước để loại JIT). Không thêm đường nóng nào vào chu kỳ OCR.
+- **Traffic SSE khi overlay ẩn = 0 B/khung:** không broadcast khi ẩn (seq đứng yên), tổng traffic chỉ còn **một payload xoá mỗi transition ẩn** (vài chục byte/transition) — so với mốc đã đo §M2/M5 (8 khung/45 s, **2.550 B/khung** trên `/events`, ~0,17 fps do nhịp OCR giới hạn): gate chỉ **giảm** traffic, không đổi đường nóng.
+- **Ngân sách AGENTS.md không xấu đi:** không process/thread/timer mới; chi phí gate là một phép đọc + so sánh boolean bên trong broadcast vốn đã có; ba ngưỡng là value-type thuần.
+
+### Số đo (disclosure)
+
+Mục này là **mô tả code đã commit**, không phải số đo process mới — các mốc so sánh nêu trên (§Chi phí LineGrouper, §M2/M5 `:408`,`:421`) là số đo thật đã có trong file. Smoke tương tác cho phần ngưỡng/OBS nằm trong **Task 24 Step 2** của plan (controller chạy trên máy thật).
