@@ -256,11 +256,14 @@ public sealed class TranslateCycleSink : ICycleSink
 
     /// <summary>
     /// One background batch: cache lookup (hard 2 s bound, failure = all-miss) → session hits →
-    /// parallel translation (≤ 4) → <see cref="ICacheChannel.PutAsync"/> (the <c>translate.put</c> path).
+    /// one whole-lot translation under a single gate slot → <see cref="ICacheChannel.PutAsync"/>
+    /// (the <c>translate.put</c> path). A result-count mismatch is logged and the lot is retried
+    /// one text at a time; any other translation failure falls through to the outer handler below.
     /// All failures are logged to stderr, never rethrown, except cancellation when the sink is stopped.
-    /// Một lô nền: tra cache (giới cứng 2 s, lỗi = all-miss) → ghi hit vào session → dịch song song
-    /// (≤ 4) → <see cref="ICacheChannel.PutAsync"/> (đường <c>translate.put</c>). Mọi lỗi đều ghi
-    /// stderr, không lan truyền, trừ khi bị hủy do sink dừng.
+    /// Một lô nền: tra cache (giới cứng 2 s, lỗi = all-miss) → ghi hit vào session → dịch cả lô
+    /// trong một khe gate duy nhất → <see cref="ICacheChannel.PutAsync"/> (đường <c>translate.put</c>).
+    /// Lệch số kết quả được ghi log rồi dịch lại từng văn bản; các lỗi dịch khác rơi xuống handler
+    /// ngoài bên dưới. Mọi lỗi đều ghi stderr, không lan truyền, trừ khi bị hủy do sink dừng.
     /// </summary>
     private async Task BackgroundAsync(List<string> texts, CancellationToken ct)
     {
@@ -309,12 +312,28 @@ public sealed class TranslateCycleSink : ICycleSink
 
             if (pending.Count > 0)
             {
-                (string Text, string Translated)?[] results = await Task.WhenAll(
-                    pending.Select(t => TranslateOneAsync(t, ct)));
-                List<(string Text, string Translated)> entries = results
-                    .Where(r => r is not null)
-                    .Select(r => r!.Value)
-                    .ToList();
+                List<(string Text, string Translated)> entries;
+                try
+                {
+                    IReadOnlyList<string> translated = await TranslateBatchGuardedAsync(pending, ct);
+                    entries = new List<(string Text, string Translated)>(pending.Count);
+                    for (int i = 0; i < pending.Count; i++)
+                        entries.Add((pending[i], translated[i]));
+                }
+                catch (FormatException ex)
+                {
+                    // Response mapping mismatch (missing/extra/malformed segments): the provider
+                    // result cannot be trusted, so fall back to one text at a time.
+                    // Mapping phản hồi lệch (thiếu/thừa/segment hỏng): không tin được kết quả nhà
+                    // cung cấp nên quay về dịch từng văn bản.
+                    _stderr.WriteLine($"warn: batch translate failed ({ex.Message}); falling back to per-text");
+                    (string Text, string Translated)?[] results = await Task.WhenAll(
+                        pending.Select(t => TranslateOneAsync(t, ct)));
+                    entries = results
+                        .Where(r => r is not null)
+                        .Select(r => r!.Value)
+                        .ToList();
+                }
                 if (entries.Count > 0)
                     await _cache.PutAsync(_context, _src, _dst, entries, ct);
             }
@@ -349,6 +368,47 @@ public sealed class TranslateCycleSink : ICycleSink
             CancellationToken.None,
             TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
+    }
+
+    /// <summary>
+    /// Translates a whole lot in one provider call under a single gate slot, records every result
+    /// in the session, and rejects a result set whose size does not match the input.
+    /// Dịch cả lô trong một lời gọi nhà cung cấp dưới một khe gate duy nhất, ghi mọi kết quả vào
+    /// session, và từ chối tập kết quả có số phần tử không khớp đầu vào.
+    /// </summary>
+    /// <param name="texts">Texts to translate as one lot. Các văn bản cần dịch thành một lô.</param>
+    /// <param name="ct">Token used to cancel the request. Token dùng để hủy yêu cầu.</param>
+    /// <returns>
+    /// One translated text per input, in input order. Mỗi văn bản nguồn cho một kết quả đã dịch,
+    /// giữ đúng thứ tự đầu vào.
+    /// </returns>
+    /// <exception cref="FormatException">
+    /// Thrown when the provider returns a different number of results than inputs; the caller
+    /// catches it to run the per-text fallback. Ném khi nhà cung cấp trả số kết quả khác số đầu
+    /// vào; caller bắt lỗi này để chạy đường fallback từng văn bản.
+    /// </exception>
+    private async Task<IReadOnlyList<string>> TranslateBatchGuardedAsync(
+        List<string> texts, CancellationToken ct)
+    {
+        await _translateGate.WaitAsync(ct);
+        try
+        {
+            IReadOnlyList<string> translated =
+                await _translator.TranslateBatchAsync(texts, _src, _dst, ct);
+            if (translated.Count != texts.Count)
+                throw new FormatException(
+                    $"batch translate returned {translated.Count} results for {texts.Count} texts");
+            lock (_sync)
+            {
+                for (int i = 0; i < texts.Count; i++)
+                    _session[texts[i]] = translated[i];
+            }
+            return translated;
+        }
+        finally
+        {
+            _translateGate.Release();
+        }
     }
 
     /// <summary>

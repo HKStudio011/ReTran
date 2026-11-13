@@ -49,7 +49,11 @@ public class TranslateCycleSinkTests
         public string Result = "β";
         public bool ThrowOnTranslate;
         public bool BlockForever;
+        public bool ThrowFormatOnBatch;
+        public bool ThrowHttpOnBatch;
+        public bool WrongResultCount;
         public List<string> CallTexts { get; } = new();
+        public List<IReadOnlyList<string>> BatchCalls { get; } = new();
         public Task<string> TranslateAsync(string text, string src, string dst, CancellationToken ct)
         {
             CallTexts.Add(text);
@@ -57,6 +61,19 @@ public class TranslateCycleSinkTests
                 return new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously).Task; // treo có chủ đích
             if (ThrowOnTranslate) throw new HttpRequestException("stub translate failed");
             return Task.FromResult(Result);
+        }
+
+        public async Task<IReadOnlyList<string>> TranslateBatchAsync(
+            IReadOnlyList<string> texts, string src, string dst, CancellationToken ct = default)
+        {
+            BatchCalls.Add(texts);
+            if (ThrowFormatOnBatch) throw new FormatException("stub batch mapping failed");
+            if (ThrowHttpOnBatch) throw new HttpRequestException("stub batch http failed");
+            var results = new List<string>();
+            foreach (string t in texts)
+                results.Add(await TranslateAsync(t, src, dst, ct)); // giữ nguyên CallTexts như đường cũ
+            if (WrongResultCount) results.RemoveAt(results.Count - 1);
+            return results;
         }
     }
 
@@ -287,5 +304,72 @@ public class TranslateCycleSinkTests
         Assert.Null(n.Single("frame.translated")!["boxes"]!.AsArray()[0]!["translated"]);
         Assert.Equal(new[] { "STUCK" }, tr.CallTexts); // lookup treo -> timeout -> all-miss -> dịch hết
         hang.TrySetResult(true); // release để dọn dẹp
+    }
+
+    [Fact]
+    public async Task Batch_OneCallForManyMisses()
+    {
+        var cache = new StubCache { Misses = new List<string> { "A", "B" } };
+        var tr = new StubTranslator { Result = "β" };
+        var n = new StubNotifier();
+        var sink = Create(tr, cache, n);
+        await sink.OnCycleAsync(1, 100, 100, Result("A", "B"), CancellationToken.None);
+        await sink.WhenIdleAsync();
+
+        // cả lô đi qua đúng một lời gọi batch
+        var batch = Assert.Single(tr.BatchCalls);
+        Assert.Equal(new[] { "A", "B" }, batch);
+        // và ghi cache đúng một lô gồm cả 2 entry
+        var put = Assert.Single(cache.Puts);
+        Assert.Equal(2, put.Count);
+        Assert.Equal(new[] { "A", "B" }, put.Select(e => e.Text));
+    }
+
+    [Fact]
+    public async Task BatchMappingFailure_FallsBackPerText()
+    {
+        var cache = new StubCache { Misses = new List<string> { "A", "B" } };
+        var tr = new StubTranslator { Result = "β", ThrowFormatOnBatch = true };
+        var n = new StubNotifier();
+        var sink = Create(tr, cache, n);
+        await sink.OnCycleAsync(1, 100, 100, Result("A", "B"), CancellationToken.None);
+        await sink.WhenIdleAsync();
+
+        Assert.Single(tr.BatchCalls); // batch vẫn được thử đúng một lần
+        Assert.Equal(new[] { "A", "B" }, tr.CallTexts); // lệch mapping -> fallback từng text chạy
+        var put = Assert.Single(cache.Puts);
+        Assert.Equal(2, put.Count);
+    }
+
+    [Fact]
+    public async Task BatchHttpFailure_NoFallback_NoPut()
+    {
+        var err = new StringWriter();
+        var cache = new StubCache { Misses = new List<string> { "A", "B" } };
+        var tr = new StubTranslator { ThrowHttpOnBatch = true };
+        var n = new StubNotifier();
+        var sink = Create(tr, cache, n, err);
+        await sink.OnCycleAsync(1, 100, 100, Result("A", "B"), CancellationToken.None);
+        await sink.WhenIdleAsync();
+
+        Assert.Empty(tr.CallTexts); // lỗi HTTP không rơi vào fallback từng text
+        Assert.Empty(cache.Puts);   // không ghi cache dòng lỗi
+        Assert.Contains("warn", err.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Batch_WrongResultCount_FallsBack()
+    {
+        var cache = new StubCache { Misses = new List<string> { "A", "B" } };
+        var tr = new StubTranslator { Result = "β", WrongResultCount = true };
+        var n = new StubNotifier();
+        var sink = Create(tr, cache, n);
+        await sink.OnCycleAsync(1, 100, 100, Result("A", "B"), CancellationToken.None);
+        await sink.WhenIdleAsync();
+
+        Assert.Single(tr.BatchCalls); // stub trả thiếu 1 phần tử -> batch bị coi là lệch
+        // stub batch loop ghi CallTexts (A,B); lệch count -> fallback gọi lại từng text (A,B) lần nữa
+        Assert.Equal(new[] { "A", "B", "A", "B" }, tr.CallTexts);
+        Assert.NotEmpty(cache.Puts);
     }
 }
