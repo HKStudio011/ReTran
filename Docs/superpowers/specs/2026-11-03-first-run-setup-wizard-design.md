@@ -23,7 +23,7 @@ Nguyên nhân gốc: Core chỉ tìm được sidecar khi (1) `FindRepoRoot()` �
 
 - Không làm installer Windows; zip + self-setup là mô hình phân phối.
 - Không hỗ trợ Linux/macOS.
-- Không có chế độ "dùng app không OCR" — bỏ qua setup = đóng app.
+- Không có chế độ "dùng app không OCR" — bỏ qua setup = đóng app. *(Sửa 2026-11-13: xem amendment `2026-11-13-skip-confirmation-popup-design.md` — "Bỏ qua" giờ mở popup hỏi Thoát ReTran / Bỏ qua thiết lập; chọn "Bỏ qua thiết lập" cho phép dùng app trong phiên, setup vẫn chưa xong nên lần sau nhắc lại.)*
 - Không chạy song song nhiều model nhận chữ (engine chỉ giữ một cặp det/rec tại một thời điểm).
 - App update ghi đè source `ReTran.OCR` (code sidecar mới hiệu lực tự động nhờ uv cài project kiểu editable) nhưng **không tự chạy `uv sync`** — nếu một release đổi dependencies, venv cũ thiếu package → sửa bằng nút "Chạy lại setup" (tradeoff chấp nhận theo quyết định user: ưu tiên đơn giản).
 - Không nằm trong spec này: UI quản lý model đầy đủ, UI profile cửa sổ + cache dịch (import/export/sửa) — hai việc tiếp theo trong hàng đợi.
@@ -40,7 +40,7 @@ Nguyên nhân gốc: Core chỉ tìm được sidecar khi (1) `FindRepoRoot()` �
 3. **Các câu hỏi cần user chọn (chọn ngôn ngữ/model) chỉ xuất hiện SAU khi check system pass.**
 4. **Chọn ngôn ngữ**: chọn 1 ngôn ngữ chính của nội dung muốn nhận chữ (không đa-chọn). Ngôn ngữ thuộc phủ v6 → dùng cặp `PP-OCRv6_small`; ngoài phủ → thêm model rec bản 5 theo bộ chữ. Bước này chỉ tải những model còn thiếu.
 5. **GPU/CPU**: NVIDIA **rời** + driver đủ mới → cài bản GPU (`paddlepaddle-gpu`, wheel `cu129` khi driver ≥ 576.02 — sàn CUDA 12.9, mục 10). Phát hiện GPU rời AMD → **thông báo rõ "không cài được bản GPU cho card AMD trên Windows, sẽ thay bằng bản CPU"** rồi tải bản CPU. Không có GPU rời → bản CPU với thông báo nhẹ tương tự.
-6. **Lỗi ở bất kỳ bước nào**: tự retry 3 lần. Vẫn lỗi → màn hình lỗi hiển thị thông điệp + đúng 2 nút: **Thử lại** (chạy lại bước đó) và **Bỏ qua** (đóng app). Lần chạy sau modal hiện lại vì điều kiện chưa đạt.
+6. **Lỗi ở bất kỳ bước nào**: tự retry 3 lần. Vẫn lỗi → màn hình lỗi hiển thị thông điệp + đúng 2 nút: **Thử lại** (chạy lại bước đó) và **Bỏ qua**. *(Sửa 2026-11-13: "Bỏ qua" **mở popup 3 lựa chọn** — Thoát ReTran / Bỏ qua thiết lập / Quay lại; xem amendment `2026-11-13-skip-confirmation-popup-design.md`.)* Lần chạy sau modal hiện lại vì điều kiện chưa đạt.
 7. **Toàn bộ trạng thái OCR nằm trong thư mục app**: `.venv` và `models` đều ở `<appDir>\ReTran.OCR\` (models cùng cấp với `.venv`, KHÔNG đặt trong `%LOCALAPPDATA%`). Updater khi update **không được xoá** các thư mục này — code mới ghi đè lên, venv/models giữ nguyên.
 8. **Release đổi code sidecar**: update ghi đè source `ReTran.OCR` là đủ (code mới tự hiệu lực), không cần cơ chế re-sync hay version stamp.
 
