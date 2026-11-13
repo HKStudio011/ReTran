@@ -1,5 +1,6 @@
 @* Modal setup toàn màn hình chạy lần đầu — điểm entry duy nhất của wizard (spec §5.9): tự trigger
-   trong OnInitialized khi state chưa xong hoặc artifact đã mất; render rỗng khi wizard hoàn tất.
+   trong OnInitialized khi state chưa xong hoặc artifact đã mất; render rỗng khi wizard hoàn tất hoặc
+   user đã "bỏ qua thiết lập" cho phiên này (spec 2026-11-13).
    Mọi hành động đi qua SetupCoordinator — modal KHÔNG gọi uv/python/sidecar trực tiếp (spec §5.11). *@
 @using ReTran_App.Services
 @using ReTran_App.Services.Setup
@@ -8,7 +9,7 @@
 @inject I18nService L
 @inject AppSettingsService SettingsStore
 
-@if (_wizardActive && !Coordinator.IsComplete)
+@if (_wizardActive && !Coordinator.IsComplete && !Coordinator.SkippedForSession)
 {
     @* Keyframes cho progress bar indeterminate (uv sync có thể kéo dài vài phút). Định nghĩa tại đây
        thay vì Vite build: modal không được phụ thuộc rebuild frontend. *@
@@ -83,7 +84,7 @@
                                thẳng thay vì đường cụt (addendum §3). *@
                             <button type="button" class="rt-btn rt-btn-primary rt-mini" disabled="@_busy" @onclick="SwitchToCpuFlavorAsync">@(L["setup.error.switchCpu"])</button>
                         }
-                        <button type="button" class="rt-btn rt-mini" disabled="@_busy" @onclick="Skip">@(L["setup.error.skip"])</button>
+                        <button type="button" class="rt-btn rt-mini" disabled="@_busy" @onclick="ShowSkipConfirm">@(L["setup.error.skip"])</button>
                     </div>
                     break;
 
@@ -96,6 +97,24 @@
             }
         </div>
     </div>
+
+    @if (_showSkipConfirm)
+    {
+        @* Popup xác nhận của nút "Bỏ qua" (spec 2026-11-13): lớp phủ TRÊN modal (z 61 > 60, dưới
+           toasts 70). [Thoát ReTran] = hành vi Skip cũ; [Bỏ qua thiết lập] = ẩn wizard + mở gate cho
+           phiên này; [Quay lại] = đóng popup. *@
+        <div class="fixed inset-0 flex items-center justify-center bg-black/50 p-4" style="z-index: 61;">
+            <div role="dialog" aria-modal="true" aria-label="@(L["setup.skipConfirm.message"])"
+                 class="rt-setup-modal w-full max-w-sm rounded-lg border border-surface bg-background p-4 shadow-xl">
+                <p class="mb-3 text-sm text-surface">@(L["setup.skipConfirm.message"])</p>
+                <div class="flex gap-2" style="flex-wrap: wrap;">
+                    <button type="button" class="rt-btn rt-mini" disabled="@_busy" @onclick="ConfirmExit">@(L["setup.skipConfirm.exit"])</button>
+                    <button type="button" class="rt-btn rt-btn-primary rt-mini" disabled="@_busy" @onclick="ConfirmSkipForSession">@(L["setup.skipConfirm.skip"])</button>
+                    <button type="button" class="rt-btn rt-mini" disabled="@_busy" @onclick="BackFromSkipConfirm">@(L["setup.skipConfirm.back"])</button>
+                </div>
+            </div>
+        </div>
+    }
 }
 
 @code {
@@ -105,6 +124,7 @@
 
     private bool _wizardActive;   // Wizard đã được start (hoặc đang chạy do rerun) — phân biệt với đường rẻ "đã xong".
     private bool _busy;           // Chặn bấm chồng các nút xác nhận/thử lại.
+    private bool _showSkipConfirm; // Popup [Thoát ReTran]/[Bỏ qua thiết lập]/[Quay lại] đang mở (spec 2026-11-13).
     private string _selected = "auto";
     private readonly List<LangOption> _options = [];
 
@@ -268,12 +288,17 @@
         }
     }
 
-    private void Skip()
+    // Popup "Bỏ qua" (spec 2026-11-13): mở popup thay vì đóng app ngay.
+    private void ShowSkipConfirm()
     {
-        // Same _busy guard as the sibling buttons: Skip fires closeApp, so the modal must not take
-        // a second command while that is in flight.
-        // Cùng guard _busy như các nút sibling: Skip gọi closeApp, modal không được nhận lệnh thứ
-        // hai trong lúc lệnh đó đang chạy.
+        if (_busy) return;
+        _showSkipConfirm = true;
+    }
+
+    // [Thoát ReTran] — đúng hành vi Skip cũ: đóng app sạch qua closeApp, không ghi state. Cùng guard
+    // _busy như các nút sibling: modal không được nhận lệnh thứ hai trong lúc closeApp đang chạy.
+    private void ConfirmExit()
+    {
         if (_busy) return;
         _busy = true;
         try
@@ -285,5 +310,34 @@
             _busy = false;
             StateHasChanged();
         }
+    }
+
+    // [Bỏ qua thiết lập] — ẩn wizard tới hết phiên + mở gate; modal tự ẩn qua điều kiện render.
+    private void ConfirmSkipForSession()
+    {
+        if (_busy) return;
+        _busy = true;
+        try
+        {
+            Coordinator.SkipForSession();
+        }
+        finally
+        {
+            // Reset luôn trạng thái popup: lượt "Chạy lại setup" sau đó làm modal hiện lại — popup cũ
+            // (kèm nút [Thoát ReTran]) không được hồi sinh trên đầu wizard vừa chạy lại.
+            // Also reset the popup state: a later "re-run setup" makes the modal visible again — the old
+            // popup (with its [Exit ReTran] button) must not resurrect over the re-running wizard.
+            _showSkipConfirm = false;
+            _busy = false;
+            StateHasChanged();
+        }
+    }
+
+    // [Quay lại] — đóng popup, về màn lỗi như cũ.
+    private void BackFromSkipConfirm()
+    {
+        if (_busy) return;
+        _showSkipConfirm = false;
+        StateHasChanged();
     }
 }

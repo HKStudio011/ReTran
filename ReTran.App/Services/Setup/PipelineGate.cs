@@ -17,20 +17,32 @@ namespace ReTran_App.Services.Setup;
 /// nhưng đang "chạy lại setup": trong cửa sổ Checking đồng bộ của lượt chạy lại, bước vẫn đọc là Done
 /// (nên chỉ xét completion thì pass), nhưng lượt chạy đó sẽ kill+start Core ở bước VerifyingSidecar và
 /// pipeline nào start trong cửa sổ đó sẽ chết theo. Tách ra khỏi Home.razor thành hàm thuần để quyết
-/// định test được (SetupWiringTests).
+/// định test được (SetupWiringTests). Amendment 2026-11-13: lựa chọn "bỏ qua thiết lập cho phiên này"
+/// trên popup màn lỗi thay thế completion tới hết phiên (modal ẩn, không ghi state nào) nên cổng cũng
+/// mở — trong khi một lượt đang chạy thì vẫn luôn khóa.
 /// </summary>
 public static class PipelineGate
 {
     /// <summary>
-    /// Whether the capture/OCR pipeline may start given the setup completion state and whether a wizard
-    /// run is in flight.
-    /// Pipeline capture/OCR có được start không khi biết trạng thái hoàn tất của setup và wizard có đang
-    /// chạy một lượt không.
+    /// Whether the capture/OCR pipeline may start given the setup completion state, whether a wizard
+    /// run is in flight, and whether the user skipped setup for this session on the failure popup.
+    /// The session skip substitutes completion for THIS session only (spec amendment 2026-11-13): the
+    /// gate opens without any persisted state, so a start can still fail later at Start (missing
+    /// sidecar/model) like any other Start error — the gate's job ends here. A run in flight always
+    /// blocks, including the synchronous Checking window of a forced re-run.
+    /// Pipeline capture/OCR có được start không khi biết trạng thái hoàn tất của setup, wizard có đang
+    /// chạy một lượt không, và user có "bỏ qua thiết lập cho phiên này" trên popup màn lỗi không.
+    /// Cờ skip thay thế completion CHỈ cho phiên này (amendment spec 2026-11-13): cổng mở dù không ghi
+    /// state nào, nên một lần start vẫn có thể fail ở Start như mọi lỗi Start khác (thiếu sidecar/model)
+    /// — việc của cổng kết thúc ở đây. Một lượt đang chạy luôn khóa, kể cả cửa sổ Checking đồng bộ của
+    /// lượt "chạy lại setup".
     /// </summary>
     /// <param name="setupComplete">True once the setup wizard reached its Done step. Đúng khi wizard setup đã tới bước Done.</param>
     /// <param name="setupRunning">True while any coordinator operation is in flight (e.g. a forced re-run). Đúng khi một thao tác của coordinator đang chạy (vd "chạy lại setup").</param>
-    /// <returns><see langword="true"/> only when setup is complete AND no run is in flight; <see langword="false"/> otherwise. <see langword="true"/> chỉ khi setup đã xong VÀ không có lượt chạy nào đang diễn ra; <see langword="false"/> trong mọi trường hợp khác.</returns>
-    internal static bool CanStartPipeline(bool setupComplete, bool setupRunning) => setupComplete && !setupRunning;
+    /// <param name="skippedForSession">True when the user chose "skip setup for this session" on the failure popup; substitutes <paramref name="setupComplete"/> for the current session (nothing persisted). Đúng khi user chọn "bỏ qua thiết lập cho phiên này" trên popup màn lỗi; thay thế <paramref name="setupComplete"/> trong phiên hiện tại (không ghi state nào).</param>
+    /// <returns><see langword="true"/> only when setup is complete (or skipped for this session) AND no run is in flight; <see langword="false"/> otherwise. <see langword="true"/> chỉ khi setup đã xong (hoặc đã bỏ qua cho phiên này) VÀ không có lượt chạy nào đang diễn ra; <see langword="false"/> trong mọi trường hợp khác.</returns>
+    internal static bool CanStartPipeline(bool setupComplete, bool setupRunning, bool skippedForSession) =>
+        (setupComplete || skippedForSession) && !setupRunning;
 }
 
 /// <summary>

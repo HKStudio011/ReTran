@@ -7,12 +7,14 @@ using ReTran_App.Services.Setup;
 /// <see cref="SetupCoreBridge"/> adapter (its <c>RestartAsync</c> must dispose the core peer BEFORE
 /// starting it again, and its <c>CallAsync</c> must forward method + params verbatim) and the
 /// <see cref="PipelineGate.CanStartPipeline"/> guard extracted from Home.razor (the pipeline may only
-/// start once setup is complete AND no wizard run is in flight — spec §3.1). The fake core peer records
-/// every action so ordering is asserted, not assumed.
+/// start once setup is complete OR the user chose "skip setup for this session" on the failure popup,
+/// and no wizard run is in flight — spec §3.1, amendment 2026-11-13). The fake core peer records every
+/// action so ordering is asserted, not assumed.
 /// Test cho các mảnh wiring của Task 14 nằm ngoài coordinator: adapter <see cref="SetupCoreBridge"/>
 /// (<c>RestartAsync</c> phải dispose core peer TRƯỚC khi start lại, <c>CallAsync</c> phải forward
 /// nguyên vẹn method + params) và guard <see cref="PipelineGate.CanStartPipeline"/> tách ra từ
-/// Home.razor (pipeline chỉ được start khi setup đã xong VÀ wizard không đang chạy lượt nào — spec §3.1).
+/// Home.razor (pipeline chỉ được start khi setup đã xong HOẶC user đã chọn "bỏ qua thiết lập cho
+/// phiên này" trên popup màn lỗi, và wizard không đang chạy lượt nào — spec §3.1, amendment 2026-11-13).
 /// Fake core peer ghi lại mọi hành động để assert đúng thứ tự, không đoán.
 /// </summary>
 public class SetupWiringTests
@@ -50,14 +52,20 @@ public class SetupWiringTests
     }
 
     [Theory]
-    // Bốn tổ hợp (complete, running): chỉ "xong VÀ rảnh" được start. Dòng (true, true) là cửa sổ race
-    // của "chạy lại setup" — Step vẫn Done nên IsComplete đơn lẻ sẽ pass nhầm.
-    [InlineData(true, false, true)]   // complete + idle → cho start
-    [InlineData(true, true, false)]   // complete nhưng đang rerun (cửa sổ Checking) → chặn
-    [InlineData(false, false, false)] // chưa xong, đang dừng chờ user → chặn
-    [InlineData(false, true, false)]  // chưa xong và đang chạy (first run) → chặn
-    public void CanStartPipeline_RequiresCompleteAndNotRunning(bool setupComplete, bool setupRunning, bool expected) =>
-        Assert.Equal(expected, PipelineGate.CanStartPipeline(setupComplete: setupComplete, setupRunning: setupRunning));
+    // (complete, running, skipped): "Bỏ qua thiết lập" THAY THẾ completion cho phiên này, nhưng
+    // "đang chạy một lượt" luôn khóa (kể cả cửa sổ rerun cũ).
+    [InlineData(true, false, false, true)]   // complete + idle → cho start (cũ)
+    [InlineData(true, false, true, true)]    // complete + skipped → cho start
+    [InlineData(false, false, true, true)]   // ⭐ core: chưa xong nhưng đã "Bỏ qua thiết lập" → cho start
+    [InlineData(false, false, false, false)] // chưa xong, chưa skip → chặn (cũ)
+    [InlineData(true, true, false, false)]   // cửa sổ rerun (cũ) → chặn
+    [InlineData(false, true, false, false)]  // first run đang chạy (cũ) → chặn
+    [InlineData(true, true, true, false)]    // skip không mở được cửa sổ rerun
+    [InlineData(false, true, true, false)]   // skip + đang chạy → chặn
+    public void CanStartPipeline_RequiresIdleAndCompleteOrSkipped(
+        bool setupComplete, bool setupRunning, bool skippedForSession, bool expected) =>
+        Assert.Equal(expected, PipelineGate.CanStartPipeline(
+            setupComplete: setupComplete, setupRunning: setupRunning, skippedForSession: skippedForSession));
 
     /// <summary>
     /// Recording <see cref="ICorePeer"/> double that is also <see cref="IAsyncDisposable"/> (like the

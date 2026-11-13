@@ -258,10 +258,11 @@
     }
 </section>
 
-@if (Setup.IsComplete)
+@if (Setup.IsComplete || Setup.SkippedForSession)
 {
-    @* "Chạy lại setup" (smoke #8): chỉ hiện khi wizard đã xong — bước đã done được skip nên máy
-       không đổi gì sẽ hoàn tất gần tức thì. Khi wizard chưa xong, modal che màn hình thay nút này. *@
+    @* "Chạy lại setup" (smoke #8): hiện khi wizard đã xong — bước đã done được skip nên máy không đổi gì
+       sẽ hoàn tất gần tức thì — hoặc user đã "Bỏ qua thiết lập" cho phiên này (spec 2026-11-13, đây là
+       đường quay lại setup trong cùng phiên). Khi wizard chưa xong và chưa skip, modal che màn hình. *@
     <section class="rt-sect">
         <h3>@(L["setup.section"])</h3>
         <div class="rt-field-row" style="flex-wrap: wrap; gap: 10px;">
@@ -966,11 +967,14 @@
         _ = Task.Run(() => Setup.StartAsync(force: true));
     }
 
-    // Wizard publish từ luồng nền (pattern UpdateModal) — marshal về UI thread: khi wizard xong lại thì
-    // bật nút rerun trở lại và re-render để section "Cài đặt" hiện/ẩn theo đúng IsComplete.
+    // Wizard publish từ luồng nền (pattern UpdateModal) — marshal về UI thread: khi lượt rerun kết thúc
+    // thì bật nút rerun trở lại và re-render để section "Cài đặt" hiện/ẩn theo đúng trạng thái.
+    // Reset theo !IsRunning (không chỉ IsComplete): lượt rerun kết thúc ở Failed vẫn phải để nút bấm lại
+    // được — vòng lặp rerun→fail→"Bỏ qua thiết lập"→rerun (spec 2026-11-13); publish cuối lúc fail có
+    // thể vẫn IsRunning, lần publish kế tiếp khi đã rảnh mới reset được.
     private void OnSetupChanged() => _ = InvokeAsync(() =>
     {
-        if (Setup.IsComplete) _rerunStarted = false;
+        if (Setup.IsComplete || !Setup.IsRunning) _rerunStarted = false;
         StateHasChanged();
     });
 
