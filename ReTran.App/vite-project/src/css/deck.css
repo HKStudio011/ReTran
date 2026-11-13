@@ -237,8 +237,10 @@ body { background: var(--rt-page); }
   height: 34px;
   padding: 0 14px;
   border-radius: var(--rt-r2);
-  border: 1px solid var(--rt-line2);
-  background: var(--rt-panel2);
+  /* 2026-11-14: nút phải NHÌN THẤY được — viền/nền rõ hơn bản mockup gốc (user feedback:
+     "không nút nào có viền và màu"); hover đổi cả nền chứ không chỉ viền 1px. */
+  border: 1px solid color-mix(in srgb, var(--rt-dim) 55%, transparent);
+  background: var(--rt-raised);
   color: var(--rt-text);
   font-size: 13px;
   font-weight: 500;
@@ -246,7 +248,10 @@ body { background: var(--rt-page); }
   transition: border-color .15s, background .15s, transform .06s;
 }
 
-.rt-btn:hover { border-color: color-mix(in srgb, var(--rt-text) 40%, transparent); }
+.rt-btn:hover {
+  border-color: var(--rt-dim);
+  background: color-mix(in srgb, var(--rt-raised) 86%, var(--rt-text));
+}
 .rt-btn:active { transform: translateY(1px); }
 .rt-btn:disabled { opacity: .45; cursor: not-allowed; transform: none; }
 .rt-btn svg {
@@ -267,12 +272,25 @@ body { background: var(--rt-page); }
 }
 
 .rt-btn-primary:hover {
-  background: color-mix(in srgb, var(--rt-tally) 88%, white);
-  border-color: color-mix(in srgb, var(--rt-tally) 88%, white);
+  background: color-mix(in srgb, var(--rt-tally) 82%, white);
+  border-color: color-mix(in srgb, var(--rt-tally) 82%, white);
 }
 
 .rt-btn-ghost { background: transparent; border-color: transparent; color: var(--rt-dim); }
 .rt-btn-ghost:hover { color: var(--rt-text); background: var(--rt-well); border-color: var(--rt-line); }
+
+/* Variant "nguy hiểm" cho hành động phá huỷ/thoát (2026-11-14): user feedback "danger thì không có màu".
+   Dùng cho nút [Thoát ReTran] của popup xác nhận — đỏ theo --rt-danger, hover tăng nền + viền đặc. */
+.rt-btn-danger {
+  border-color: color-mix(in srgb, var(--rt-danger) 55%, transparent);
+  background: color-mix(in srgb, var(--rt-danger) 10%, transparent);
+  color: var(--rt-danger);
+}
+
+.rt-btn-danger:hover {
+  border-color: var(--rt-danger);
+  background: color-mix(in srgb, var(--rt-danger) 20%, transparent);
+}
 .rt-mini { height: 24px; padding: 0 9px; font-size: 11px; border-radius: var(--rt-r1); }
 
 .rt-sr {
