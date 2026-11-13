@@ -60,6 +60,18 @@ public class GoogleWebTranslatorTests
     }
 
     /// <summary>
+    /// Decodes the <c>q</c> query value from a recorded request URL.
+    /// Giải mã giá trị truy vấn <c>q</c> từ URL yêu cầu đã ghi lại.
+    /// </summary>
+    private static string RequestQ(string url)
+    {
+        var slots = new Uri(url).Query.TrimStart('?')
+            .Split('&', StringSplitOptions.RemoveEmptyEntries);
+        var qParam = slots.First(p => p.StartsWith("q=", StringComparison.Ordinal));
+        return Uri.UnescapeDataString(qParam["q=".Length..]);
+    }
+
+    /// <summary>
     /// Records every request URL and echoes the requested <c>q</c> back as a Google-shaped body,
     /// one segment per line (originals echo verbatim, translations wrap each line in guillemets).
     /// Ghi lại mọi URL yêu cầu và echo tham số <c>q</c> thành body đúng dạng Google, mỗi dòng một segment.
@@ -172,15 +184,75 @@ public class GoogleWebTranslatorTests
     [Fact]
     public async Task Batch_Chunks_ByUrlLength_OrderPreserved()
     {
-        var text = new string('x', 900);
-        Assert.True((text.Length * 2) + 1 > GoogleWebTranslator.MaxBatchUrlLength);
+        // Distinct texts, each 900 chars: the newline-joined pair escapes to 900 + 3 + 900 = 1803
+        // characters, over the 1800 budget, so every chunk holds exactly one text. Distinct contents
+        // mean a reversed chunk order would be visible in both the request `q` values and the result.
+        // Văn bản khác nhau, mỗi cái 900 ký tự: cặp gộp bằng xuống dòng escape thành
+        // 900 + 3 + 900 = 1803 ký tự, vượt ngân sách 1800, nên mỗi lô chỉ chứa một văn bản.
+        var first = new string('a', 900);
+        var second = new string('b', 900);
+        var third = new string('c', 900);
+        Assert.True(Uri.EscapeDataString(first + "\n" + second).Length > GoogleWebTranslator.MaxBatchUrlLength);
 
         var h = new EchoHandler();
         var t = new GoogleWebTranslator(h);
 
-        var result = await t.TranslateBatchAsync([text, text, text], "en", "vi", TestContext.Current.CancellationToken);
+        var result = await t.TranslateBatchAsync([first, second, third], "en", "vi", TestContext.Current.CancellationToken);
 
         Assert.Equal(3, h.Urls.Count);
-        Assert.Equal(new[] { "«" + text + "»", "«" + text + "»", "«" + text + "»" }, result);
+        Assert.Equal(new[] { first, second, third }, h.Urls.Select(RequestQ));
+        Assert.Equal(
+            new[] { "«" + first + "»", "«" + second + "»", "«" + third + "»" },
+            result);
+
+        // The budget is measured on the URL-escaped text, not the raw text: two texts of 300 'ä' are
+        // only 300 + 1 + 300 = 601 raw characters joined but escape to 2 * 1800 + 3 = 3603, so they
+        // must split into two requests even though the raw join is well under the budget.
+        // Ngân sách đo trên văn bản đã escape URL, không phải văn bản thô: hai văn bản 300 'ä' chỉ
+        // 601 ký tự thô khi gộp nhưng escape thành 3603 nên phải tách thành hai yêu cầu.
+        var auml = new string('ä', 300);
+        Assert.True((auml.Length * 2) + 1 <= GoogleWebTranslator.MaxBatchUrlLength);
+        Assert.True((Uri.EscapeDataString(auml).Length * 2) + 3 > GoogleWebTranslator.MaxBatchUrlLength);
+
+        var h2 = new EchoHandler();
+        var t2 = new GoogleWebTranslator(h2);
+
+        var result2 = await t2.TranslateBatchAsync([auml, auml], "en", "vi", TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, h2.Urls.Count);
+        Assert.Equal(new[] { auml, auml }, h2.Urls.Select(RequestQ));
+        Assert.Equal(new[] { "«" + auml + "»", "«" + auml + "»" }, result2);
+    }
+
+    [Fact]
+    public async Task Batch_NonArraySegment_ThrowsFormatException()
+    {
+        var t = new GoogleWebTranslator(new StubHandler(
+            HttpStatusCode.OK, "[[[\"ok\",\"A\"], \"extra\"],null,\"en\"]"));
+
+        await Assert.ThrowsAsync<FormatException>(() =>
+            t.TranslateBatchAsync(["A"], "en", "vi", TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Batch_SegmentMissingOriginal_ThrowsFormatException()
+    {
+        // An empty input text is the dangerous case: a segment without seg[1] used to be read as an
+        // empty original, which matched the empty text instead of reporting a malformed segment.
+        // Văn bản đầu vào rỗng là trường hợp nguy hiểm: segment thiếu seg[1] từng bị đọc thành bản gốc
+        // rỗng, khớp với văn bản rỗng thay vì báo segment sai cấu trúc.
+        var t = new GoogleWebTranslator(new StubHandler(HttpStatusCode.OK, "[[[\"ok\"]],null,\"en\"]"));
+
+        await Assert.ThrowsAsync<FormatException>(() =>
+            t.TranslateBatchAsync([""], "en", "vi", TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Batch_SegmentNonStringOriginal_ThrowsFormatException()
+    {
+        var t = new GoogleWebTranslator(new StubHandler(HttpStatusCode.OK, "[[[\"ok\",null]],null,\"en\"]"));
+
+        await Assert.ThrowsAsync<FormatException>(() =>
+            t.TranslateBatchAsync([""], "en", "vi", TestContext.Current.CancellationToken));
     }
 }

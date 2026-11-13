@@ -172,78 +172,58 @@ public sealed class GoogleWebTranslator : ITranslator
     /// </exception>
     private static List<string> ParseBatch(string raw, IReadOnlyList<string> texts)
     {
-        if (string.IsNullOrWhiteSpace(raw))
-        {
-            throw new FormatException("Google translate returned an empty response body.");
-        }
+        var segments = ExtractSegments(raw);
 
-        JsonDocument doc;
-        try
+        var results = new List<string>(texts.Count);
+        var accOrig = new StringBuilder();
+        var accTrans = new StringBuilder();
+        var idx = 0;
+        foreach (var seg in segments)
         {
-            doc = JsonDocument.Parse(raw);
-        }
-        catch (JsonException ex)
-        {
-            throw new FormatException("Google translate returned a body that is not valid JSON.", ex);
-        }
-
-        using (doc)
-        {
-            var root = doc.RootElement;
-            if (root.ValueKind != JsonValueKind.Array || root.GetArrayLength() == 0)
+            // Only an empty array is padding to skip. Anything else must be a usable
+            // [translated, original, ...] pair, so a malformed segment is a hard mismatch.
+            // Chỉ array rỗng là phần đệm được bỏ qua. Mọi thứ khác phải là cặp
+            // [bản dịch, bản gốc, ...] dùng được, nên segment sai cấu trúc là lệch cứng.
+            if (seg.ValueKind == JsonValueKind.Array && seg.GetArrayLength() == 0)
             {
-                throw new FormatException("Google translate response does not contain a segment list.");
+                continue;
             }
 
-            var segments = root[0];
-            if (segments.ValueKind != JsonValueKind.Array)
-            {
-                throw new FormatException("Google translate segment list is not an array.");
-            }
-
-            var results = new List<string>(texts.Count);
-            var accOrig = new StringBuilder();
-            var accTrans = new StringBuilder();
-            var idx = 0;
-            foreach (var seg in segments.EnumerateArray())
-            {
-                if (seg.ValueKind != JsonValueKind.Array || seg.GetArrayLength() == 0)
-                {
-                    continue;
-                }
-
-                if (idx >= texts.Count)
-                {
-                    throw new FormatException("Google translate returned more segments than requested texts.");
-                }
-
-                var translated = seg[0];
-                if (translated.ValueKind == JsonValueKind.String)
-                {
-                    accTrans.Append(translated.GetString());
-                }
-
-                if (seg.GetArrayLength() >= 2 && seg[1].ValueKind == JsonValueKind.String)
-                {
-                    accOrig.Append(seg[1].GetString());
-                }
-
-                if (TrimTrailingNewline(accOrig.ToString()) == texts[idx])
-                {
-                    results.Add(TrimTrailingNewline(accTrans.ToString()));
-                    accOrig.Clear();
-                    accTrans.Clear();
-                    idx++;
-                }
-            }
-
-            if (idx != texts.Count || accOrig.Length != 0)
+            if (seg.ValueKind != JsonValueKind.Array
+                || seg.GetArrayLength() < 2
+                || seg[1].ValueKind != JsonValueKind.String)
             {
                 throw new FormatException("Google translate response did not echo the requested texts.");
             }
 
-            return results;
+            if (idx >= texts.Count)
+            {
+                throw new FormatException("Google translate returned more segments than requested texts.");
+            }
+
+            var translated = seg[0];
+            if (translated.ValueKind == JsonValueKind.String)
+            {
+                accTrans.Append(translated.GetString());
+            }
+
+            accOrig.Append(seg[1].GetString());
+
+            if (TrimTrailingNewline(accOrig.ToString()) == texts[idx])
+            {
+                results.Add(TrimTrailingNewline(accTrans.ToString()));
+                accOrig.Clear();
+                accTrans.Clear();
+                idx++;
+            }
         }
+
+        if (idx != texts.Count || accOrig.Length != 0)
+        {
+            throw new FormatException("Google translate response did not echo the requested texts.");
+        }
+
+        return results;
     }
 
     /// <summary>
@@ -307,13 +287,19 @@ public sealed class GoogleWebTranslator : ITranslator
     }
 
     /// <summary>
-    /// Extracts and concatenates the translated segments from a Google response body.
-    /// Trích và nối các đoạn dịch từ body phản hồi của Google.
+    /// Validates the shared response envelope and returns the raw segment elements of <c>root[0]</c>.
+    /// Kiểm tra phần bao chung của phản hồi và trả về các phần tử segment thô của <c>root[0]</c>.
     /// </summary>
     /// <param name="raw">Raw response body. Body phản hồi thô.</param>
-    /// <returns>The concatenated segments. Các đoạn đã nối.</returns>
-    /// <exception cref="FormatException">Thrown when the body is empty or malformed. Khi body rỗng hoặc sai cấu trúc.</exception>
-    private static string Parse(string raw)
+    /// <returns>
+    /// The segments, detached from the parsed document so they outlive it.
+    /// Các segment, đã tách khỏi document đã parse để còn dùng được sau khi document bị giải phóng.
+    /// </returns>
+    /// <exception cref="FormatException">
+    /// Thrown when the body is empty, is not valid JSON, or lacks a segment list.
+    /// Khi body rỗng, không phải JSON hợp lệ, hoặc thiếu danh sách segment.
+    /// </exception>
+    private static List<JsonElement> ExtractSegments(string raw)
     {
         if (string.IsNullOrWhiteSpace(raw))
         {
@@ -344,22 +330,42 @@ public sealed class GoogleWebTranslator : ITranslator
                 throw new FormatException("Google translate segment list is not an array.");
             }
 
-            var sb = new StringBuilder();
+            var list = new List<JsonElement>();
             foreach (var seg in segments.EnumerateArray())
             {
-                if (seg.ValueKind != JsonValueKind.Array || seg.GetArrayLength() == 0)
-                {
-                    continue;
-                }
-
-                var piece = seg[0];
-                if (piece.ValueKind == JsonValueKind.String)
-                {
-                    sb.Append(piece.GetString());
-                }
+                list.Add(seg.Clone());
             }
 
-            return sb.ToString();
+            return list;
         }
+    }
+
+    /// <summary>
+    /// Extracts and concatenates the translated segments from a Google response body.
+    /// Trích và nối các đoạn dịch từ body phản hồi của Google.
+    /// </summary>
+    /// <param name="raw">Raw response body. Body phản hồi thô.</param>
+    /// <returns>The concatenated segments. Các đoạn đã nối.</returns>
+    /// <exception cref="FormatException">Thrown when the body is empty or malformed. Khi body rỗng hoặc sai cấu trúc.</exception>
+    private static string Parse(string raw)
+    {
+        var segments = ExtractSegments(raw);
+
+        var sb = new StringBuilder();
+        foreach (var seg in segments)
+        {
+            if (seg.ValueKind != JsonValueKind.Array || seg.GetArrayLength() == 0)
+            {
+                continue;
+            }
+
+            var piece = seg[0];
+            if (piece.ValueKind == JsonValueKind.String)
+            {
+                sb.Append(piece.GetString());
+            }
+        }
+
+        return sb.ToString();
     }
 }
