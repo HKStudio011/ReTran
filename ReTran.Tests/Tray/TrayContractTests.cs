@@ -19,6 +19,14 @@ public class TrayContractTests
     [Fact]
     public void NotifyIconVersion4_PinnedToMsdnValue() => Assert.Equal(4u, TrayContract.NotifyIconVersion4);
 
+    // MSDN NOTIFYICON_VERSION_4: NIN_SELECT = WM_USER + 0, NIN_KEYSELECT = WM_USER + 1 — under v4 a
+    // left click arrives as these, never as a bare WM_LBUTTONUP.
+    [Fact]
+    public void NinSelect_PinnedToMsdnValue() => Assert.Equal(0x0400u, TrayContract.NinSelect);
+
+    [Fact]
+    public void NinKeySelect_PinnedToMsdnValue() => Assert.Equal(0x0401u, TrayContract.NinKeySelect);
+
     [Theory]
     [InlineData(BalloonIcon.None, 0)]
     [InlineData(BalloonIcon.Info, 1)]
@@ -35,6 +43,8 @@ public class TrayContractTests
     [Theory]
     [InlineData(TrayContract.WmLbuttonUp, TrayContract.TrayDispatch.LeftClick)]
     [InlineData(TrayContract.WmLbuttonDblClk, TrayContract.TrayDispatch.LeftClick)]
+    [InlineData(TrayContract.NinSelect, TrayContract.TrayDispatch.LeftClick)]
+    [InlineData(TrayContract.NinKeySelect, TrayContract.TrayDispatch.LeftClick)]
     // internal: TrayDispatch là type internal (InternalsVisibleTo); method public không được expose nó trong signature.
     internal void Dispatch_LeftClicks(uint mouseMsg, TrayContract.TrayDispatch expected)
         => Assert.Equal(expected, TrayContract.Dispatch(wParamMsg: 0x0401, taskbarCreatedId: 0x8000, callbackMessage: 0x0401, lParamMouseMsg: mouseMsg));
