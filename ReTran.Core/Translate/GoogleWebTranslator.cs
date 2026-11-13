@@ -49,6 +49,12 @@ public sealed class GoogleWebTranslator : ITranslator
     public string Name => "google";
 
     /// <summary>
+    /// Maximum URL-escaped length of the newline-joined texts sent in a single request.
+    /// Độ dài tối đa sau khi escape URL của phần văn bản gộp bằng xuống dòng gửi trong một yêu cầu.
+    /// </summary>
+    public const int MaxBatchUrlLength = 1800;
+
+    /// <summary>
     /// Translates <paramref name="text"/> by concatenating the segments returned by Google.
     /// Dịch <paramref name="text"/> bằng cách nối các đoạn Google trả về.
     /// </summary>
@@ -74,15 +80,210 @@ public sealed class GoogleWebTranslator : ITranslator
     /// Khi <paramref name="ct"/> hủy yêu cầu.
     /// </exception>
     public async Task<string> TranslateAsync(string text, string src, string dst, CancellationToken ct = default)
-    {
-        var url =
-            "https://translate.googleapis.com/translate_a/single"
-            + "?client=gtx"
-            + $"&sl={Uri.EscapeDataString(src)}"
-            + $"&tl={Uri.EscapeDataString(dst)}"
-            + "&dt=t"
-            + $"&q={Uri.EscapeDataString(text)}";
+        => Parse(await GetRawAsync(BuildUrl(src, dst, text), ct).ConfigureAwait(false));
 
+    /// <summary>
+    /// Translates several texts in as few Google requests as the URL length budget allows.
+    /// Dịch nhiều văn bản trong ít yêu cầu Google nhất mà ngân sách độ dài URL cho phép.
+    /// </summary>
+    /// <param name="texts">Source texts to translate. Các văn bản nguồn cần dịch.</param>
+    /// <param name="src">Source language code, or <c>auto</c>. Mã ngôn ngữ nguồn, hoặc <c>auto</c>.</param>
+    /// <param name="dst">Target language code. Mã ngôn ngữ đích.</param>
+    /// <param name="ct">Token used to cancel the request. Token dùng để hủy yêu cầu.</param>
+    /// <returns>
+    /// One translated text per input, in the same order as <paramref name="texts"/>.
+    /// Mỗi văn bản nguồn cho một kết quả đã dịch, giữ đúng thứ tự như <paramref name="texts"/>.
+    /// </returns>
+    /// <exception cref="FormatException">
+    /// Thrown when a response does not echo the requested texts exactly.
+    /// Khi phản hồi không echo lại đúng các văn bản đã yêu cầu.
+    /// </exception>
+    /// <remarks>
+    /// Newlines inside each text are collapsed to spaces before joining, because the newline is the
+    /// separator used to split the response back into per-text results. Calls are issued one chunk at a
+    /// time so a failure never returns a partial result.
+    /// Ký tự xuống dòng trong mỗi văn bản được thay bằng dấu cách trước khi gộp, vì dấu xuống dòng là dấu
+    /// ngăn cách dùng để tách phản hồi trở lại thành kết quả theo từng văn bản. Các lô được gọi lần lượt nên
+    /// khi lỗi sẽ không trả về kết quả dở dang.
+    /// </remarks>
+    public async Task<IReadOnlyList<string>> TranslateBatchAsync(
+        IReadOnlyList<string> texts, string src, string dst, CancellationToken ct = default)
+    {
+        var cleaned = new List<string>(texts.Count);
+        foreach (var text in texts)
+        {
+            cleaned.Add(text.Replace('\n', ' ').Replace('\r', ' '));
+        }
+
+        var results = new List<string>(texts.Count);
+        foreach (var chunk in Chunk(cleaned))
+        {
+            var raw = await GetRawAsync(BuildUrl(src, dst, string.Join('\n', chunk)), ct).ConfigureAwait(false);
+            results.AddRange(ParseBatch(raw, chunk));
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Packs <paramref name="cleaned"/> into the fewest chunks whose newline-joined, URL-escaped form
+    /// fits <see cref="MaxBatchUrlLength"/>; a text that alone exceeds the budget gets its own chunk.
+    /// Gói <paramref name="cleaned"/> vào ít nhóm nhất sao cho dạng gộp bằng xuống dòng rồi escape URL vừa
+    /// <see cref="MaxBatchUrlLength"/>; văn bản đơn vượt ngân sách sẽ nằm trong nhóm riêng.
+    /// </summary>
+    /// <param name="cleaned">Texts with newlines already collapsed to spaces. Các văn bản đã thay xuống dòng bằng dấu cách.</param>
+    /// <returns>The chunks, in input order. Các nhóm, theo thứ tự đầu vào.</returns>
+    private static List<List<string>> Chunk(IReadOnlyList<string> cleaned)
+    {
+        var chunks = new List<List<string>>();
+        var current = new List<string>();
+        foreach (var text in cleaned)
+        {
+            if (current.Count > 0
+                && Uri.EscapeDataString(string.Join('\n', current.Append(text))).Length > MaxBatchUrlLength)
+            {
+                chunks.Add(current);
+                current = [];
+            }
+
+            current.Add(text);
+        }
+
+        if (current.Count > 0)
+        {
+            chunks.Add(current);
+        }
+
+        return chunks;
+    }
+
+    /// <summary>
+    /// Maps a response back to one translation per requested text by matching the echoed originals
+    /// against <paramref name="texts"/> in order.
+    /// Ánh xạ phản hồi trở lại thành một bản dịch cho mỗi văn bản đã yêu cầu bằng cách khớp bản gốc echo
+    /// với <paramref name="texts"/> theo thứ tự.
+    /// </summary>
+    /// <param name="raw">Raw response body. Body phản hồi thô.</param>
+    /// <param name="texts">The chunk's texts, in request order. Các văn bản của nhóm, theo thứ tự yêu cầu.</param>
+    /// <returns>One translation per text, positionally aligned. Một bản dịch cho mỗi văn bản, khớp theo vị trí.</returns>
+    /// <exception cref="FormatException">
+    /// Thrown when the body is empty, malformed, or its echoed originals do not match <paramref name="texts"/> exactly.
+    /// Khi body rỗng, sai cấu trúc, hoặc bản gốc echo không khớp chính xác với <paramref name="texts"/>.
+    /// </exception>
+    private static List<string> ParseBatch(string raw, IReadOnlyList<string> texts)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            throw new FormatException("Google translate returned an empty response body.");
+        }
+
+        JsonDocument doc;
+        try
+        {
+            doc = JsonDocument.Parse(raw);
+        }
+        catch (JsonException ex)
+        {
+            throw new FormatException("Google translate returned a body that is not valid JSON.", ex);
+        }
+
+        using (doc)
+        {
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Array || root.GetArrayLength() == 0)
+            {
+                throw new FormatException("Google translate response does not contain a segment list.");
+            }
+
+            var segments = root[0];
+            if (segments.ValueKind != JsonValueKind.Array)
+            {
+                throw new FormatException("Google translate segment list is not an array.");
+            }
+
+            var results = new List<string>(texts.Count);
+            var accOrig = new StringBuilder();
+            var accTrans = new StringBuilder();
+            var idx = 0;
+            foreach (var seg in segments.EnumerateArray())
+            {
+                if (seg.ValueKind != JsonValueKind.Array || seg.GetArrayLength() == 0)
+                {
+                    continue;
+                }
+
+                if (idx >= texts.Count)
+                {
+                    throw new FormatException("Google translate returned more segments than requested texts.");
+                }
+
+                var translated = seg[0];
+                if (translated.ValueKind == JsonValueKind.String)
+                {
+                    accTrans.Append(translated.GetString());
+                }
+
+                if (seg.GetArrayLength() >= 2 && seg[1].ValueKind == JsonValueKind.String)
+                {
+                    accOrig.Append(seg[1].GetString());
+                }
+
+                if (TrimTrailingNewline(accOrig.ToString()) == texts[idx])
+                {
+                    results.Add(TrimTrailingNewline(accTrans.ToString()));
+                    accOrig.Clear();
+                    accTrans.Clear();
+                    idx++;
+                }
+            }
+
+            if (idx != texts.Count || accOrig.Length != 0)
+            {
+                throw new FormatException("Google translate response did not echo the requested texts.");
+            }
+
+            return results;
+        }
+    }
+
+    /// <summary>
+    /// Removes a single trailing newline, matching the separator Google echoes after each line.
+    /// Bỏ một ký tự xuống dòng ở cuối, khớp dấu ngăn cách Google echo sau mỗi dòng.
+    /// </summary>
+    /// <param name="s">Candidate text. Văn bản cần xét.</param>
+    /// <returns>The text without its trailing newline. Văn bản đã bỏ xuống dòng ở cuối.</returns>
+    private static string TrimTrailingNewline(string s) => s.EndsWith('\n') ? s[..^1] : s;
+
+    /// <summary>
+    /// Builds the Google web endpoint URL for a single request.
+    /// Dựng URL endpoint web của Google cho một yêu cầu.
+    /// </summary>
+    /// <param name="src">Source language code. Mã ngôn ngữ nguồn.</param>
+    /// <param name="dst">Target language code. Mã ngôn ngữ đích.</param>
+    /// <param name="q">Text to translate (newline-joined for batches). Văn bản cần dịch (gộp bằng xuống dòng cho lô).</param>
+    /// <returns>The request URL. URL yêu cầu.</returns>
+    private static string BuildUrl(string src, string dst, string q) =>
+        "https://translate.googleapis.com/translate_a/single"
+        + "?client=gtx"
+        + $"&sl={Uri.EscapeDataString(src)}"
+        + $"&tl={Uri.EscapeDataString(dst)}"
+        + "&dt=t"
+        + $"&q={Uri.EscapeDataString(q)}";
+
+    /// <summary>
+    /// Performs the HTTP request and enforces the status and timeout contract.
+    /// Thực hiện yêu cầu HTTP và áp đặt ràng buộc về status và timeout.
+    /// </summary>
+    /// <param name="url">Fully built request URL. URL yêu cầu đã dựng đầy đủ.</param>
+    /// <param name="ct">Token used to cancel the request. Token dùng để hủy yêu cầu.</param>
+    /// <returns>The raw response body. Body phản hồi thô.</returns>
+    /// <exception cref="HttpRequestException">Thrown on a non-200 status. Khi status khác 200.</exception>
+    /// <exception cref="TimeoutException">
+    /// Thrown when the request exceeds the configured timeout.
+    /// Khi yêu cầu vượt quá timeout đã cấu hình.
+    /// </exception>
+    private async Task<string> GetRawAsync(string url, CancellationToken ct)
+    {
         HttpResponseMessage resp;
         try
         {
@@ -101,8 +302,7 @@ public sealed class GoogleWebTranslator : ITranslator
                     $"Google translate endpoint returned HTTP {(int)resp.StatusCode}.");
             }
 
-            var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-            return Parse(body);
+            return await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         }
     }
 
