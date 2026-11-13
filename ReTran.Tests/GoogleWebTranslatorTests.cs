@@ -175,10 +175,11 @@ public class GoogleWebTranslatorTests
         var h = new EchoHandler { SplitSegmentsPerLine = true };
         var t = new GoogleWebTranslator(h);
 
-        var result = await t.TranslateBatchAsync(["AB"], "en", "vi", TestContext.Current.CancellationToken);
+        var result = await t.TranslateBatchAsync(["ABCD", "EFGH"], "en", "vi", TestContext.Current.CancellationToken);
 
         Assert.Single(h.Urls);
-        Assert.Equal(new[] { "«A»«B»" }, result);
+        Assert.Equal("ABCD\nEFGH", RequestQ(h.Urls[0]));
+        Assert.Equal(new[] { "«AB»«CD»", "«EF»«GH»" }, result);
     }
 
     [Fact]
@@ -254,5 +255,32 @@ public class GoogleWebTranslatorTests
 
         await Assert.ThrowsAsync<FormatException>(() =>
             t.TranslateBatchAsync([""], "en", "vi", TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Batch_SegmentNonStringTranslated_ThrowsFormatException()
+    {
+        var t = new GoogleWebTranslator(new StubHandler(HttpStatusCode.OK, "[[[null,\"A\"]],null,\"en\"]"));
+
+        await Assert.ThrowsAsync<FormatException>(() =>
+            t.TranslateBatchAsync(["A"], "en", "vi", TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Batch_OversizedText_GetsOwnChunk()
+    {
+        var oversized = new string('a', GoogleWebTranslator.MaxBatchUrlLength + 1);
+        var companion = "companion";
+        Assert.True(Uri.EscapeDataString(oversized).Length > GoogleWebTranslator.MaxBatchUrlLength);
+
+        var h = new EchoHandler();
+        var t = new GoogleWebTranslator(h);
+
+        var result = await t.TranslateBatchAsync(
+            [oversized, companion], "en", "vi", TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, h.Urls.Count);
+        Assert.Equal(new[] { oversized, companion }, h.Urls.Select(RequestQ));
+        Assert.Equal(new[] { "«" + oversized + "»", "«companion»" }, result);
     }
 }

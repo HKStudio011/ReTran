@@ -95,8 +95,20 @@ public sealed class GoogleWebTranslator : ITranslator
     /// Mỗi văn bản nguồn cho một kết quả đã dịch, giữ đúng thứ tự như <paramref name="texts"/>.
     /// </returns>
     /// <exception cref="FormatException">
-    /// Thrown when a response does not echo the requested texts exactly.
-    /// Khi phản hồi không echo lại đúng các văn bản đã yêu cầu.
+    /// Thrown when a response has a mapping mismatch or returns a different number of translations than requested texts.
+    /// Khi phản hồi lệch ánh xạ hoặc trả về số lượng bản dịch khác số văn bản đã yêu cầu.
+    /// </exception>
+    /// <exception cref="HttpRequestException">
+    /// Thrown when the endpoint answers with a non-200 status.
+    /// Khi endpoint trả về status khác 200.
+    /// </exception>
+    /// <exception cref="TimeoutException">
+    /// Thrown when the request exceeds the configured timeout.
+    /// Khi yêu cầu vượt quá timeout đã cấu hình.
+    /// </exception>
+    /// <exception cref="OperationCanceledException">
+    /// Thrown when <paramref name="ct"/> cancels the request.
+    /// Khi <paramref name="ct"/> hủy yêu cầu.
     /// </exception>
     /// <remarks>
     /// Newlines inside each text are collapsed to spaces before joining, because the newline is the
@@ -202,11 +214,12 @@ public sealed class GoogleWebTranslator : ITranslator
             }
 
             var translated = seg[0];
-            if (translated.ValueKind == JsonValueKind.String)
+            if (translated.ValueKind != JsonValueKind.String)
             {
-                accTrans.Append(translated.GetString());
+                throw new FormatException("Google translate response contained a non-string translated segment.");
             }
 
+            accTrans.Append(translated.GetString());
             accOrig.Append(seg[1].GetString());
 
             if (TrimTrailingNewline(accOrig.ToString()) == texts[idx])
@@ -259,8 +272,12 @@ public sealed class GoogleWebTranslator : ITranslator
     /// <returns>The raw response body. Body phản hồi thô.</returns>
     /// <exception cref="HttpRequestException">Thrown on a non-200 status. Khi status khác 200.</exception>
     /// <exception cref="TimeoutException">
-    /// Thrown when the request exceeds the configured timeout.
-    /// Khi yêu cầu vượt quá timeout đã cấu hình.
+    /// Thrown when the client timeout cancels the request and the cancellation is translated to <see cref="TimeoutException"/>.
+    /// Khi timeout của client hủy yêu cầu và thao tác hủy được chuyển thành <see cref="TimeoutException"/>.
+    /// </exception>
+    /// <exception cref="OperationCanceledException">
+    /// Rethrown when <paramref name="ct"/> cancels the request.
+    /// Được ném lại khi <paramref name="ct"/> hủy yêu cầu.
     /// </exception>
     private async Task<string> GetRawAsync(string url, CancellationToken ct)
     {
