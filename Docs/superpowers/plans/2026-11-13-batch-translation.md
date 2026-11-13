@@ -53,7 +53,7 @@ Năm failure mode spec ngụ ý nhưng không task nào tự phủ — mỗi dò
   - `DefaultBatch_LoopsPerText_PreservingOrder`: `ITranslator t = new PerTextOnly()` (gọi qua **interface**, default member không gọi được qua class); input `["a","b","c"]` → kết quả `["«a»","«b»","«c»"]` và `Calls == ["a","b","c"]` (thứ tự gọi = thứ tự input).
 - [ ] **Step 2: Chạy test — xác nhận fail** (`TranslatorBatchDefaultTests`, compile error).
 - [ ] **Step 3: Implement** — thêm method vào `ITranslator` với default impl + doc comment song ngữ (summary, param, returns, exception).
-- [ ] **Step 4: Chạy test — pass** + full suite vẫn 486+ (`dotnet test --project "ReTran.Tests/ReTran.Tests.csproj"`).
+- [ ] **Step 4: Chạy test — pass** + full suite vẫn 742+ (`dotnet test --project "ReTran.Tests/ReTran.Tests.csproj"`).
 - [ ] **Step 5: Commit**
   ```bash
   git add "ReTran.Core/Translate/ITranslator.cs" "ReTran.Tests/TranslatorBatchDefaultTests.cs"
