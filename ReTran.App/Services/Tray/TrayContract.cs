@@ -20,6 +20,16 @@ internal static class TrayContract
     internal const uint NotifyIconVersion4 = 4;
     internal const int NiifNone = 0, NiifInfo = 1, NiifWarning = 2, NiifError = 3;
     internal const uint WmLbuttonUp = 0x0202, WmLbuttonDblClk = 0x0203, WmRbuttonUp = 0x0205, WmContextMenu = 0x007B;
+    // NOTIFYICON_VERSION_4: the shell reports a left click as NIN_SELECT (WM_USER+0) / NIN_KEYSELECT
+    // (WM_USER+1) instead of WM_LBUTTONUP. NIN_KEYSELECT (0x0401) numerically equals the
+    // CallbackMessage used by the host, but they live in DIFFERENT fields — CallbackMessage is the
+    // window message id, NIN_* is the mouse code inside LOWORD(lParam) — so the duplication is
+    // intentional and must never be "unified" later.
+    // NOTIFYICON_VERSION_4: shell báo left-click dưới dạng NIN_SELECT (WM_USER+0) / NIN_KEYSELECT
+    // (WM_USER+1) thay vì WM_LBUTTONUP. NIN_KEYSELECT (0x0401) trùng số với CallbackMessage của
+    // host, nhưng chúng nằm ở HAI field khác nhau — CallbackMessage là mã tin nhắn cửa sổ, NIN_* là
+    // mã chuột trong LOWORD(lParam) — nên sự trùng số này là cố ý, tuyệt đối không "gộp" lại sau này.
+    internal const uint NinSelect = 0x0400, NinKeySelect = 0x0401;
 
     /// <summary>
     /// uFlags for NIM_ADD: message callbacks plus icon and tooltip.
@@ -62,7 +72,13 @@ internal static class TrayContract
 
         return lParamMouseMsg switch
         {
-            WmLbuttonUp or WmLbuttonDblClk => TrayDispatch.LeftClick,
+            // Under v4 a plain left click / keyboard select arrives as NIN_SELECT / NIN_KEYSELECT;
+            // WM_LBUTTONUP and WM_LBUTTONDBLCLK stay mapped for the legacy v0 payload.
+            // Dưới v4 left-click thuần / chọn bằng bàn phím đến dưới dạng NIN_SELECT / NIN_KEYSELECT;
+            // WM_LBUTTONUP và WM_LBUTTONDBLCLK giữ mapping cho payload v0 cũ.
+            WmLbuttonUp or WmLbuttonDblClk or NinSelect or NinKeySelect => TrayDispatch.LeftClick,
+            // v4 right-click = WM_CONTEXTMENU (already the primary path); WM_RBUTTONUP stays for v0.
+            // Chuột phải v4 = WM_CONTEXTMENU (đường chính, đã có); WM_RBUTTONUP giữ cho v0.
             WmRbuttonUp or WmContextMenu => TrayDispatch.ShowMenu,
             _ => TrayDispatch.Ignore,
         };

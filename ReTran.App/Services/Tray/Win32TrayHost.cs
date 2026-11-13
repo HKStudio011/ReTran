@@ -280,6 +280,14 @@ public sealed class Win32TrayHost : ITrayHost
             NativeMethods.AppendMenuW(hmenu, flags, (uint)(i + 1), command.Label);
         }
 
+        // The menu owner is _hwnd, NOT NULL: the shell needs a window of the calling thread to
+        // create and track the popup, and a NULL owner is the classic way the menu silently never
+        // appears on modern Windows. Ownership does not require a top-level window — a message-only
+        // window qualifies (it still receives the menu messages on this thread).
+        // Owner của menu là _hwnd, KHÔNG phải NULL: shell cần một cửa sổ thuộc thread đang gọi để
+        // tạo và theo dõi popup, và owner NULL là cách kinh điển khiến menu im lặng không bao giờ
+        // hiện trên Windows hiện đại. Làm owner không đòi hỏi cửa sổ top-level — cửa sổ message-only
+        // thỏa (nó vẫn nhận tin nhắn menu trên chính thread này).
         // Best-effort foreground activation of our own window (the classic tray recipe) so a click
         // outside the menu dismisses it; a message-only window may never be allowed to take
         // foreground — the PostMessage(WM_NULL) after TrackPopupMenuEx stays and is what keeps the
@@ -291,7 +299,7 @@ public sealed class Win32TrayHost : ITrayHost
         NativeMethods.SetForegroundWindow(_hwnd);
 
         int cmd = NativeMethods.TrackPopupMenuEx(hmenu,
-            NativeMethods.TPM_RIGHTBUTTON | NativeMethods.TPM_RETURNCMD, x, y, 0, IntPtr.Zero, IntPtr.Zero);
+            NativeMethods.TPM_RIGHTBUTTON | NativeMethods.TPM_RETURNCMD, x, y, _hwnd, IntPtr.Zero);
 
         // Clear the menu mode so the dismissing click is not swallowed.
         // Xóa chế độ menu để cú click đóng menu không bị nuốt.
@@ -322,7 +330,11 @@ public sealed class Win32TrayHost : ITrayHost
     {
         internal const uint WM_NULL = 0x0000;
         // WM_USER + 1: the shell delivers exactly this message id (it does not add WM_USER).
+        // This value (0x0401) coincidentally equals TrayContract.NinKeySelect, but that constant is
+        // a mouse code read from LOWORD(lParam) — a different field — so both must stay.
         // WM_USER + 1: shell gửi đúng mã tin nhắn này (không cộng thêm WM_USER).
+        // Giá trị này (0x0401) tình cờ trùng TrayContract.NinKeySelect, nhưng hằng đó là mã chuột
+        // đọc từ LOWORD(lParam) — field khác — nên cả hai phải được giữ nguyên.
         internal const uint CallbackMessage = 0x0401;
 
         internal const uint MF_STRING = 0x0000;
@@ -430,11 +442,17 @@ public sealed class Win32TrayHost : ITrayHost
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool AppendMenuW(nint hMenu, uint uFlags, nuint uIDNewItem, string? lpNewItem);
 
-        // Returns the selected command id (TPM_RETURNCMD), not a BOOL.
+        // Real 6-parameter signature (hmenu, fuFlags, x, y, hwnd, lptpm). The previous declaration
+        // had a bogus 7th-slot "anchorId" parameter that shifted the trailing arguments: the native
+        // side read C# arg 5 as hwnd (0 = NULL owner) and C# arg 6 as lptpm — the tray menu could
+        // never really own a window. Returns the selected command id (TPM_RETURNCMD), not a BOOL.
+        // Đúng chữ ký 6 tham số (hmenu, fuFlags, x, y, hwnd, lptpm). Khai báo cũ có thêm tham số thừa
+        // "anchorId" làm lệch các tham số cuối: phía native đọc tham số 5 của C# thành hwnd (0 =
+        // owner NULL) và tham số 6 thành lptpm — menu tray không bao giờ thật sự có cửa sổ owner.
         // Trả về mã lệnh được chọn (TPM_RETURNCMD), không phải BOOL.
         [DllImport("user32.dll")]
         internal static extern int TrackPopupMenuEx(
-            nint hMenu, uint uFlags, int x, int y, uint anchorId, nint hwnd, nint tpParams);
+            nint hMenu, uint uFlags, int x, int y, nint hwnd, nint tpParams);
 
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
