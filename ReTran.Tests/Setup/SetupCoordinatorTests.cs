@@ -572,7 +572,7 @@ public class SetupCoordinatorTests : IDisposable
         Assert.Equal(SetupStep.Done, coordinator.Step);
         Assert.True(coordinator.IsComplete);
         Assert.False(coordinator.IsRunning);
-        Assert.True(PipelineGate.CanStartPipeline(coordinator.IsComplete, coordinator.IsRunning));
+        Assert.True(PipelineGate.CanStartPipeline(coordinator.IsComplete, coordinator.IsRunning, coordinator.SkippedForSession));
     }
 
     [Fact]
@@ -644,7 +644,7 @@ public class SetupCoordinatorTests : IDisposable
         Assert.True(coordinator.IsRunning);
         Assert.Equal(SetupStep.Done, coordinator.Step);
         Assert.True(coordinator.IsComplete);
-        Assert.False(PipelineGate.CanStartPipeline(coordinator.IsComplete, coordinator.IsRunning));
+        Assert.False(PipelineGate.CanStartPipeline(coordinator.IsComplete, coordinator.IsRunning, coordinator.SkippedForSession));
 
         release.SetResult();
         await startTask.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
@@ -678,6 +678,79 @@ public class SetupCoordinatorTests : IDisposable
         await failed.StartAsync(ct: TestContext.Current.CancellationToken);
         Assert.Equal(SetupStep.Failed, failed.Step);
         Assert.False(failed.IsRunning);
+    }
+
+    // ── "Bỏ qua thiết lập" cho phiên này (popup xác nhận — spec 2026-11-13) ─────────────────────────
+
+    [Fact]
+    public void SkipForSession_SetsFlagAndPublishes_WithoutClosingApp()
+    {
+        var coordinator = NewCoordinator();
+        int before = _changedCount;
+
+        coordinator.SkipForSession();
+
+        Assert.True(coordinator.SkippedForSession);
+        Assert.True(_changedCount > before);
+        Assert.False(_closeAppCalled);
+        Assert.False(coordinator.IsComplete); // không ghi state: lần mở sau wizard nhắc lại
+    }
+
+    [Fact]
+    public void Skip_ClosesApp()
+    {
+        var coordinator = NewCoordinator();
+
+        coordinator.Skip();
+
+        Assert.True(_closeAppCalled);
+        Assert.False(coordinator.SkippedForSession);
+    }
+
+    [Fact]
+    public async Task StartAsync_ClearsSessionSkip()
+    {
+        var coordinator = NewCoordinator();
+        coordinator.SkipForSession();
+        Assert.True(coordinator.SkippedForSession);
+
+        // State trống → lượt chạy dừng ở ChoosingLanguage; chỉ cần chứng minh cờ bị thu hồi khi lượt chạy bắt đầu.
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.False(coordinator.SkippedForSession);
+    }
+
+    [Fact]
+    public async Task SecondStartAsync_WhileRunInFlight_IsANoOp()
+    {
+        // Chống double-click (popup + nút rerun): lời gọi thứ hai trong lúc một lượt đang chạy phải
+        // no-op — TryBeginRun giữ _running, không có lượt chồng. (Cùng kỹ thuật latch probe mạng như
+        // test ForcedRerun ở trên.)
+        var blockProbe = false;
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Func<string, bool> probe = _ =>
+        {
+            if (!blockProbe) return true;
+            entered.TrySetResult();
+            release.Task.Wait(TestContext.Current.CancellationToken);
+            return true;
+        };
+        var coordinator = NewCoordinator(isHostReachable: probe);
+        blockProbe = true;
+        Task first = Task.Run(
+            () => coordinator.StartAsync(ct: TestContext.Current.CancellationToken),
+            TestContext.Current.CancellationToken);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+        Task second = coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.True(second.IsCompleted); // TryBeginRun false → trả về ngay, không chồng lượt
+        Assert.True(coordinator.IsRunning);
+
+        release.SetResult();
+        await first.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        Assert.False(coordinator.IsRunning);
     }
 
     // ── fakes ─────────────────────────────────────────────────────────────────────────────────────

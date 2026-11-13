@@ -476,8 +476,10 @@
     private async Task StartPipelineAsync()
     {
         // Spec §3.1: setup chưa xong HOẶC đang chạy một lượt (vd "chạy lại setup" — Step vẫn Done trong
-        // cửa sổ Checking đồng bộ) → modal che màn hình, không start pipeline (guard tách trong PipelineGate).
-        if (!ReTran_App.Services.Setup.PipelineGate.CanStartPipeline(Setup.IsComplete, Setup.IsRunning)) return;
+        // cửa sổ Checking đồng bộ) → modal che màn hình, không start pipeline (guard tách trong
+        // PipelineGate) — trừ khi user đã "bỏ qua thiết lập" cho phiên này (spec 2026-11-13): khi đó
+        // wizard ẩn và gate mở cho phiên hiện tại.
+        if (!ReTran_App.Services.Setup.PipelineGate.CanStartPipeline(Setup.IsComplete, Setup.IsRunning, Setup.SkippedForSession)) return;
 
         if (_sourceKind == "window" && string.IsNullOrEmpty(_windowHwnd))
         {

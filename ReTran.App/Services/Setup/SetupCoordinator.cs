@@ -266,6 +266,16 @@ public sealed class SetupCoordinator
     public bool IsRunning => Volatile.Read(ref _running) == 1;
 
     /// <summary>
+    /// True once the user chose "skip setup for this session" on the failure popup: the wizard stays
+    /// hidden and the pipeline gate opens WITHOUT the setup being complete — nothing is persisted, so
+    /// the next launch shows the wizard again. Cleared when an explicit run starts ("re-run setup").
+    /// Đúng khi user chọn "bỏ qua thiết lập cho phiên này" trên popup màn lỗi: wizard ẩn và cổng pipeline
+    /// mở dù setup chưa hoàn tất — không ghi state nào, nên lần mở app sau wizard hiện lại. Cờ được xóa
+    /// khi một lượt chạy tường minh bắt đầu (đường "chạy lại setup").
+    /// </summary>
+    public bool SkippedForSession { get; private set; }
+
+    /// <summary>
     /// The pending flavor switch while in <see cref="SetupStep.ConfirmingFlavorSwitch"/> (installed vs
     /// target); <see langword="null"} in every other step. Đổi flavor đang chờ khi ở <see cref="SetupStep.ConfirmingFlavorSwitch"/> (bản đã cài so với bản đích); <see langword="null"} ở mọi bước khác.
     /// </summary>
@@ -305,6 +315,18 @@ public sealed class SetupCoordinator
         if (!TryBeginRun()) return;
         try
         {
+            // An explicit run (the modal's first-run trigger or the Settings re-run) revokes the
+            // session skip: after "skip setup", the way back IS this run, and the wizard must be
+            // visible again while it runs.
+            // Một lượt chạy tường minh (trigger first-run của modal hoặc rerun từ Settings) thu hồi cờ
+            // skip phiên: sau "bỏ qua thiết lập", đường quay lại CHÍNH LÀ lượt chạy này, và wizard phải
+            // hiện lại trong lúc nó chạy.
+            if (SkippedForSession)
+            {
+                SkippedForSession = false;
+                Publish();
+            }
+
             _state = _stateFactory();
             if (!force && _state.IsComplete)
             {
@@ -504,11 +526,26 @@ public sealed class SetupCoordinator
 
     /// <summary>
     /// Gives up: closes the app via the injected callback (spec §3.6). Writes no state at all — the
-    /// next launch simply resumes from the last persisted step.
+    /// next launch simply resumes from the last persisted step. Since 2026-11-13 this is the popup's
+    /// "Exit ReTran" choice: the "Skip" button on the failure screen opens the confirmation popup
+    /// instead of calling this directly.
     /// Bỏ qua: đóng app qua callback được inject (spec §3.6). Không ghi thêm state gì — lần khởi động kế
-    /// tiếp chỉ việc chạy lại từ bước đã lưu cuối.
+    /// tiếp chỉ việc chạy lại từ bước đã lưu cuối. Từ 2026-11-13 đây là lựa chọn "Thoát ReTran" của
+    /// popup: nút "Bỏ qua" trên màn lỗi mở popup xác nhận thay vì gọi thẳng vào đây.
     /// </summary>
     public void Skip() => _closeApp();
+
+    /// <summary>
+    /// The popup's "skip setup" choice: hides the wizard for the rest of the session and lets the
+    /// pipeline start, without closing the app and without writing any state.
+    /// Lựa chọn "bỏ qua thiết lập" của popup: ẩn wizard tới hết phiên và cho pipeline start, không đóng
+    /// app và không ghi state nào.
+    /// </summary>
+    public void SkipForSession()
+    {
+        SkippedForSession = true;
+        Publish();
+    }
 
     // ── the pipeline ───────────────────────────────────────────────────────────────────────────────
 

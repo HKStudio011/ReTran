@@ -346,6 +346,12 @@ public static class I18nStrings
         ["setup.section"] = "Cài đặt (setup)",
         ["setup.rerun"] = "Chạy lại setup",
 
+        // Popup xác nhận "Bỏ qua" (spec 2026-11-13)
+        ["setup.skipConfirm.message"] = "Bạn muốn thoát ReTran hay bỏ qua phần thiết lập?",
+        ["setup.skipConfirm.exit"] = "Thoát ReTran",
+        ["setup.skipConfirm.skip"] = "Bỏ qua thiết lập",
+        ["setup.skipConfirm.back"] = "Quay lại",
+
         // Menu nổi + mục tray Hiện/ẩn menu nổi (spec 2026-11-04)
         ["tray.menu.showHideMenu"] = "Hiện/ẩn menu nổi",
         ["menu.row.start"] = "Bắt đầu",
@@ -704,6 +710,12 @@ public static class I18nStrings
         ["setup.flavorSwitch.confirm"] = "Switch to the new build",
         ["setup.section"] = "Setup",
         ["setup.rerun"] = "Re-run setup",
+
+        // "Skip" confirmation popup (spec 2026-11-13)
+        ["setup.skipConfirm.message"] = "Do you want to exit ReTran or skip the setup?",
+        ["setup.skipConfirm.exit"] = "Exit ReTran",
+        ["setup.skipConfirm.skip"] = "Skip setup",
+        ["setup.skipConfirm.back"] = "Back",
 
         // Floating menu + tray show/hide item (spec 2026-11-04) — English mirror of the Vi block above.
         ["tray.menu.showHideMenu"] = "Show/hide floating menu",
