@@ -108,7 +108,7 @@
                  class="rt-setup-modal w-full max-w-sm rounded-lg border border-surface bg-background p-4 shadow-xl">
                 <p class="mb-3 text-sm text-surface">@(L["setup.skipConfirm.message"])</p>
                 <div class="flex gap-2" style="flex-wrap: wrap;">
-                    <button type="button" class="rt-btn rt-mini" disabled="@_busy" @onclick="ConfirmExit">@(L["setup.skipConfirm.exit"])</button>
+                    <button type="button" class="rt-btn rt-btn-danger rt-mini" disabled="@_busy" @onclick="ConfirmExit">@(L["setup.skipConfirm.exit"])</button>
                     <button type="button" class="rt-btn rt-btn-primary rt-mini" disabled="@_busy" @onclick="ConfirmSkipForSession">@(L["setup.skipConfirm.skip"])</button>
                     <button type="button" class="rt-btn rt-mini" disabled="@_busy" @onclick="BackFromSkipConfirm">@(L["setup.skipConfirm.back"])</button>
                 </div>
