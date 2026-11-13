@@ -1022,3 +1022,12 @@ Get-Process ReTran.App | Select-Object Id, CPU, WorkingSet64, PeakWorkingSet64
 ### Số đo (disclosure)
 
 Mục này là **mô tả code đã commit**, không phải số đo process mới — các mốc so sánh nêu trên (§Chi phí LineGrouper, §M2/M5 `:408`,`:421`) là số đo thật đã có trong file. Smoke tương tác cho phần ngưỡng/OBS nằm trong **Task 24 Step 2** của plan (controller chạy trên máy thật).
+
+---
+
+## M4-batch — số request dịch theo batch (2026-11-14)
+
+- Với `N` text mới và mỗi chunk chứa tối đa `K` text, số HTTP request giảm từ **N** xuống **⌈N/K⌉** (mỗi chunk một request). Ngân sách chunk dùng `GoogleWebTranslator.MaxBatchUrlLength = 1800`, đo trên **độ dài chuỗi join đã escape**: hai text dài 900 ký tự escape thành 1803 ký tự nên bị tách; 12 dòng điển hình tạo URL dài ≈ **1.474 ký tự**.
+- Đường dịch một text giữ nguyên; lưu lượng stdio/shared memory không đổi.
+- Nếu mapping kết quả lệch, batch rơi về dịch từng text (tối đa quay lại **N** request). Lỗi HTTP làm hỏng cả batch và không retry, giữ nguyên ngữ nghĩa M4.
+- Xác minh ngày 2026-11-14: build solution thành công (0 error); full suite **769/769 test pass**, 0 failed, 0 skipped.
