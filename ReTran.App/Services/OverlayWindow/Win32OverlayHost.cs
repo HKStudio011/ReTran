@@ -495,12 +495,14 @@ public sealed class Win32OverlayHost : IOverlayHost, IMenuWindowHost
 
     /// <summary>
     /// Draws the overlay boxes onto an existing graphics surface: teal corner ticks on each
-    /// source box plus a dark rounded pill inside it holding the translation (up to two wrapped
-    /// lines — four for merged paragraph blocks, font size derived from the box height and shrunk
-    /// until it fits). Exposed internally so tests can pixel-check the real drawing path.
-    /// Vẽ các box overlay lên surface đã có: tick teal 4 góc trên box gốc kèm pill bo góc tối
-    /// bên trong chứa bản dịch (tối đa hai dòng wrap — bốn dòng với khối đoạn văn gộp, cỡ chữ suy
-    /// ra từ chiều cao box và thu nhỏ đến khi vừa). Mở nội bộ để test kiểm tra pixel của đúng đường vẽ thật.
+    /// source box plus a dark rounded pill inside it holding the translation (font size = largest
+    /// that fits the box interior, wrapped without a line cap; the pill grows below the box when
+    /// even the floor size does not fit, and only truncates at the viewport edge). Exposed
+    /// internally so tests can pixel-check the real drawing path.
+    /// Vẽ các box overlay lên surface đã có: tick teal 4 góc trên box gốc kèm pill bo góc tối bên
+    /// trong chứa bản dịch (cỡ chữ = lớn nhất vừa lòng box, wrap không trần dòng; pill nở xuống
+    /// dưới box khi ngay cả cỡ sàn cũng không vừa, chỉ cắt khi chạm mép viewport). Mở nội bộ để
+    /// test kiểm tra pixel của đúng đường vẽ thật.
     /// </summary>
     /// <param name="g">Target graphics surface. Surface đồ hoạ đích.</param>
     /// <param name="boxes">Boxes in viewport pixel coordinates. Các box theo toạ độ pixel viewport.</param>
@@ -537,21 +539,26 @@ public sealed class Win32OverlayHost : IOverlayHost, IMenuWindowHost
             float innerW = inner.Width, innerH = inner.Height;
             if (innerW < 2f || innerH < 2f) continue;
 
-            // Khối gộp nhiều dòng (paragraph) cho phép tới 4 dòng wrap trong pill — khớp FrameAnnotator phía core.
-            int maxLines = box.IsParagraph ? 4 : 2;
             BoxAnnotationStyle.TextFit fit = BoxAnnotationStyle.Fit(
-                g, text, innerW, innerH, rect.Height, format, maxLines: maxLines,
-                shrink: true,
+                g, text, innerW, innerH, rect.Height, format,
                 maxFontSize: BoxAnnotationStyle.MaxFontSize * ui);
             SD.SizeF block = fit.Block;
-            if (!fit.Fits)
-            {
-                text = BoxAnnotationStyle.TruncateToFit(g, text, fit.Size, innerW, innerH, format, maxLines: maxLines);
-                block = BoxAnnotationStyle.MeasureBlock(g, text, fit.Size, innerW, format);
-            }
 
             float padX = BoxAnnotationStyle.PadX(fit.Size);
             float padY = BoxAnnotationStyle.PadY(fit.Size);
+
+            // Grow the pill below the box when the text cannot fit at the floor size; truncate only
+            // when even a full-viewport pill would not fit (spec 2026-11-13).
+            // Nở pill xuống dưới box khi chữ không vừa ở cỡ sàn; chỉ cắt khi pill tràn cả viewport
+            // vẫn không đủ chỗ (spec 2026-11-13).
+            float need = block.Height + 2f * padY;
+            if (need > viewportHeight)
+            {
+                int maxLines = Math.Max(1, (int)MathF.Floor(
+                    (viewportHeight - 2f * padY) / BoxAnnotationStyle.GetFont(fit.Size).GetHeight(g)));
+                text = BoxAnnotationStyle.TruncateToFit(g, text, fit.Size, innerW, viewportHeight, format, maxLines);
+                block = BoxAnnotationStyle.MeasureBlock(g, text, fit.Size, innerW, format);
+            }
             float pillW = innerW;
             float pillH = MathF.Max(innerH, block.Height + 2f * padY); // tiny-box fallback may overflow
             float pillX = Math.Clamp(inner.X, 0f, MathF.Max(0f, viewportWidth - pillW));

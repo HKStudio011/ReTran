@@ -118,10 +118,15 @@ internal static class BoxAnnotationStyle
 
     /// <summary>
     /// Finds the largest font size (from the box-height base down to <see cref="MinFontSize"/>)
-    /// whose wrapped block fits the inner rectangle in at most <paramref name="maxLines"/>
-    /// lines. Tìm cỡ chữ lớn nhất (từ cỡ cơ sở theo chiều cao box xuống
-    /// <see cref="MinFontSize"/>) mà khối chữ sau khi wrap vừa hình chữ nhật trong, tối đa
-    /// <paramref name="maxLines"/> dòng.
+    /// whose wrapped block fits the whole inner rectangle — no line budget: the box height is the
+    /// only vertical constraint, so the translation uses every line the box affords. When even the
+    /// floor size does not fit, the floor size is returned with <see cref="TextFit.Fits"/> false and
+    /// the caller grows the pill instead of truncating (spec 2026-11-13).
+    /// Tìm cỡ chữ lớn nhất (từ cỡ cơ sở theo chiều cao box xuống <see cref="MinFontSize"/>) mà
+    /// khối chữ sau khi wrap vừa trọn hình chữ nhật trong — không còn ngân sách dòng: chiều cao
+    /// box là ràng buộc dọc duy nhất, nhờ vậy bản dịch dùng hết số dòng mà box cho phép. Khi ngay
+    /// cả cỡ sàn cũng không vừa, trả về cỡ sàn với <see cref="TextFit.Fits"/> false và nơi gọi sẽ
+    /// nở pill thay vì cắt (spec 2026-11-13).
     /// </summary>
     /// <param name="g">Target graphics (measurement only). Graphics đích (chỉ để đo).</param>
     /// <param name="text">Text to fit. Chữ cần fit.</param>
@@ -129,25 +134,22 @@ internal static class BoxAnnotationStyle
     /// <param name="innerHeight">Usable height inside the box. Chiều cao dùng được trong box.</param>
     /// <param name="boxHeight">Full box height (drives the base size). Chiều cao đầy đủ của box (quyết định cỡ cơ sở).</param>
     /// <param name="format">Format shared with drawing. Format dùng chung với lúc vẽ.</param>
-    /// <param name="maxLines">Maximum wrapped lines (callers pass 2 for a single line, 4 for a merged paragraph block). Số dòng wrap tối đa (nơi gọi truyền 2 cho một dòng đơn, 4 cho khối đoạn văn gộp).</param>
-    /// <param name="shrink">Whether to shrink below the base size; <see langword="false"/> keeps the base and lets the caller ellipsize. Có thu nhỏ dưới cỡ cơ sở không; <see langword="false"/> giữ cỡ cơ sở để người gọi cắt ellipsis.</param>
     /// <param name="maxFontSize">Upper clamp in pixels; callers scale it with the viewport. Trần theo pixel; nơi gọi tự scale theo viewport.</param>
     /// <returns>The best size, its measured block and whether it fits. Cỡ tốt nhất, khối đã đo và có vừa không.</returns>
     public static TextFit Fit(Graphics g, string text, float innerWidth, float innerHeight,
-        float boxHeight, StringFormat format, int maxLines, bool shrink = true,
-        float maxFontSize = MaxFontSize)
+        float boxHeight, StringFormat format, float maxFontSize = MaxFontSize)
     {
         int high = BaseFontSize(boxHeight, maxFontSize);
-        TextFit atHigh = Measure(g, text, high, innerWidth, innerHeight, format, maxLines);
-        if (atHigh.Fits || !shrink) return atHigh;
+        TextFit atHigh = Measure(g, text, high, innerWidth, innerHeight, format);
+        if (atHigh.Fits) return atHigh;
 
         int low = (int)MinFontSize;
-        TextFit best = Measure(g, text, low, innerWidth, innerHeight, format, maxLines);
+        TextFit best = Measure(g, text, low, innerWidth, innerHeight, format);
         int from = low + 1, to = high - 1;
         while (from <= to)
         {
             int mid = (from + to) / 2;
-            TextFit candidate = Measure(g, text, mid, innerWidth, innerHeight, format, maxLines);
+            TextFit candidate = Measure(g, text, mid, innerWidth, innerHeight, format);
             if (candidate.Fits)
             {
                 best = candidate;
@@ -175,8 +177,11 @@ internal static class BoxAnnotationStyle
 
     /// <summary>
     /// Truncates the text with an ellipsis so it fits the inner rectangle in at most
-    /// <paramref name="maxLines"/> lines at the given size. Cắt chữ kèm ellipsis để vừa hình chữ
-    /// nhật trong, tối đa <paramref name="maxLines"/> dòng ở cỡ cho trước.
+    /// <paramref name="maxLines"/> lines at the given size (both the height and the line budget
+    /// apply; the overlay renderer now calls it only as its viewport guard — spec 2026-11-13).
+    /// Cắt chữ kèm ellipsis để vừa hình chữ nhật trong, tối đa <paramref name="maxLines"/> dòng ở
+    /// cỡ cho trước (áp dụng cả ngân sách chiều cao lẫn số dòng; renderer overlay giờ chỉ gọi nó
+    /// làm chốt viewport — spec 2026-11-13).
     /// </summary>
     /// <param name="g">Target graphics. Graphics đích.</param>
     /// <param name="text">Text to truncate. Chữ cần cắt.</param>
@@ -193,7 +198,8 @@ internal static class BoxAnnotationStyle
         {
             int mid = (low + high) / 2;
             string candidate = Prefix(text, mid) + "…";
-            if (Measure(g, candidate, size, innerWidth, innerHeight, format, maxLines).Fits)
+            TextFit measured = Measure(g, candidate, size, innerWidth, innerHeight, format);
+            if (measured.Fits && measured.Lines <= maxLines)
             {
                 best = mid;
                 low = mid + 1;
@@ -251,14 +257,14 @@ internal static class BoxAnnotationStyle
         path.CloseFigure();
     }
 
-    /// <summary>Measured text block at one size, plus whether it fits the requested line/height budget.</summary>
+    /// <summary>Measured text block at one size, plus whether it fits the inner rectangle's height (no line budget).</summary>
     private static TextFit Measure(Graphics g, string text, int size, float innerWidth,
-        float innerHeight, StringFormat format, int maxLines)
+        float innerHeight, StringFormat format)
     {
         Font font = GetFont(size);
         SizeF block = MeasureBlock(g, text, size, innerWidth, format);
         int lines = Math.Max(1, (int)MathF.Round(block.Height / font.GetHeight(g)));
-        bool fits = lines <= maxLines && block.Height + 2f * PadY(size) <= innerHeight + 0.5f;
+        bool fits = block.Height + 2f * PadY(size) <= innerHeight + 0.5f;
         return new TextFit(size, block, lines, fits);
     }
 
@@ -273,6 +279,6 @@ internal static class BoxAnnotationStyle
     /// <param name="Size">Chosen font size in pixels. Cỡ chữ đã chọn (pixel).</param>
     /// <param name="Block">Measured wrapped block. Khối chữ đã đo sau wrap.</param>
     /// <param name="Lines">Wrapped line count. Số dòng sau wrap.</param>
-    /// <param name="Fits">Whether the block fits the line/height budget. Khối có vừa ngân sách dòng/chiều cao không.</param>
+    /// <param name="Fits">Whether the block fits the inner rectangle's height. Khối có vừa chiều cao hình chữ nhật trong không.</param>
     public readonly record struct TextFit(int Size, SizeF Block, int Lines, bool Fits);
 }

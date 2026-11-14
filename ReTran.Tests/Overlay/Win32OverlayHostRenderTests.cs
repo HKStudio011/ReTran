@@ -90,4 +90,26 @@ public class Win32OverlayHostRenderTests
         Assert.True(tallPill > shortPill + 20,
             $"tall box pill ({tallPill} px) should be at least 20 px taller than the short one ({shortPill} px)");
     }
+
+    /// <summary>
+    /// Long text in a tiny box grows the pill below the box instead of truncating at the floor size.
+    /// Chữ dài trong box nhỏ làm pill nở xuống dưới đáy box thay vì bị cắt tại cỡ sàn.
+    /// </summary>
+    [Fact]
+    public void DrawBoxes_TinyBox_LongText_PillGrowsBelowBox()
+    {
+        const string longText =
+            "Đây là bản dịch tiếng Việt khá dài cho một đoạn hội thoại trong game, cần xuống dòng nhiều lần để hiển thị đầy đủ nội dung bên trong chiếc hộp này";
+        using Bitmap bitmap = Render(new DrawBox(100, 40, 240, 24, longText));
+
+        // Box bottom is y=64; the pill must grow below it (the viewport guard allows that).
+        // Đáy box là y=64; pill phải nở xuống dưới đáy (guard viewport cho phép điều đó).
+        int maxDarkY = -1;
+        for (int y = 36; y <= 170; y++)
+            for (int x = 100; x <= 340; x++)
+                if (IsDark(bitmap.GetPixel(x, y))) maxDarkY = Math.Max(maxDarkY, y);
+
+        Assert.True(maxDarkY > 66,
+            $"expected pill pixels below the box bottom (64), got max dark y {maxDarkY}");
+    }
 }

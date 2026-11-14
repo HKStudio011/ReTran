@@ -280,6 +280,6 @@ internal static class BoxAnnotationStyle
     /// <param name="Size">Chosen font size in pixels. Cỡ chữ đã chọn (pixel).</param>
     /// <param name="Block">Measured wrapped block. Khối chữ đã đo sau wrap.</param>
     /// <param name="Lines">Wrapped line count. Số dòng sau wrap.</param>
-    /// <param name="Fits">Whether the block fits the line/height budget. Khối có vừa ngân sách dòng/chiều cao không.</param>
+    /// <param name="Fits">Whether the block fits the inner rectangle's height. Khối có vừa chiều cao hình chữ nhật trong không.</param>
     public readonly record struct TextFit(int Size, SizeF Block, int Lines, bool Fits);
 }
