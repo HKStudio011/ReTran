@@ -14,7 +14,7 @@
 
 - **Không `git add -A`.** Repo có nhiều file WIP của user. Mỗi commit chỉ `git add` đúng các file của task. Không push. Branch `master`.
 - Build chuẩn: `dotnet build "ReTran Project.slnx"` → 0 error (warning `xUnit1051` có sẵn).
-- Test chuẩn: `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj" -- --filter-class "<TênĐầyĐủ>"`. Test Core mang prefix `RetranCore.Tests.`; test App/root ở global namespace. **Baseline đã đo lại 2026-11-13 sau merge floating-menu (9934b51): 742 passed / 0 failed.** Mọi task phải giữ nguyên con số đó trở lên.
+- Test chuẩn: `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj" -- --filter-class "<TênĐầyĐủ>"`. Test Core mang prefix `RetranCore.Tests.`; test App/root ở global namespace. **Baseline đã đo lại 2026-11-14 sau plan batch-translation: 771 passed / 0 failed.** Mọi task phải giữ nguyên con số đó trở lên.
 - **Hai bản `BoxAnnotationStyle` (Core + App) phải giống nhau từng dòng logic** — sửa bản nào thì chép sang bản kia ngay trong cùng task; có test `BoxAnnotationStyleSyncTests` ghim hằng số (Task 2).
 - `Fit` signature mới (bỏ `maxLines`, `shrink`): cập nhật **mọi** call site — `FrameAnnotator.cs`, `Win32OverlayHost.cs`, `BoxAnnotationStyleTests.cs` (helper). `TruncateToFit` **giữ nguyên chữ ký**, chỉ còn dùng ở guard viewport.
 - Bản App `BoxAnnotationStyle` đang được **menu nổi + tray dùng chung** (`FloatingMenuRenderer`, `TrayIconSource`: màu, `GetFont`, `CreateTextFormat`, `BuildRoundedRect`, `TruncateToFit`, `PadX/PadY`, `DecorationScale` — vừa merge 9934b51). Plan này **chỉ đổi chữ ký `Fit`** (+ logic `Measure`); không được đổi các API còn lại, không đụng phần menu trong `Win32OverlayHost`.
@@ -103,7 +103,7 @@ Năm failure mode spec ngụ ý nhưng không task nào tự phủ — mỗi dò
     - `ConstantsMatch`: `Assert.Equal` cho `Inset`, `MinFontSize`, `MaxFontSize`, `FontHeightRatio`, `PadX(20)`, `PadY(20)`.
 - [ ] **Step 2: Chạy test — xác nhận fail** (`Win32OverlayHostRenderTests`, `BoxAnnotationStyleSyncTests`).
 - [ ] **Step 3: Implement** — chép `Fit`/`Measure`/doc từ bản Core sang bản App (giữ nguyên namespace/`internal`); sửa `DrawBoxes` (xoá `maxLines`, guard viewport). `Fit_FontSizeGrowsWithBoxHeight`... helper trong test không đổi. Cập nhật comment "tối đa hai dòng wrap — bốn dòng..." ở doc `DrawBoxes` :496-503 cho khớp hành vi mới.
-- [ ] **Step 4: Chạy test — pass** + full suite ≥ 742 + ~9 test mới/task nhóm này.
+- [ ] **Step 4: Chạy test — pass** + full suite ≥ 771 + ~9 test mới/task nhóm này.
 - [ ] **Step 5: Commit**
   ```bash
   git add "ReTran.App/Services/OverlayWindow/BoxAnnotationStyle.cs" "ReTran.App/Services/OverlayWindow/Win32OverlayHost.cs" "ReTran.Tests/Overlay/Win32OverlayHostRenderTests.cs" "ReTran.Tests/BoxAnnotationStyleSyncTests.cs"
@@ -162,7 +162,7 @@ Năm failure mode spec ngụ ý nhưng không task nào tự phủ — mỗi dò
 - Modify: `Docs/performance.md` (mục ngắn "overlay text fit")
 - No code.
 
-- [ ] **Step 1: Build + test full** — `dotnet build "ReTran Project.slnx"` (0 error); `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj"` ⇒ toàn bộ PASS, ≥ 742 + ~10 test mới.
+- [ ] **Step 1: Build + test full** — `dotnet build "ReTran Project.slnx"` (0 error); `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj"` ⇒ toàn bộ PASS, ≥ 771 + ~10 test mới.
 - [ ] **Step 2: Chạy annotbench** — `dotnet run -c Debug --project Tools/Perf/annotbench` ⇒ annotate ≤ 40 ms/khung (benchmark code thật, frame 1920×1080); đối chiếu số cũ trong `Docs/performance.md` §annotate.
 - [ ] **Step 3: Smoke có tương tác — DEFERRED TO CONTROLLER** (đối chiếu bảng §1 spec): preview trong app + overlay trên game + OBS — box gộp cao chữ to hơn/không thừa chỗ; box nhỏ chữ không bị cắt "…" nữa (pill nở); không có hồi quy màu/viền/tick.
 - [ ] **Step 4: Ghi `Docs/performance.md`** — mục ngắn: công thức fit mới (vẫn binary search, số bước tương đương); số annotbench đo được; trang OBS thêm 1 phép đo layout/box (element đo tái sử dụng).
