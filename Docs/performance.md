@@ -1066,3 +1066,26 @@ dotnet run -c Debug --project Tools/Perf/annotbench
 # A/B: git worktree add --detach <temp> 0f05633
 #      dotnet run -c Debug --project <temp>\Tools\Perf\annotbench
 ```
+
+---
+
+## LLM provider — GGUF local + API OpenAI-compatible (2026-11-14)
+
+### Cơ chế (đọc từ code đã commit — VRAM/RAM chờ smoke thật)
+
+- **Local (`llama-server`)**: **lazy start ở lượt dịch đầu tiên** (không chặn `core.start`); model nạp VRAM một lần theo vòng đời **process Core**; dòng lệnh `-m <gguf> --host 127.0.0.1 --port <trống> -c 4096 -ngl 99 --jinja`, port lấy tại runtime nên không đụng process khác; kill cả cây tiến trình khi Core thoát (**crash để lại orphan — kill tay được**).
+- **Request**: v1 **per-text** (mỗi text = 1 `POST /v1/chat/completions`, batch để sau cùng đường Google); timeout **120 s**; sampling `temperature 0.7 / top_p 0.6 / max_tokens 4096`; `top_k 20 / repeat_penalty 1.05` chỉ gửi ở mode local.
+- **Model**: 12 quant GGUF 1.8B/7B (unsloth Hy-MT2) — kích thước file theo spec §0: 1.8B UD-Q4_K_XL **1,17 GB** (Q4_K_M 1,13 / Q5_K_M 1,30 / Q6_K 1,47 / Q8_0 1,91 / UD-Q3_K_XL 0,99); 7B UD-Q4_K_XL **4,78 GB** (Q4_K_M 4,62 / Q5_K_M 5,37 / Q6_K 6,16 / Q8_0 7,98 / UD-Q3_K_XL 3,96). Tải nền có marker `.partial`, xoá marker khi xong; state ở `%LOCALAPPDATA%\ReTran\llm\{models,runtime}`.
+- **Runtime llama.cpp**: zip release GitHub (bản cpu nhỏ; bản cuda vài trăm MB + cudart khi release có) → `runtime/<tag>/`. **Không nằm trong zip release** — wizard setup tải tự động theo flavor máy (cuda/cpu, poll `llm.runtime.status`), Settings giữ Kiểm tra/Tải/Cập nhật.
+- **VRAM/RAM khi chạy**: **chưa đo — deferred cho user smoke**. Dự kiến 1.8B Q4 ≈ 1,2–1,5 GB VRAM, 7B Q4 ≈ 5–5,5 GB (spec §0). LLM local **vượt budget OCR (< 1 GB VRAM)** theo thiết kế: **opt-in** — user tự chọn provider `llm`; UI mục LLM đã cảnh báo "ngoài budget OCR". Không đo process mới trong session wiring này (pattern disclosure như các mục trước).
+- Xác minh 2026-11-14: build solution **0 error**; full suite **861/861** pass, 0 failed, 0 skipped (1 flake SSE `OverlayFeedServerTests` gặp 1 lần trong full run — pass khi chạy isolated, đã biết từ trước).
+
+### Checklist smoke (deferred — user)
+
+1. Máy mới hoặc Cài đặt → "Chạy lại setup": wizard chạy qua bước **"Đang tải runtime llama.cpp…"** → Done; kiểm tra `%LOCALAPPDATA%\ReTran\llm\runtime\<tag>\llama-server.exe` tồn tại.
+2. Cài đặt → **LLM**: mode Local → chọn bản runtime (CUDA/CPU) → **Tải runtime** nếu cần → **Tải** `Hy-MT2-1.8B-UD-Q4_K_XL` → **Đặt** (hiện "Đang dùng").
+3. Đổi provider sang **LLM** → Start: lượt dịch ĐẦU chờ model load (vài giây, `llama-server` spawn), chữ dịch hiện; mở Task Manager ghi **VRAM/RAM của `llama-server.exe`** vào đây.
+4. Sửa System/User prompt → **Khôi phục mặc định**; user prompt bỏ mất `{source_text}` → sheet chặn lưu kèm thông báo.
+5. Mode **API** với endpoint thật (nếu có): nhập baseUrl/key/model → Start → dịch chạy qua endpoint.
+6. Khi pipeline DỪNG: **Xoá** một model không dùng → file biến mất; nút Xoá trên model "Đang dùng" bị chặn.
+7. Dừng app giữa chừng khi `llama-server` đang chạy → tiến trình con bị kill theo; nếu Core crash (kill cứng) → kiểm tra còn orphan `llama-server.exe` không (kỳ vọng: có thể còn, kill tay).
