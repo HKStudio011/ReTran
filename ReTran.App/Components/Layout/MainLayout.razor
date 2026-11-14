@@ -50,6 +50,11 @@
                 <svg class="rt-i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
             </button>
 
+            <button type="button" class="rt-btn rt-btn-ghost" @onclick="OpenProfiles">
+                <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+                <span class="rt-settings-label">@(L["profiles.open"])</span>
+            </button>
+
             <button type="button" class="rt-btn rt-btn-ghost" @onclick="OpenSettings">
                 <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.14.38.4.7.75.94"/></svg>
                 <span class="rt-settings-label">@(L["deck.settings.open"])</span>
@@ -102,6 +107,21 @@
     </div>
 </aside>
 
+<div class="rt-backdrop @(_profilesOpen ? "open" : "")" @onclick="CloseProfiles"></div>
+<aside class="rt-sheet @(_profilesOpen ? "open" : "")" id="profiles-sheet" role="dialog" aria-modal="true"
+       aria-labelledby="profiles-sheet-title" aria-hidden="@(!_profilesOpen)" tabindex="-1"
+       @ref="_profilesSheetRef" @onkeydown="OnProfilesSheetKeyDown">
+    <div class="rt-sheet-head">
+        <h2 id="profiles-sheet-title">@(L["profiles.title"])</h2>
+        <button type="button" class="rt-icon-btn" aria-label="@(L["profiles.close"])" @onclick="CloseProfiles">
+            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+    </div>
+    <div class="rt-sheet-body">
+        <ProfilesPanel @key="_profilesGeneration" />
+    </div>
+</aside>
+
 @code {
     private readonly List<ToastItem> _toasts = [];
     private string _appVersion = string.Empty;
@@ -111,6 +131,10 @@
     private int _sheetGeneration;
     private bool _focusSheet;
     private ElementReference _sheetRef;
+    private bool _profilesOpen;
+    private int _profilesGeneration;
+    private bool _focusProfilesSheet;
+    private ElementReference _profilesSheetRef;
 
     private string StatusDotClass => _errorReason is not null && !_running ? "error" : _running ? "" : "idle";
 
@@ -149,6 +173,12 @@
             _ = FocusSheetAsync();
         }
 
+        if (_focusProfilesSheet)
+        {
+            _focusProfilesSheet = false;
+            _ = FocusProfilesSheetAsync();
+        }
+
         base.OnAfterRender(firstRender);
     }
 
@@ -157,6 +187,18 @@
         try
         {
             await _sheetRef.FocusAsync();
+        }
+        catch (Exception)
+        {
+            // WebView chưa sẵn sàng — focus là best-effort.
+        }
+    }
+
+    private async Task FocusProfilesSheetAsync()
+    {
+        try
+        {
+            await _profilesSheetRef.FocusAsync();
         }
         catch (Exception)
         {
@@ -182,6 +224,7 @@
 
     private void OpenSettings()
     {
+        _profilesOpen = false;
         _settingsOpen = true;
         _sheetGeneration++;
         _focusSheet = true;
@@ -192,6 +235,21 @@
     private void OnSheetKeyDown(KeyboardEventArgs e)
     {
         if (e.Key == "Escape") CloseSettings();
+    }
+
+    private void OpenProfiles()
+    {
+        _settingsOpen = false;
+        _profilesOpen = true;
+        _profilesGeneration++;
+        _focusProfilesSheet = true;
+    }
+
+    private void CloseProfiles() => _profilesOpen = false;
+
+    private void OnProfilesSheetKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape") CloseProfiles();
     }
 
     private async Task ToggleLangAsync()

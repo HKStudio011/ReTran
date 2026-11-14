@@ -109,6 +109,7 @@ namespace ReTran_App
             builder.Services.AddSingleton<CoreProcessClient>();
             builder.Services.AddSingleton<ICorePeer>(sp => sp.GetRequiredService<CoreProcessClient>());
             builder.Services.AddSingleton<TranslationCache>();
+            builder.Services.AddSingleton<ProfileStore>();
             builder.Services.AddSingleton<PipelineController>();
             // Cùng instance cho bề mặt interface mà RunStats / FloatingMenuService / menu nổi cần —
             // đăng ký đóng sẽ tạo controller thứ hai (state chạy và nguồn hoạt động sẽ chia làm hai).

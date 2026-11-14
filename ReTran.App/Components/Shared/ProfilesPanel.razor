@@ -1,0 +1,360 @@
+@using System.Diagnostics
+@using Microsoft.Maui.Devices
+@using Microsoft.Maui.Storage
+@using ReTran_App.Services
+@inject I18nService L
+@inject ProfileStore Store
+@inject ToastService Toast
+@implements IDisposable
+
+@if (_contexts is null)
+{
+    <p class="rt-hint">@(_loadFailed ? L["profiles.loadFailed"] : L["profiles.loading"])</p>
+    @if (_loadFailed)
+    {
+        <button type="button" class="rt-btn rt-mini" @onclick="ReloadAsync">@(L["profiles.reload"])</button>
+    }
+}
+else if (_contexts.Count == 0)
+{
+    <p class="rt-hint">@(L["profiles.empty"])</p>
+}
+else
+{
+    <div class="rt-srow">
+        <span>@(L["profiles.col.context"])</span>
+        <div class="rt-select">
+            <select @bind="_selected" @bind:after="OnContextChangedAsync" aria-label="@(L["profiles.col.context"])">
+                @foreach (ProfileContextInfo c in _contexts)
+                {
+                    <option value="@c.Context">@c.Context (@c.Count)</option>
+                }
+            </select>
+            <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+        </div>
+    </div>
+    <div class="rt-srow">
+        <input type="text" class="rt-input" placeholder="@(L["profiles.search"])"
+               @bind="_search" @bind:event="oninput" @bind:after="OnSearchChangedAsync"
+               aria-label="@(L["profiles.search"])" />
+    </div>
+    <p class="rt-hint">@L.Fmt("profiles.entriesShown", _entries?.Count ?? 0)</p>
+
+    @if (_entries is not null)
+    {
+        @foreach (ProfileEntryInfo e in _entries)
+        {
+            string key = RowKey(e);
+            <div style="border-top: 1px solid var(--rt-line); padding: 8px 0;" @key="key">
+                <div class="rt-mono rt-hint" style="overflow-wrap: anywhere;">@e.Text</div>
+                <input type="text" class="rt-input" @bind="_edit[key]"
+                       aria-label="@(L["profiles.col.translated"])" />
+                <div style="display: flex; gap: 6px; margin-top: 6px;">
+                    <button type="button" class="rt-btn rt-btn-primary rt-mini" @onclick="() => SaveEntryAsync(e)">@(L["profiles.save"])</button>
+                    <button type="button" class="rt-btn rt-mini" @onclick="() => RequestDeleteEntryAsync(e)">
+                        @(IsPendingDelete(key) ? L["profiles.confirmDelete"] : L["profiles.delete"])
+                    </button>
+                </div>
+            </div>
+        }
+    }
+
+    <div class="rt-field-row" style="flex-wrap: wrap; gap: 8px; margin-top: 10px;">
+        <button type="button" class="rt-btn rt-mini" @onclick="RequestDeleteContextAsync">
+            @(_pendingContextDelete ? L["profiles.confirmDeleteContext"] : L["profiles.deleteContext"])
+        </button>
+        <button type="button" class="rt-btn rt-mini" @onclick="ExportAsync">@(L["profiles.export"])</button>
+        <button type="button" class="rt-btn rt-mini" @onclick="ExportAllAsync">@(L["profiles.exportAll"])</button>
+        <button type="button" class="rt-btn rt-mini" @onclick="ImportAsync">@(L["profiles.import"])</button>
+        <button type="button" class="rt-btn rt-mini" @onclick="ReloadAsync">@(L["profiles.reload"])</button>
+    </div>
+    @if (_lastExportPath is not null)
+    {
+        <p class="rt-hint" style="overflow-wrap: anywhere;">@L.Fmt("profiles.exportedTo", _lastExportPath)</p>
+        <button type="button" class="rt-btn rt-mini" @onclick="OpenExportFolder">@(L["profiles.openFolder"])</button>
+    }
+    <p class="rt-hint" style="margin-top: 10px;">@(L["profiles.hintSession"])</p>
+}
+
+@code {
+    /// <summary>Confirm window for two-step deletes. Cửa sổ xác nhận cho xoá 2 bước.</summary>
+    private static readonly TimeSpan ConfirmWindow = TimeSpan.FromSeconds(3);
+
+    private IReadOnlyList<ProfileContextInfo>? _contexts;
+    private bool _loadFailed;
+    private string? _selected;
+    private IReadOnlyList<ProfileEntryInfo>? _entries;
+    private string _search = string.Empty;
+    private readonly Dictionary<string, string> _edit = new();
+    private string? _pendingDeleteKey;
+    private CancellationTokenSource? _pendingDeleteCts;
+    private bool _pendingContextDelete;
+    private CancellationTokenSource? _pendingContextCts;
+    private CancellationTokenSource? _searchCts;
+    private string? _lastExportPath;
+
+    // Row identity = cache key (Context, Text, Src, Dst) joined with a unit separator that OCR
+    // text never contains. Danh tính dòng = cache key (Context, Text, Src, Dst) nối bằng ký tự
+    // phân tách mà text OCR không bao giờ chứa.
+    private static string RowKey(ProfileEntryInfo e) =>
+        e.Context + '\u001f' + e.Text + '\u001f' + e.Src + '\u001f' + e.Dst;
+
+    protected override void OnInitialized()
+    {
+        L.Changed += OnStateChanged;
+        _ = LoadContextsAsync();
+        base.OnInitialized();
+    }
+
+    private void OnStateChanged() => _ = InvokeAsync(StateHasChanged);
+
+    private async Task LoadContextsAsync()
+    {
+        try
+        {
+            _contexts = await Store.GetContextsAsync(CancellationToken.None);
+            _loadFailed = false;
+            if (_selected is null || !_contexts.Any(c => c.Context == _selected))
+            {
+                _selected = _contexts.FirstOrDefault()?.Context;
+            }
+            await LoadEntriesAsync();
+        }
+        catch (Exception)
+        {
+            _contexts = null;
+            _loadFailed = true;
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ReloadAsync() => await LoadContextsAsync();
+
+    private async Task OnContextChangedAsync()
+    {
+        _pendingDeleteKey = null;
+        _pendingContextDelete = false;
+        await LoadEntriesAsync();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task OnSearchChangedAsync()
+    {
+        _searchCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _searchCts = cts;
+        try
+        {
+            await Task.Delay(300, cts.Token); // debounce typing — gõ phím liên tục không nã query
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        await LoadEntriesAsync();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task LoadEntriesAsync()
+    {
+        if (_selected is null)
+        {
+            _entries = null;
+            return;
+        }
+        try
+        {
+            _entries = await Store.GetEntriesAsync(_selected, string.IsNullOrWhiteSpace(_search) ? null : _search, 200, CancellationToken.None);
+            _edit.Clear();
+            foreach (ProfileEntryInfo e in _entries)
+            {
+                _edit[RowKey(e)] = e.Translated;
+            }
+        }
+        catch (Exception)
+        {
+            _entries = null;
+            _loadFailed = true;
+        }
+    }
+
+    private async Task SaveEntryAsync(ProfileEntryInfo e)
+    {
+        string key = RowKey(e);
+        string translated = _edit.TryGetValue(key, out string? value) ? value : e.Translated;
+        try
+        {
+            bool ok = await Store.UpdateEntryAsync(e.Context, e.Text, e.Src, e.Dst, translated, CancellationToken.None);
+            Toast.Show(ok ? L["profiles.saved"] : L.Fmt("profiles.actionFailed", "row not found"));
+            await LoadEntriesAsync();
+        }
+        catch (Exception ex)
+        {
+            Toast.Show(L.Fmt("profiles.actionFailed", ex.Message), ToastSeverity.Error);
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private bool IsPendingDelete(string key) => _pendingDeleteKey == key;
+
+    private async Task RequestDeleteEntryAsync(ProfileEntryInfo e)
+    {
+        string key = RowKey(e);
+        if (_pendingDeleteKey != key)
+        {
+            _pendingDeleteKey = key;
+            _pendingDeleteCts?.Cancel();
+            var cts = new CancellationTokenSource();
+            _pendingDeleteCts = cts;
+            _ = ResetPendingDeleteAfterDelayAsync(key, cts);
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+
+        _pendingDeleteKey = null;
+        try
+        {
+            await Store.DeleteEntryAsync(e.Context, e.Text, e.Src, e.Dst, CancellationToken.None);
+            Toast.Show(L["profiles.deleted"]);
+            await LoadEntriesAsync();
+        }
+        catch (Exception ex)
+        {
+            Toast.Show(L.Fmt("profiles.actionFailed", ex.Message), ToastSeverity.Error);
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ResetPendingDeleteAfterDelayAsync(string key, CancellationTokenSource cts)
+    {
+        try { await Task.Delay(ConfirmWindow, cts.Token); } catch (OperationCanceledException) { return; }
+        if (_pendingDeleteKey == key)
+        {
+            _pendingDeleteKey = null;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task RequestDeleteContextAsync()
+    {
+        if (_selected is null) return;
+        if (!_pendingContextDelete)
+        {
+            _pendingContextDelete = true;
+            _pendingContextCts?.Cancel();
+            var cts = new CancellationTokenSource();
+            _pendingContextCts = cts;
+            _ = ResetPendingContextAfterDelayAsync(cts);
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+
+        _pendingContextDelete = false;
+        try
+        {
+            int deleted = await Store.DeleteContextAsync(_selected, CancellationToken.None);
+            Toast.Show(L.Fmt("profiles.contextDeleted", deleted));
+            await LoadContextsAsync();
+        }
+        catch (Exception ex)
+        {
+            Toast.Show(L.Fmt("profiles.actionFailed", ex.Message), ToastSeverity.Error);
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ResetPendingContextAfterDelayAsync(CancellationTokenSource cts)
+    {
+        try { await Task.Delay(ConfirmWindow, cts.Token); } catch (OperationCanceledException) { return; }
+        if (_pendingContextDelete)
+        {
+            _pendingContextDelete = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task ExportAsync() => await ExportInternalAsync(_selected);
+
+    private async Task ExportAllAsync() => await ExportInternalAsync(null);
+
+    private async Task ExportInternalAsync(string? context)
+    {
+        try
+        {
+            string dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "ReTran", "exports");
+            Directory.CreateDirectory(dir);
+            string path = Path.Combine(dir,
+                $"profiles-{Slug(context ?? "all")}-{DateTime.Now:yyyyMMdd-HHmmss}.json");
+            await using (FileStream fs = File.Create(path))
+            {
+                await Store.ExportAsync(fs, context, CancellationToken.None);
+            }
+            _lastExportPath = path;
+            Toast.Show(L.Fmt("profiles.exportedTo", path));
+        }
+        catch (Exception ex)
+        {
+            Toast.Show(L.Fmt("profiles.actionFailed", ex.Message), ToastSeverity.Error);
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private static string Slug(string value) =>
+        new(value.Select(ch => char.IsLetterOrDigit(ch) || ch is '.' or '_' or '-' ? ch : '_').ToArray());
+
+    private void OpenExportFolder()
+    {
+        if (_lastExportPath is null) return;
+        try
+        {
+            Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{_lastExportPath}\"")
+            {
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception)
+        {
+            // Không mở được Explorer không phá UI; đường dẫn đã hiện trên màn hình.
+        }
+    }
+
+    private async Task ImportAsync()
+    {
+        try
+        {
+            FileResult? file = await FilePicker.Default.PickAsync(new PickOptions
+            {
+                PickerTitle = L["profiles.import"],
+                FileTypes = new FilePickerFileType(new Dictionary<DevicePlatform, IEnumerable<string>>
+                {
+                    { DevicePlatform.WinUI, new[] { ".json" } },
+                }),
+            });
+            if (file is null) return;
+
+            await using Stream stream = await file.OpenReadAsync();
+            ProfileImportResult result = await Store.ImportAsync(stream, CancellationToken.None);
+            Toast.Show(L.Fmt("profiles.importDone", result.Added, result.Updated, result.Skipped));
+            await LoadContextsAsync();
+        }
+        catch (FormatException ex)
+        {
+            Toast.Show(L.Fmt("profiles.importFailed", ex.Message), ToastSeverity.Error);
+        }
+        catch (Exception ex)
+        {
+            Toast.Show(L.Fmt("profiles.actionFailed", ex.Message), ToastSeverity.Error);
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        L.Changed -= OnStateChanged;
+        _searchCts?.Cancel();
+        _pendingDeleteCts?.Cancel();
+        _pendingContextCts?.Cancel();
+    }
+}
