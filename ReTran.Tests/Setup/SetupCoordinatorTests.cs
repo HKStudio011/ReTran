@@ -70,16 +70,20 @@ public class SetupCoordinatorTests : IDisposable
     /// <summary>
     /// Builds a coordinator over the shared fakes; state and settings point at temp files, model
     /// polling runs at 10 ms so download tests finish in milliseconds. The host-reachability seam
-    /// answers "reachable" by default; tests may replace it to hold the Checking step open.
+    /// answers "reachable" by default; tests may replace it to hold the Checking step open. The
+    /// download window (shared by the OCR-model and llm-runtime steps) defaults to 5 s; a test can
+    /// shrink it to keep a never-finishing download cheap.
     /// Dựng coordinator trên các fake chung; state và settings trỏ file temp, poll model chạy 10 ms
     /// để test download kết thúc trong vài mili-giây. Seam probe mạng mặc định trả lời "tới được";
-    /// test có thể thay nó để giữ bước Checking mở ra.
+    /// test có thể thay nó để giữ bước Checking mở ra. Cửa sổ tải (dùng chung cho bước tải model OCR
+    /// và runtime LLM) mặc định 5 s; test có thể thu nhỏ để lượt tải không bao giờ xong chạy rẻ.
     /// </summary>
     private SetupCoordinator NewCoordinator(
         IVideoAdapterSource? adapters = null,
         Func<string, long>? diskFree = null,
         Func<string, bool>? isHostReachable = null,
-        Func<string, bool>? fileExists = null)
+        Func<string, bool>? fileExists = null,
+        TimeSpan? modelDownloadTimeout = null)
     {
         var coordinator = new SetupCoordinator(
             adapters ?? Adapters(NvidiaCurrent),
@@ -92,7 +96,7 @@ public class SetupCoordinatorTests : IDisposable
             stateFactory: () => SetupState.Load(_setupJson),
             fileExists: fileExists ?? (_ => true),
             modelPollInterval: TimeSpan.FromMilliseconds(10),
-            modelDownloadTimeout: TimeSpan.FromSeconds(5));
+            modelDownloadTimeout: modelDownloadTimeout ?? TimeSpan.FromSeconds(5));
         coordinator.Changed += () => Interlocked.Increment(ref _changedCount);
         return coordinator;
     }
@@ -482,6 +486,104 @@ public class SetupCoordinatorTests : IDisposable
         Assert.DoesNotContain(_bridge.Calls, static c => c.Method == "sidecar.device");
     }
 
+    // ── T9: wizard tự tải runtime llama.cpp (spec 2026-11-14 D13) ─────────────────────────────────
+
+    [Fact]
+    public async Task LlmRuntime_DownloadsCudaFlavor_OnGpuMachine()
+    {
+        WriteSetupJson("""{"flavor":"gpu","language":"vi"}""");
+        var coordinator = NewCoordinator();
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        // Máy GPU (đã qua cổng capability) ⇒ runtime cuda; bước persist để rerun không tải lại.
+        Assert.Equal(["cuda"], _bridge.LlmRuntimeDownloads);
+        Assert.Equal("done", ReadSetupJson().Steps!["downloadingllmruntime"]);
+    }
+
+    [Fact]
+    public async Task LlmRuntime_DownloadsCpuFlavor_OnCpuMachine()
+    {
+        WriteSetupJson("""{"flavor":"cpu","language":"vi"}""");
+        _uvFake.Installed = null;
+        var coordinator = NewCoordinator(adapters: Adapters()); // no NVIDIA ⇒ CPU flavor
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Equal(["cpu"], _bridge.LlmRuntimeDownloads);
+    }
+
+    [Fact]
+    public async Task LlmRuntime_AlreadyInstalled_SkipsDownload()
+    {
+        WriteSetupJson("""{"flavor":"gpu","language":"vi"}""");
+        _bridge.LlmRuntimeInstalled = true;
+        var coordinator = NewCoordinator();
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        // Rerun trên máy đã có runtime: một lời gọi status là đủ, không tải lại.
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Empty(_bridge.LlmRuntimeDownloads);
+    }
+
+    [Fact]
+    public async Task LlmRuntime_NeverInstalls_FailsSoftly_ThenRetrySucceeds()
+    {
+        WriteSetupJson("""{"flavor":"gpu","language":"vi"}""");
+        _bridge.LlmRuntimeDownloadCompletes = false; // "network" that never finishes
+        var coordinator = NewCoordinator(modelDownloadTimeout: TimeSpan.FromMilliseconds(150));
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        // Bước mềm như DownloadingModels: 4 lần thử (mỗi lần hết cửa sổ tải), rồi Failed kèm
+        // hướng dẫn tải lại từ Settings — không chặn user bỏ qua phiên.
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+        Assert.NotNull(coordinator.Error);
+        Assert.Contains("runtime llama.cpp", coordinator.Error, StringComparison.Ordinal);
+        Assert.Equal(SetupCoordinator.MaxRetries + 1, _bridge.LlmRuntimeDownloads.Count);
+
+        // User bấm "Thử lại" với mạng hoạt động: bước xong, pipeline chạy tiếp tới Done.
+        _bridge.LlmRuntimeDownloadCompletes = true;
+        await coordinator.RetryAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Equal(SetupCoordinator.MaxRetries + 2, _bridge.LlmRuntimeDownloads.Count);
+    }
+
+    [Fact]
+    public async Task LlmRuntime_ResumeFromOldSetupJson_RunsTheNewStep()
+    {
+        // setup.json của bản cũ: mọi bước cũ đã done, chưa hoàn tất — bước mới vắng marker phải
+        // chạy (và chỉ nó: các bước cũ vẫn được skip, không sync/không tải model lại).
+        WriteSetupJson("""
+            {
+              "flavor": "gpu",
+              "language": "vi",
+              "steps": {
+                "checking": "done",
+                "choosinglanguage": "done",
+                "verifyingfiles": "done",
+                "syncing": "done",
+                "verifysidecar": "done",
+                "downloadingmodels": "done",
+                "applying": "done"
+              }
+            }
+            """);
+        var coordinator = NewCoordinator();
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Equal(["cuda"], _bridge.LlmRuntimeDownloads);
+        Assert.Empty(_uvFake.SyncCalls);
+        Assert.Empty(_bridge.Downloaded);
+        Assert.Equal("done", ReadSetupJson().Steps!["downloadingllmruntime"]);
+    }
+
     // ── R59: sync fail có thể để lại KHÔNG venv ⇒ mỗi retry là full re-sync ────────────────────────
 
     [Fact]
@@ -801,11 +903,17 @@ public class SetupCoordinatorTests : IDisposable
     /// Recording <see cref="ISetupCoreBridge"/>: every call is stored; the model catalog answers from
     /// <see cref="Installed"/> and a download marks its model installed immediately (a fast network),
     /// so the coordinator's poll loop converges on the next <c>ocr.models.list</c>;
-    /// <c>sidecar.device</c> returns <see cref="DeviceResult"/>.
+    /// <c>sidecar.device</c> returns <see cref="DeviceResult"/>. The llm-runtime verbs mirror that:
+    /// <c>llm.runtime.status</c> answers from <see cref="LlmRuntimeInstalled"/> and a runtime
+    /// download records its flavor and completes instantly unless
+    /// <see cref="LlmRuntimeDownloadCompletes"/> is turned off (a "network" that never finishes).
     /// Fake <see cref="ISetupCoreBridge"/> ghi lại mọi lời gọi: catalog model trả lời từ
     /// <see cref="Installed"/>, một lệnh download đánh dấu model đó đã cài ngay lập tức (mạng nhanh) để
     /// vòng poll của coordinator hội tụ ở lần <c>ocr.models.list</c> kế tiếp; <c>sidecar.device</c> trả
-    /// về <see cref="DeviceResult"/>.
+    /// về <see cref="DeviceResult"/>. Hai verb runtime LLM phản chiếu đúng cách đó:
+    /// <c>llm.runtime.status</c> trả lời từ <see cref="LlmRuntimeInstalled"/> và một lệnh tải runtime
+    /// ghi lại flavor rồi hoàn tất ngay, trừ khi tắt <see cref="LlmRuntimeDownloadCompletes"/> (mạng
+    /// không bao giờ xong).
     /// </summary>
     private sealed class FakeCoreBridge : ISetupCoreBridge
     {
@@ -817,6 +925,15 @@ public class SetupCoordinatorTests : IDisposable
         public HashSet<string> Installed { get; } = [];
 
         public List<string> Downloaded { get; } = [];
+
+        /// <summary>Whether <c>llm.runtime.status</c> reports the runtime installed. <c>llm.runtime.status</c> có báo runtime đã cài không.</summary>
+        public bool LlmRuntimeInstalled { get; set; }
+
+        /// <summary>When false, a runtime download records the flavor but never completes (dead network). Khi false, lệnh tải runtime ghi flavor nhưng không bao giờ xong (mạng chết).</summary>
+        public bool LlmRuntimeDownloadCompletes { get; set; } = true;
+
+        /// <summary>Flavors of accepted <c>llm.runtime.download</c> calls, in order. Các flavor của lệnh <c>llm.runtime.download</c> đã nhận, theo thứ tự.</summary>
+        public List<string> LlmRuntimeDownloads { get; } = [];
 
         public int RestartCount { get; private set; }
 
@@ -849,6 +966,15 @@ public class SetupCoordinatorTests : IDisposable
                 }),
                 "ocr.models.download" => Download(@params),
                 "sidecar.device" => Task.FromResult(DeviceResult),
+                "llm.runtime.status" => Task.FromResult<JsonNode?>(new JsonObject
+                {
+                    ["tag"] = LlmRuntimeInstalled ? "b7234" : null,
+                    ["installed"] = LlmRuntimeInstalled,
+                    ["serverPath"] = LlmRuntimeInstalled
+                        ? @"C:\fake\llm\runtime\b7234\llama-server.exe"
+                        : null,
+                }),
+                "llm.runtime.download" => DownloadLlmRuntime(@params),
                 _ => Task.FromResult<JsonNode?>(null),
             };
         }
@@ -858,6 +984,13 @@ public class SetupCoordinatorTests : IDisposable
             string name = @params!["name"]!.GetValue<string>();
             Downloaded.Add(name);
             Installed.Add(name); // the fake "download" completes immediately
+            return Task.FromResult<JsonNode?>(new JsonObject { ["accepted"] = true });
+        }
+
+        private Task<JsonNode?> DownloadLlmRuntime(JsonNode? @params)
+        {
+            LlmRuntimeDownloads.Add(@params!["flavor"]!.GetValue<string>());
+            if (LlmRuntimeDownloadCompletes) LlmRuntimeInstalled = true; // fast network unless disabled
             return Task.FromResult<JsonNode?>(new JsonObject { ["accepted"] = true });
         }
 

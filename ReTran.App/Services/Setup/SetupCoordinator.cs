@@ -31,6 +31,9 @@ public enum SetupStep
     /// <summary>Restarting Core and verifying the sidecar (ping, catalog, GPU capability). Khởi động lại Core và xác minh sidecar (ping, catalog, capability GPU).</summary>
     VerifyingSidecar,
 
+    /// <summary>Downloading the llama.cpp runtime for the LLM provider (spec 2026-11-14 D13 — never bundled with the zip). Tải runtime llama.cpp cho provider LLM (spec 2026-11-14 D13 — không bao giờ nằm trong zip).</summary>
+    DownloadingLlmRuntime,
+
     /// <summary>Downloading the recommended OCR model pair. Tải cặp model OCR được recommend.</summary>
     DownloadingModels,
 
@@ -83,8 +86,9 @@ public sealed record FlavorSwitchInfo(OcrFlavor Installed, OcrFlavor Target);
 
 /// <summary>
 /// First-run Setup wizard orchestration as a testable state machine (spec §3, §4): hard gates first,
-/// language once, then the pipeline VerifyingFiles → Syncing → VerifyingSidecar → DownloadingModels →
-/// Applying → Done. Soft steps retry up to <see cref="MaxRetries"/> times before failing; the hard
+/// language once, then the pipeline VerifyingFiles → Syncing → VerifyingSidecar →
+/// DownloadingLlmRuntime → DownloadingModels → Applying → Done. Soft steps retry up to
+/// <see cref="MaxRetries"/> times before failing; the hard
 /// ones (Checking, VerifyingFiles) fail immediately. Progress persists in <c>setup.json</c> after each
 /// successful step, so a restart resumes where it stopped and never re-asks the language. Per
 /// Amendment A2: the Syncing step pauses for explicit user confirmation when a DIFFERENT paddle
@@ -95,7 +99,7 @@ public sealed record FlavorSwitchInfo(OcrFlavor Installed, OcrFlavor Target);
 /// quotes <see cref="UvSyncRunner.LastOutputTail"/>.
 /// Điều phối wizard Setup chạy lần đầu dưới dạng máy trạng thái test được (spec §3, §4): cổng cứng
 /// trước, hỏi ngôn ngữ một lần, rồi pipeline VerifyingFiles → Syncing → VerifyingSidecar →
-/// DownloadingModels → Applying → Done. Các bước mềm retry tới <see cref="MaxRetries"/> lần trước
+/// DownloadingLlmRuntime → DownloadingModels → Applying → Done. Các bước mềm retry tới <see cref="MaxRetries"/> lần trước
 /// khi fail; các bước cứng (Checking, VerifyingFiles) fail ngay. Tiến độ lưu vào <c>setup.json</c> sau
 /// mỗi bước thành công, nên khởi động lại sẽ chạy tiếp đúng chỗ dừng và không hỏi lại ngôn ngữ. Theo
 /// Amendment A2: bước Syncing dừng chờ user xác nhận RÕ RÀNG khi flavor paddle KHÁC đang được cài
@@ -127,6 +131,7 @@ public sealed class SetupCoordinator
         SetupStep.VerifyingFiles,
         SetupStep.Syncing,
         SetupStep.VerifyingSidecar,
+        SetupStep.DownloadingLlmRuntime,
         SetupStep.DownloadingModels,
         SetupStep.Applying,
     ];
@@ -584,6 +589,7 @@ public sealed class SetupCoordinator
             SetupStep.VerifyingFiles => RunVerifyingFilesStep(),
             SetupStep.Syncing => await RunSyncStepAsync(ct).ConfigureAwait(false),
             SetupStep.VerifyingSidecar => await RunVerifySidecarStepAsync(ct).ConfigureAwait(false),
+            SetupStep.DownloadingLlmRuntime => await RunDownloadLlmRuntimeStepAsync(ct).ConfigureAwait(false),
             SetupStep.DownloadingModels => await RunDownloadModelsStepAsync(ct).ConfigureAwait(false),
             SetupStep.Applying => await RunApplyingStepAsync(ct).ConfigureAwait(false),
             _ => throw new InvalidOperationException($"Không phải bước pipeline: {step}"),
@@ -770,6 +776,81 @@ public sealed class SetupCoordinator
 
         JsonNode? list = await _bridge.CallAsync("ocr.models.list", null, ct).ConfigureAwait(false);
         return list is JsonObject obj && obj["catalog"] is JsonArray;
+    }
+
+    /// <summary>
+    /// DownloadingLlmRuntime (spec 2026-11-14 D13): the llama.cpp runtime is never bundled with the
+    /// release zip, so the wizard installs it here. The runtime flavor follows the machine — GPU
+    /// wheel flavor (already past the VerifyingSidecar capability gate) ⇒ <c>cuda</c>, otherwise
+    /// <c>cpu</c>. A runtime already on disk marks the step done off one status call ("re-run setup"
+    /// pass-through); otherwise it fires <c>llm.runtime.download</c> and polls
+    /// <c>llm.runtime.status</c> every <see cref="_modelPollInterval"/> until installed or the
+    /// <see cref="_modelDownloadTimeout"/> window elapses (then a fresh attempt follows). Failure is
+    /// soft like DownloadingModels: the failure popup offers retry/skip-for-session and Settings can
+    /// download the runtime later.
+    /// DownloadingLlmRuntime (spec 2026-11-14 D13): runtime llama.cpp không bao giờ nằm trong zip
+    /// release, nên wizard cài nó ở đây. Flavor runtime theo máy — flavor wheel GPU (đã qua cổng
+    /// capability ở VerifyingSidecar) ⇒ <c>cuda</c>, còn lại <c>cpu</c>. Runtime đã có trên đĩa thì
+    /// đánh dấu bước xong bằng một lời gọi status ("chạy lại setup" đi thẳng qua); ngược lại gọi
+    /// <c>llm.runtime.download</c> rồi poll <c>llm.runtime.status</c> mỗi
+    /// <see cref="_modelPollInterval"/> cho tới khi installed hoặc hết cửa sổ
+    /// <see cref="_modelDownloadTimeout"/> (lượt thử mới sẽ chạy). Thất bại là mềm như
+    /// DownloadingModels: popup màn lỗi cho retry/bỏ qua phiên, và Settings có thể tải runtime sau.
+    /// </summary>
+    private async Task<StepOutcome> RunDownloadLlmRuntimeStepAsync(CancellationToken ct)
+    {
+        string runtimeFlavor = Flavor == OcrFlavor.Gpu ? "cuda" : "cpu";
+        for (int attempt = 1; attempt <= MaxRetries + 1; attempt++)
+        {
+            try
+            {
+                if (await IsLlmRuntimeInstalledAsync(ct).ConfigureAwait(false))
+                {
+                    MarkStepDone(SetupStep.DownloadingLlmRuntime);
+                    return StepOutcome.Done;
+                }
+
+                await _bridge
+                    .CallAsync("llm.runtime.download", new JsonObject { ["flavor"] = runtimeFlavor }, ct)
+                    .ConfigureAwait(false);
+
+                using var window = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                window.CancelAfter(_modelDownloadTimeout);
+                while (true)
+                {
+                    if (await IsLlmRuntimeInstalledAsync(ct).ConfigureAwait(false)) break;
+                    await Task.Delay(_modelPollInterval, window.Token).ConfigureAwait(false);
+                }
+
+                MarkStepDone(SetupStep.DownloadingLlmRuntime);
+                return StepOutcome.Done;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (OperationCanceledException) { /* the download window elapsed — count as a failed attempt */ }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "setup: tải runtime LLM lần {Attempt}/{Total} thất bại", attempt, MaxRetries + 1);
+            }
+        }
+
+        Error = $"Không tải được runtime llama.cpp sau {MaxRetries + 1} lần thử (mỗi lần giới hạn " +
+            $"{_modelDownloadTimeout.TotalMinutes:0} phút). Có thể bỏ qua bước này và tải lại trong Cài đặt → mục LLM.";
+        return StepOutcome.Failed;
+    }
+
+    /// <summary>
+    /// Whether <c>llm.runtime.status</c> reports an installed runtime (the server binary exists on
+    /// disk); a malformed or missing field counts as not installed.
+    /// <c>llm.runtime.status</c> có báo runtime đã cài không (binary server tồn tại trên đĩa); field
+    /// thiếu hoặc sai định dạng coi như chưa cài.
+    /// </summary>
+    private async Task<bool> IsLlmRuntimeInstalledAsync(CancellationToken ct)
+    {
+        JsonNode? status = await _bridge.CallAsync("llm.runtime.status", null, ct).ConfigureAwait(false);
+        return status is JsonObject obj
+            && obj["installed"] is JsonValue value
+            && value.TryGetValue<bool>(out bool installed)
+            && installed;
     }
 
     /// <summary>
