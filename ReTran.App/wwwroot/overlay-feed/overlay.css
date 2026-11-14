@@ -21,14 +21,21 @@ body {
   position: absolute;
 }
 
+/* Pill anchors to the box top and grows downward when the text needs more room than the box
+   height affords (font size and padding are set inline by the fit algorithm — spec 2026-11-13).
+   Pill neo mép trên box và nở xuống dưới khi chữ cần nhiều chỗ hơn chiều cao box (cỡ chữ và đệm
+   do thuật toán fit set inline — spec 2026-11-13). */
 .box .pill {
   position: absolute;
-  inset: 0;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: auto;
+  min-height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
-  padding: 0 6px;
   background: rgba(5, 12, 14, 0.86);
   color: #f3eedd;
   border-radius: 4px;
