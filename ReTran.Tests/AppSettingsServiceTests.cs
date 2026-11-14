@@ -257,4 +257,53 @@ public class AppSettingsServiceTests : IDisposable
         Assert.Equal(1.35, loaded.OcrMergeHeight);
         Assert.Equal(0.5, loaded.OcrMergeOverlap);
     }
+
+    [Fact]
+    public void LlmParams_RoundTrip()
+    {
+        var service = new AppSettingsService(_path);
+        var custom = AppSettings.Default with
+        {
+            Provider = "llm",
+            LlmMode = "api",
+            LlmBaseUrl = "http://localhost:1234/v1",
+            LlmApiKey = "sk-test",
+            LlmApiModel = "llama-3.3-70b",
+            LlmActiveModel = "Hy-MT2-7B-Q4_K_M",
+            LlmSystemPrompt = "You are a translator.",
+            LlmUserPrompt = "Translate: {source_text}",
+        };
+
+        service.Save(custom);
+        AppSettings loaded = service.Load();
+
+        Assert.Equal("llm", loaded.Provider);
+        Assert.Equal("api", loaded.LlmMode);
+        Assert.Equal("http://localhost:1234/v1", loaded.LlmBaseUrl);
+        Assert.Equal("sk-test", loaded.LlmApiKey);
+        Assert.Equal("llama-3.3-70b", loaded.LlmApiModel);
+        Assert.Equal("Hy-MT2-7B-Q4_K_M", loaded.LlmActiveModel);
+        Assert.Equal("You are a translator.", loaded.LlmSystemPrompt);
+        Assert.Equal("Translate: {source_text}", loaded.LlmUserPrompt);
+    }
+
+    [Fact]
+    public void LlmParams_Absent_DefaultsLocal()
+    {
+        // File cũ không có 7 key LLM → mặc định local + model catalog mặc định; prompt null
+        // (= mặc định Hy-MT2 cả hai phía).
+        Directory.CreateDirectory(_dir);
+        File.WriteAllText(_path, """{"provider":"google","src":"auto","dst":"vi"}""");
+        var service = new AppSettingsService(_path);
+
+        AppSettings settings = service.Load();
+
+        Assert.Equal("local", settings.LlmMode);
+        Assert.Equal("", settings.LlmBaseUrl);
+        Assert.Null(settings.LlmApiKey);
+        Assert.Equal("Hy-MT2-1.8B", settings.LlmApiModel);
+        Assert.Equal("Hy-MT2-1.8B-UD-Q4_K_XL", settings.LlmActiveModel);
+        Assert.Null(settings.LlmSystemPrompt);
+        Assert.Null(settings.LlmUserPrompt);
+    }
 }

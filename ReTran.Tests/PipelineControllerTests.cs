@@ -753,6 +753,176 @@ public class PipelineControllerTests : IDisposable
     }
 
     [Fact]
+    public async Task Start_LlmLocal_SendsModeAndActiveModelOnly()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        new AppSettingsService(_settingsPath).Save(AppSettings.Default with
+        {
+            Provider = "llm",
+            LlmMode = "local",
+            LlmActiveModel = "Hy-MT2-1.8B-UD-Q4_K_XL",
+        });
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        await controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None);
+
+        // Local: đúng {mode, model}; prompt null (chưa ghi đè) không đi wire — Core giữ mặc định
+        // Hy-MT2; field API cũng không được lẫn vào (spec D1/D10).
+        JsonObject llm = Assert.Single(peer.Calls).Params!["translate"]!["llm"]!.AsObject();
+        Assert.Equal("local", llm["mode"]!.GetValue<string>());
+        Assert.Equal("Hy-MT2-1.8B-UD-Q4_K_XL", llm["model"]!.GetValue<string>());
+        Assert.Null(llm["baseUrl"]);
+        Assert.Null(llm["apiKey"]);
+        Assert.Null(llm["systemPrompt"]);
+        Assert.Null(llm["userPrompt"]);
+    }
+
+    [Fact]
+    public async Task Start_LlmApi_SendsEndpointFieldsAndPromptOverrides()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        new AppSettingsService(_settingsPath).Save(AppSettings.Default with
+        {
+            Provider = "llm",
+            LlmMode = "api",
+            LlmBaseUrl = "http://localhost:1234/v1",
+            LlmApiKey = "sk-test",
+            LlmApiModel = "gpt-4o-mini",
+            LlmSystemPrompt = "You translate game dialogue.",
+            LlmUserPrompt = "Translate into {target_lang}: {source_text}",
+        });
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        await controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None);
+
+        JsonObject llm = Assert.Single(peer.Calls).Params!["translate"]!["llm"]!.AsObject();
+        Assert.Equal("api", llm["mode"]!.GetValue<string>());
+        Assert.Equal("http://localhost:1234/v1", llm["baseUrl"]!.GetValue<string>());
+        Assert.Equal("sk-test", llm["apiKey"]!.GetValue<string>());
+        Assert.Equal("gpt-4o-mini", llm["model"]!.GetValue<string>());
+        Assert.Equal("You translate game dialogue.", llm["systemPrompt"]!.GetValue<string>());
+        Assert.Equal("Translate into {target_lang}: {source_text}", llm["userPrompt"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Start_Google_OmitsLlmBlock()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        new AppSettingsService(_settingsPath).Save(AppSettings.Default); // provider google
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        await controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None);
+
+        // Provider khác llm → translate không có khối llm (Core của bản cũ cũng bỏ qua nếu có).
+        JsonObject translate = Assert.Single(peer.Calls).Params!["translate"]!.AsObject();
+        Assert.Null(translate["llm"]);
+    }
+
+    [Fact]
+    public void IsLlmComponentMissing_MatchesOnlyTheLlmMissingRpcErrors()
+    {
+        // Hai code -32603 của Core factory cho local mode → nhận diện được.
+        Assert.True(PipelineController.IsLlmComponentMissing(
+            new RpcException(-32603, "llm-model-missing: Hy-MT2-1.8B-UD-Q4_K_XL")));
+        Assert.True(PipelineController.IsLlmComponentMissing(
+            new RpcException(-32603, "llm-runtime-missing: download llama.cpp from Setup or Settings.")));
+        // Lỗi khác và exception ngoài RpcException đều không khớp.
+        Assert.False(PipelineController.IsLlmComponentMissing(
+            new RpcException(-32602, "missing 'translate.llm' object")));
+        Assert.False(PipelineController.IsLlmComponentMissing(
+            new InvalidOperationException("llm-model-missing: x")));
+        Assert.False(PipelineController.IsLlmComponentMissing(null));
+    }
+
+    [Fact]
+    public async Task LlmModelsList_MapsArrayWireShape()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        peer.Reply = method => method == "llm.models.list"
+            ? new JsonArray(
+                new JsonObject
+                {
+                    ["name"] = "Hy-MT2-1.8B-UD-Q4_K_XL", ["quant"] = "UD-Q4_K_XL",
+                    ["sizeClass"] = "1.8B", ["sizeBytes"] = 1170000000L,
+                    ["installed"] = true, ["inUse"] = true, ["downloading"] = false,
+                },
+                new JsonObject
+                {
+                    ["name"] = "Hy-MT2-7B-Q4_K_M", ["quant"] = "Q4_K_M",
+                    ["sizeClass"] = "7B", ["sizeBytes"] = 4780000000L,
+                    ["installed"] = false, ["inUse"] = false, ["downloading"] = true,
+                })
+            : null;
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        IReadOnlyList<LlmModelInfo> models = await controller.ListLlmModelsAsync(CancellationToken.None);
+
+        // Core trả một ARRAY trực tiếp (không bọc object) — App đọc đúng shape camelCase này.
+        Assert.Equal("llm.models.list", Assert.Single(peer.Calls).Method);
+        Assert.Equal(2, models.Count);
+        Assert.Equal("Hy-MT2-1.8B-UD-Q4_K_XL", models[0].Name);
+        Assert.Equal("UD-Q4_K_XL", models[0].Quant);
+        Assert.Equal("1.8B", models[0].SizeClass);
+        Assert.Equal(1170000000L, models[0].SizeBytes);
+        Assert.True(models[0].Installed);
+        Assert.True(models[0].InUse);
+        Assert.False(models[0].Downloading);
+        Assert.Equal("Hy-MT2-7B-Q4_K_M", models[1].Name);
+        Assert.False(models[1].Installed);
+        Assert.True(models[1].Downloading);
+    }
+
+    [Fact]
+    public async Task LlmModelActions_SendExpectedWireParams()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        await controller.DownloadLlmModelAsync("Hy-MT2-1.8B-UD-Q4_K_XL", CancellationToken.None);
+        await controller.DeleteLlmModelAsync("Hy-MT2-7B-Q6_K", CancellationToken.None);
+        await controller.SetLlmModelAsync("Hy-MT2-1.8B-UD-Q4_K_XL", CancellationToken.None);
+
+        Assert.Equal(3, peer.Calls.Count);
+        Assert.Equal("llm.models.download", peer.Calls[0].Method);
+        Assert.Equal("Hy-MT2-1.8B-UD-Q4_K_XL", peer.Calls[0].Params!["name"]!.GetValue<string>());
+        Assert.Equal("llm.models.delete", peer.Calls[1].Method);
+        Assert.Equal("Hy-MT2-7B-Q6_K", peer.Calls[1].Params!["name"]!.GetValue<string>());
+        Assert.Equal("llm.models.set", peer.Calls[2].Method);
+        Assert.Equal("Hy-MT2-1.8B-UD-Q4_K_XL", peer.Calls[2].Params!["name"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task LlmRuntime_MapsStatusAndCheck_SendsFlavor()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        peer.Reply = method => method switch
+        {
+            "llm.runtime.status" => new JsonObject
+            {
+                ["tag"] = "b7123", ["installed"] = true,
+                ["serverPath"] = @"C:\llm\runtime\b7123\llama-server.exe",
+            },
+            "llm.runtime.check" => new JsonObject { ["current"] = "b7123", ["latest"] = "b7250" },
+            _ => null,
+        };
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        LlmRuntimeStatusInfo status = await controller.GetLlmRuntimeStatusAsync(CancellationToken.None);
+        Assert.Equal("b7123", status.Tag);
+        Assert.True(status.Installed);
+        Assert.Equal(@"C:\llm\runtime\b7123\llama-server.exe", status.ServerPath);
+
+        LlmRuntimeCheckInfo check = await controller.CheckLlmRuntimeAsync(CancellationToken.None);
+        Assert.Equal("b7123", check.Current);
+        Assert.Equal("b7250", check.Latest);
+
+        await controller.DownloadLlmRuntimeAsync("cpu", CancellationToken.None);
+        (string method, JsonNode? @params) = peer.Calls.Last();
+        Assert.Equal("llm.runtime.download", method);
+        Assert.Equal("cpu", @params!["flavor"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task ApplyOcrPairIfIdle_WhenIdle_SendsModelsSetAndReturnsTrue()
     {
         var peer = new FakeCorePeer { IsStarted = true };

@@ -80,6 +80,39 @@ public sealed record OcrConfigSetResult(
     IReadOnlyList<string> Live, IReadOnlyList<string> Deferred, bool ReloadRequired);
 
 /// <summary>
+/// One GGUF model of the LLM catalog (<c>llm.models.list</c>): catalog name, quantization label,
+/// size class, approximate size and current state.
+/// Một model GGUF trong catalog LLM (<c>llm.models.list</c>): tên catalog, nhãn lượng tử hoá, lớp
+/// kích thước, dung lượng xấp xỉ và trạng thái hiện tại.
+/// </summary>
+/// <param name="Name">Catalog name, e.g. <c>Hy-MT2-1.8B-UD-Q4_K_XL</c>. Tên catalog.</param>
+/// <param name="Quant">Quantization label, e.g. <c>UD-Q4_K_XL</c>. Nhãn lượng tử hoá.</param>
+/// <param name="SizeClass"><c>1.8B</c> or <c>7B</c>. Lớp kích thước.</param>
+/// <param name="SizeBytes">Approximate file size in bytes. Dung lượng file xấp xỉ theo byte.</param>
+/// <param name="Installed">Final GGUF file present, not downloading. File GGUF hoàn chỉnh có mặt, không đang tải.</param>
+/// <param name="InUse">The active model for local mode. Model đang dùng cho chế độ local.</param>
+/// <param name="Downloading">A background download is running. Có lượt tải nền đang chạy.</param>
+public sealed record LlmModelInfo(
+    string Name, string Quant, string SizeClass, long SizeBytes, bool Installed, bool InUse, bool Downloading);
+
+/// <summary>
+/// Installed state of the llama.cpp runtime (<c>llm.runtime.status</c>).
+/// Trạng thái runtime llama.cpp (<c>llm.runtime.status</c>).
+/// </summary>
+/// <param name="Tag">Extracted build tag, or <see langword="null"/>. Tag bản build đã giải nén, hoặc <see langword="null"/>.</param>
+/// <param name="Installed">The server binary exists. Binary server tồn tại.</param>
+/// <param name="ServerPath">Path of <c>llama-server.exe</c>, or <see langword="null"/> when no tag. Đường dẫn <c>llama-server.exe</c>, hoặc <see langword="null"/> khi chưa có tag.</param>
+public sealed record LlmRuntimeStatusInfo(string? Tag, bool Installed, string? ServerPath);
+
+/// <summary>
+/// Result of <c>llm.runtime.check</c>: the installed tag and the newest downloadable one.
+/// Kết quả <c>llm.runtime.check</c>: tag đã cài và tag mới nhất có thể tải.
+/// </summary>
+/// <param name="Current">Installed tag, or <see langword="null"/>. Tag đã cài, hoặc <see langword="null"/>.</param>
+/// <param name="Latest">Newest matching release tag, or <see langword="null"/> when none matches. Tag release khớp mới nhất, hoặc <see langword="null"/> khi không có.</param>
+public sealed record LlmRuntimeCheckInfo(string? Current, string? Latest);
+
+/// <summary>
 /// App-side orchestrator over <see cref="ICorePeer"/>: starts/stops the Core pipeline
 /// (<c>core.start</c>/<c>core.stop</c>/<c>core.list_sources</c>), answers Core's cache
 /// requests from the SQLite translation cache, and turns Core notifications into
@@ -249,17 +282,40 @@ public sealed class PipelineController : IPipelineControl
         JsonObject? ocrParams = BuildOcrParams(settings.OcrEngine ?? new Dictionary<string, JsonNode?>());
         if (ocrParams is not null) ocr["params"] = ocrParams;
 
+        var translate = new JsonObject
+        {
+            ["provider"] = settings.Provider,
+            ["src"] = settings.Src,
+            ["dst"] = settings.Dst,
+        };
+        if (string.Equals(settings.Provider, "llm", StringComparison.OrdinalIgnoreCase))
+        {
+            // LLM block (spec 2026-11-14 D1/D10): the mode decides which fields travel; prompt
+            // overrides travel only when set so Core keeps its card defaults.
+            // Khối LLM (spec 2026-11-14 D1/D10): mode quyết định field nào đi; prompt ghi đè chỉ
+            // đi khi có để Core giữ mặc định theo model card.
+            var llm = new JsonObject { ["mode"] = settings.LlmMode };
+            if (string.Equals(settings.LlmMode, "api", StringComparison.OrdinalIgnoreCase))
+            {
+                llm["baseUrl"] = settings.LlmBaseUrl;
+                llm["apiKey"] = settings.LlmApiKey;
+                llm["model"] = settings.LlmApiModel;
+            }
+            else
+            {
+                llm["model"] = settings.LlmActiveModel;
+            }
+            if (!string.IsNullOrWhiteSpace(settings.LlmSystemPrompt)) llm["systemPrompt"] = settings.LlmSystemPrompt;
+            if (!string.IsNullOrWhiteSpace(settings.LlmUserPrompt)) llm["userPrompt"] = settings.LlmUserPrompt;
+            translate["llm"] = llm;
+        }
+
         var @params = new JsonObject
         {
             ["source"] = source.UseWindow
                 ? new JsonObject { ["kind"] = "window", ["hwnd"] = source.HwndHex ?? string.Empty }
                 : new JsonObject { ["kind"] = "screen", ["monitor"] = source.Monitor },
-            ["translate"] = new JsonObject
-            {
-                ["provider"] = settings.Provider,
-                ["src"] = settings.Src,
-                ["dst"] = settings.Dst,
-            },
+            ["translate"] = translate,
             ["ocr"] = ocr,
             ["ocrFps"] = settings.OcrFps,
             ["captureFps"] = settings.CaptureFps,
@@ -409,6 +465,148 @@ public sealed class PipelineController : IPipelineControl
             }
         }
         return models;
+    }
+
+    /// <summary>
+    /// Tells whether an exception thrown by <see cref="StartAsync"/> is Core's
+    /// <c>llm-model-missing</c>/<c>llm-runtime-missing</c> rejection for the local LLM mode.
+    /// Cho biết exception do <see cref="StartAsync"/> ném có phải lỗi <c>llm-model-missing</c>/
+    /// <c>llm-runtime-missing</c> của Core cho chế độ LLM local hay không.
+    /// </summary>
+    /// <param name="ex">The caught exception, or <see langword="null"/>. Exception vừa bắt, hoặc <see langword="null"/>.</param>
+    /// <returns>True when Core rejected the start because the LLM model or runtime is missing. True khi Core từ chối start vì thiếu model hoặc runtime LLM.</returns>
+    public static bool IsLlmComponentMissing(Exception? ex) =>
+        ex is RpcException
+        && (ex.Message.Contains("llm-model-missing", StringComparison.Ordinal)
+            || ex.Message.Contains("llm-runtime-missing", StringComparison.Ordinal));
+
+    /// <summary>
+    /// Lists the GGUF catalog with per-model state via Core's <c>llm.models.list</c>.
+    /// Liệt kê catalog GGUF kèm trạng thái từng model qua <c>llm.models.list</c> của Core.
+    /// </summary>
+    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <returns>The catalog in declaration order. Catalog theo thứ tự khai báo.</returns>
+    public async Task<IReadOnlyList<LlmModelInfo>> ListLlmModelsAsync(CancellationToken ct)
+    {
+        await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
+        EnsureHandlersWired();
+
+        JsonNode? result = await _peer.CallAsync("llm.models.list", null, ct).ConfigureAwait(false);
+        var models = new List<LlmModelInfo>();
+        if (result is JsonArray catalog)
+        {
+            foreach (JsonNode? node in catalog)
+            {
+                if (node is not JsonObject model) continue;
+                models.Add(new LlmModelInfo(
+                    ReadString(model, "name"),
+                    ReadString(model, "quant"),
+                    ReadString(model, "sizeClass"),
+                    ReadLong(model, "sizeBytes"),
+                    ReadBool(model, "installed"),
+                    ReadBool(model, "inUse"),
+                    ReadBool(model, "downloading")));
+            }
+        }
+        return models;
+    }
+
+    /// <summary>
+    /// Starts a background GGUF download via <c>llm.models.download</c>; poll
+    /// <see cref="ListLlmModelsAsync"/> for progress. Bắt đầu tải GGUF nền qua
+    /// <c>llm.models.download</c>; poll <see cref="ListLlmModelsAsync"/> để theo dõi.
+    /// </summary>
+    /// <param name="name">Catalog model name. Tên model trong catalog.</param>
+    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <exception cref="RpcException">Propagated from Core for unknown names. Đẩy ra từ Core với tên lạ.</exception>
+    public async Task DownloadLlmModelAsync(string name, CancellationToken ct)
+    {
+        await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
+        EnsureHandlersWired();
+        await _peer.CallAsync("llm.models.download",
+            new JsonObject { ["name"] = name }, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Deletes one GGUF via <c>llm.models.delete</c>; Core refuses the active or downloading model.
+    /// Xoá một GGUF qua <c>llm.models.delete</c>; Core từ chối model đang dùng hoặc đang tải.
+    /// </summary>
+    /// <param name="name">Catalog model name. Tên model trong catalog.</param>
+    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <exception cref="RpcException">Propagated from Core for unknown/active/downloading names. Đẩy ra từ Core với tên lạ/đang dùng/đang tải.</exception>
+    public async Task DeleteLlmModelAsync(string name, CancellationToken ct)
+    {
+        await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
+        EnsureHandlersWired();
+        await _peer.CallAsync("llm.models.delete",
+            new JsonObject { ["name"] = name }, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Marks an installed GGUF active for local mode via <c>llm.models.set</c>; persist it in
+    /// <see cref="AppSettings.LlmActiveModel"/> too or the next start falls back.
+    /// Đánh dấu một GGUF đã cài là active cho chế độ local qua <c>llm.models.set</c>; lưu nó vào
+    /// <see cref="AppSettings.LlmActiveModel"/> nữa, không thì lần start kế quay lại giá trị cũ.
+    /// </summary>
+    /// <param name="name">Catalog model name (must be installed). Tên model trong catalog (phải đã cài).</param>
+    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <exception cref="RpcException">Propagated from Core for unknown or not-installed names. Đẩy ra từ Core với tên lạ hoặc chưa cài.</exception>
+    public async Task SetLlmModelAsync(string name, CancellationToken ct)
+    {
+        await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
+        EnsureHandlersWired();
+        await _peer.CallAsync("llm.models.set",
+            new JsonObject { ["name"] = name }, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reads the llama.cpp runtime state via <c>llm.runtime.status</c>.
+    /// Đọc trạng thái runtime llama.cpp qua <c>llm.runtime.status</c>.
+    /// </summary>
+    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <returns>The runtime status. Trạng thái runtime.</returns>
+    public async Task<LlmRuntimeStatusInfo> GetLlmRuntimeStatusAsync(CancellationToken ct)
+    {
+        await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
+        EnsureHandlersWired();
+        JsonNode? result = await _peer.CallAsync("llm.runtime.status", null, ct).ConfigureAwait(false);
+        string? tag = result is JsonObject obj ? ReadNullableString(obj, "tag") : null;
+        bool installed = result is JsonObject o2 && ReadBool(o2, "installed");
+        string? serverPath = result is JsonObject o3 ? ReadNullableString(o3, "serverPath") : null;
+        return new LlmRuntimeStatusInfo(tag, installed, serverPath);
+    }
+
+    /// <summary>
+    /// Compares the installed llama.cpp runtime with the newest GitHub release asset via
+    /// <c>llm.runtime.check</c>. So sánh runtime llama.cpp đã cài với asset release mới nhất trên
+    /// GitHub qua <c>llm.runtime.check</c>.
+    /// </summary>
+    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <returns>Installed and latest tags. Tag đã cài và tag mới nhất.</returns>
+    public async Task<LlmRuntimeCheckInfo> CheckLlmRuntimeAsync(CancellationToken ct)
+    {
+        await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
+        EnsureHandlersWired();
+        JsonNode? result = await _peer.CallAsync("llm.runtime.check", null, ct).ConfigureAwait(false);
+        string? current = result is JsonObject obj ? ReadNullableString(obj, "current") : null;
+        string? latest = result is JsonObject o2 ? ReadNullableString(o2, "latest") : null;
+        return new LlmRuntimeCheckInfo(current, latest);
+    }
+
+    /// <summary>
+    /// Starts a background llama.cpp runtime download via <c>llm.runtime.download</c>; poll
+    /// <see cref="GetLlmRuntimeStatusAsync"/> until installed. Bắt đầu tải runtime llama.cpp nền
+    /// qua <c>llm.runtime.download</c>; poll <see cref="GetLlmRuntimeStatusAsync"/> tới khi cài xong.
+    /// </summary>
+    /// <param name="flavor"><c>cuda</c> or <c>cpu</c>. <c>cuda</c> hoặc <c>cpu</c>.</param>
+    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <exception cref="RpcException">Propagated from Core for an unknown flavor. Đẩy ra từ Core khi flavor lạ.</exception>
+    public async Task DownloadLlmRuntimeAsync(string flavor, CancellationToken ct)
+    {
+        await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
+        EnsureHandlersWired();
+        await _peer.CallAsync("llm.runtime.download",
+            new JsonObject { ["flavor"] = flavor }, ct).ConfigureAwait(false);
     }
 
     /// <summary>

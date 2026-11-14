@@ -25,14 +25,15 @@
             <select @bind="_model.Provider" aria-label="@(L["deck.settings.provider"])">
                 <option value="google">@(L["settings.provider.google"])</option>
                 <option value="deepl" disabled>@(L["settings.provider.deepl"]) (@(L["settings.opt.comingSoon"]))</option>
-                <option value="llm" disabled>@(L["settings.provider.llm"]) (@(L["settings.opt.comingSoon"]))</option>
+                <option value="llm">@(L["settings.provider.llm"])</option>
             </select>
             <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
         </div>
     </div>
+    @* Ô API key ở đây phục vụ DeepL; LLM API có ô key riêng trong mục LLM (plan 2026-11-14). *@
     <div class="rt-srow">
         <span>@(L["deck.settings.apiKey"])</span>
-        <input type="text" class="rt-input" @bind="_model.ApiKey" disabled="@(_model.Provider == "google")"
+        <input type="text" class="rt-input" @bind="_model.ApiKey" disabled="@(_model.Provider != "deepl")"
                placeholder="@(L["deck.settings.apiKeyHint"])" aria-label="@(L["deck.settings.apiKey"])" />
     </div>
 </section>
@@ -258,6 +259,147 @@
     }
 </section>
 
+@* Mục LLM (spec 2026-11-14 D9/D10): mode Local/API, quản lý runtime llama.cpp + model GGUF
+   (mirror mục OCR), khối prompt system/user với mặc định Hy-MT2 hiển thị khi chưa ghi đè.
+   Mọi thứ lưu settings.json và áp từ lần Start kế tiếp (pattern OCR). *@
+<section class="rt-sect">
+    <h3>@(L["deck.settings.section.llm"])</h3>
+    <div class="rt-srow">
+        <span>@(L["deck.llm.mode"])</span>
+        <div class="rt-seg" role="group" aria-label="@(L["deck.llm.mode"])">
+            <button type="button" aria-pressed="@Pressed(_llmMode == "local")" @onclick='() => _llmMode = "local"'>@(L["deck.llm.mode.local"])</button>
+            <button type="button" aria-pressed="@Pressed(_llmMode == "api")" @onclick='() => _llmMode = "api"'>@(L["deck.llm.mode.api"])</button>
+        </div>
+    </div>
+
+    @if (_llmMode == "local")
+    {
+        @* Hàng runtime: chọn flavor + trạng thái + Kiểm tra/Tải/Cập nhật (D9). *@
+        <div class="rt-srow">
+            <span>@(L["deck.llm.runtime.title"])</span>
+            <div class="rt-select">
+                <select @bind="_llmFlavor" aria-label="@(L["deck.llm.runtime.flavor"])">
+                    <option value="cuda">@(L["deck.llm.runtime.flavor.cuda"])</option>
+                    <option value="cpu">@(L["deck.llm.runtime.flavor.cpu"])</option>
+                </select>
+                <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+            </div>
+        </div>
+        <div class="rt-field-row" style="flex-wrap: wrap; gap: 10px; margin-bottom: 6px;">
+            <button type="button" class="rt-btn rt-mini" disabled="@_llmRuntimeBusy" @onclick="CheckLlmRuntimeAsync">@(L["deck.llm.runtime.check"])</button>
+            <button type="button" class="rt-btn rt-mini" disabled="@_llmRuntimeBusy" @onclick="() => DownloadLlmRuntimeAsync(isUpdate: false)">@(L["deck.llm.runtime.download"])</button>
+            @if (LlmUpdateAvailable)
+            {
+                <button type="button" class="rt-btn rt-btn-primary rt-mini" disabled="@_llmRuntimeBusy" @onclick="() => DownloadLlmRuntimeAsync(isUpdate: true)">@(L.Fmt("deck.llm.runtime.update", _llmRuntimeCheck!.Latest!))</button>
+            }
+        </div>
+        <p class="rt-hint" style="margin-bottom: 4px;">@LlmRuntimeText</p>
+        <p class="rt-hint" style="margin-bottom: 10px;">@(L["deck.llm.note.vram"])</p>
+
+        @* Bảng model GGUF: tên/quant/size + trạng thái + Tải/Xoá/Đặt (mirror bảng OCR). *@
+        @if (_llmModels is null)
+        {
+            <p class="rt-hint">@(_llmModelsFailed ? L["deck.llm.loadFailed"] : L["deck.llm.loading"])</p>
+            @if (_llmModelsFailed)
+            {
+                <button type="button" class="rt-btn rt-mini" style="margin-top: 6px;" disabled="@_llmModelsBusy" @onclick="ReloadLlmModelsAsync">@(L["deck.llm.refresh"])</button>
+            }
+        }
+        else
+        {
+            <div class="rt-field-row" style="flex-wrap: wrap; gap: 10px; margin-bottom: 6px;">
+                <span class="rt-hint">@(L.Fmt("deck.llm.activeModel", _llmActiveModel))</span>
+                <button type="button" class="rt-btn rt-mini" disabled="@_llmModelsBusy" @onclick="ReloadLlmModelsAsync">@(L["deck.llm.refresh"])</button>
+            </div>
+            <table style="width: 100%; border-collapse: collapse; font-size: 11.5px;">
+                <thead>
+                    <tr style="color: var(--rt-dim); text-align: left;">
+                        <th style="font-weight: 500; padding: 4px 8px 4px 0;">@(L["deck.llm.col.model"])</th>
+                        <th style="font-weight: 500; padding: 4px 8px;">@(L["deck.llm.col.status"])</th>
+                        <th style="font-weight: 500; padding: 4px 0; text-align: right;">@(L["deck.llm.col.actions"])</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (LlmModelInfo m in _llmModels)
+                    {
+                        <tr style="border-top: 1px solid var(--rt-line);">
+                            <td style="padding: 6px 8px 6px 0; vertical-align: top;">
+                                <div class="rt-mono">@m.Name</div>
+                                <div class="rt-hint">@LlmMetaText(m)</div>
+                            </td>
+                            <td style="padding: 6px 8px; vertical-align: top;">
+                                @if (m.Downloading)
+                                {
+                                    <span class="rt-hint">@(L["deck.llm.downloading"])</span>
+                                }
+                                else
+                                {
+                                    <span class="rt-hint" style="@(m.Installed ? "" : "color: var(--rt-danger)")">@(m.Installed ? L["deck.llm.installed"] : L["deck.llm.notInstalled"])</span>
+                                }
+                                @if (m.InUse)
+                                {
+                                    <span class="rt-hint" style="color: var(--rt-tally)">· @(L["deck.llm.inUse"])</span>
+                                }
+                            </td>
+                            <td style="padding: 6px 0; text-align: right; vertical-align: top; white-space: nowrap;">
+                                <button type="button" class="rt-btn rt-mini" disabled="@(m.Installed || m.Downloading || _llmModelsBusy)" @onclick="() => DownloadLlmModelAsync(m)">@(L["deck.llm.download"])</button>
+                                <button type="button" class="rt-btn rt-mini" disabled="@(m.InUse || m.Downloading || !m.Installed || _llmModelsBusy)" @onclick="() => DeleteLlmModelAsync(m)">@(L["deck.llm.delete"])</button>
+                                <button type="button" class="rt-btn rt-mini" disabled="@(m.InUse || m.Downloading || !m.Installed || _llmModelsBusy)" @onclick="() => UseLlmModelAsync(m)">@(L["deck.llm.use"])</button>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    }
+    else
+    {
+        @* Mode API: endpoint OpenAI-compatible (D9). *@
+        <div class="rt-srow">
+            <span>@(L["deck.llm.api.baseUrl"])</span>
+            <input type="text" class="rt-input rt-mono" @bind="_llmBaseUrl"
+                   placeholder="@(L["deck.llm.api.baseUrlHint"])" aria-label="@(L["deck.llm.api.baseUrl"])" />
+        </div>
+        <div class="rt-srow">
+            <span>@(L["deck.llm.api.key"])</span>
+            <input type="text" class="rt-input" @bind="_llmApiKey"
+                   placeholder="@(L["deck.llm.api.keyHint"])" aria-label="@(L["deck.llm.api.key"])" />
+        </div>
+        <div class="rt-srow">
+            <span>@(L["deck.llm.api.model"])</span>
+            <input type="text" class="rt-input rt-mono" @bind="_llmApiModel"
+                   placeholder="@(L["deck.llm.api.modelHint"])" aria-label="@(L["deck.llm.api.model"])" />
+        </div>
+    }
+
+    @* Khối prompt: hiển thị mặc định Hy-MT2 khi chưa ghi đè (D11); khôi phục = nạp lại mặc định. *@
+    <details open="true" style="border: 1px solid var(--rt-line); border-radius: var(--rt-r2); padding: 8px 10px; margin-top: 10px;">
+        <summary style="cursor: pointer; font-size: 11.5px; color: var(--rt-dim); letter-spacing: .02em;">@(L["deck.llm.prompt.title"])</summary>
+        <div style="margin-top: 10px;">
+            <div class="rt-srow">
+                <span>@(L["deck.llm.prompt.system"])</span>
+                <textarea class="rt-input" style="height: auto; min-height: 52px; padding: 7px 10px; resize: vertical; line-height: 1.4;"
+                          rows="2" @bind="_llmSystemPromptText" @bind:event="oninput"
+                          aria-label="@(L["deck.llm.prompt.system"])"></textarea>
+                <div class="rt-field-row">
+                    <button type="button" class="rt-btn rt-mini" @onclick="RestoreLlmSystemPrompt">@(L["deck.llm.prompt.restore"])</button>
+                </div>
+            </div>
+            <div class="rt-srow">
+                <span>@(L["deck.llm.prompt.user"])</span>
+                <textarea class="rt-input" style="height: auto; min-height: 96px; padding: 7px 10px; resize: vertical; line-height: 1.4;"
+                          rows="5" @bind="_llmUserPromptText" @bind:event="oninput"
+                          aria-label="@(L["deck.llm.prompt.user"])"></textarea>
+                <div class="rt-field-row">
+                    <button type="button" class="rt-btn rt-mini" @onclick="RestoreLlmUserPrompt">@(L["deck.llm.prompt.restore"])</button>
+                </div>
+            </div>
+            <p class="rt-hint">@(L["deck.llm.prompt.placeholders"])</p>
+        </div>
+    </details>
+    <p class="rt-hint" style="margin-top: 10px;">@(L["deck.llm.note.nextStart"])</p>
+</section>
+
 @if (Setup.IsComplete || Setup.SkippedForSession)
 {
     @* "Chạy lại setup" (smoke #8): hiện khi wizard đã xong — bước đã done được skip nên máy không đổi gì
@@ -377,10 +519,29 @@
     private string _ocrStatusText = string.Empty;
     private bool _ocrStatusError;
 
+    // LLM provider (plan 2026-11-14): mode + field API/local; prompt hiển thị mặc định Hy-MT2 khi
+    // chưa ghi đè (null trong settings.json) — Lưu so lại với mặc định để giữ ngữ nghĩa "null = mặc định".
+    private string _llmMode = "local";
+    private string _llmBaseUrl = "";
+    private string _llmApiKey = "";
+    private string _llmApiModel = "Hy-MT2-1.8B";
+    private string _llmActiveModel = "Hy-MT2-1.8B-UD-Q4_K_XL";
+    private string _llmSystemPromptText = LlmPromptDefaults.SystemPrompt;
+    private string _llmUserPromptText = LlmPromptDefaults.UserPrompt;
+    private string _llmFlavor = "cuda";
+    private IReadOnlyList<LlmModelInfo>? _llmModels;
+    private bool _llmModelsFailed;
+    private bool _llmModelsBusy;
+    private LlmRuntimeStatusInfo? _llmRuntime;
+    private LlmRuntimeCheckInfo? _llmRuntimeCheck;
+    private bool _llmRuntimeBusy;
+    private bool _disposed;
+
     private string StatusText => _statusKind switch
     {
         "saved" => L["settings.status.saved"],
         "saveFailed" => L["settings.status.saveFailed"],
+        "llmPromptInvalid" => L["deck.llm.prompt.invalid"],
         _ => string.Empty,
     };
 
@@ -399,6 +560,13 @@
         _mergeGapText = FormatThreshold(current.OcrMergeGap);
         _mergeHeightText = FormatThreshold(current.OcrMergeHeight);
         _mergeOverlapText = FormatThreshold(current.OcrMergeOverlap);
+        _llmMode = current.LlmMode;
+        _llmBaseUrl = current.LlmBaseUrl;
+        _llmApiKey = current.LlmApiKey ?? string.Empty;
+        _llmApiModel = current.LlmApiModel;
+        _llmActiveModel = current.LlmActiveModel;
+        _llmSystemPromptText = current.LlmSystemPrompt ?? LlmPromptDefaults.SystemPrompt;
+        _llmUserPromptText = current.LlmUserPrompt ?? LlmPromptDefaults.UserPrompt;
         _appVersion = AppVersionFormatter.Format(Updates.CurrentVersion);
         // File ghi tay có thể chứa giá trị ngoài danh sách — thêm vào để select không bị trống.
         if (Array.IndexOf(_srcOptions, current.Src) < 0) _srcOptions = [current.Src, .. _srcOptions];
@@ -408,6 +576,8 @@
         Setup.Changed += OnSetupChanged; // theo dõi wizard để hiện/ẩn section + bật lại nút rerun
         _ = LoadOcrModelsAsync(); // nạp catalog model từ Core (fire-and-forget như Home)
         _ = LoadOcrSchemaAsync(); // nạp schema tham số engine từ Core (fire-and-forget)
+        _ = LoadLlmModelsAsync(); // nạp catalog GGUF từ Core (fire-and-forget)
+        _ = LoadLlmRuntimeAsync(); // nạp trạng thái runtime llama.cpp từ Core (fire-and-forget)
         base.OnInitialized();
     }
 
@@ -443,15 +613,31 @@
 
     private void Save()
     {
+        // Prompt LLM: chỉ bắt buộc {source_text} khi provider đang là llm — Core từ chối ở core.start
+        // nếu thiếu (spec D1); chặn ngay tại đây để user sửa trước khi lưu. Ô trống = mặc định Hy-MT2.
+        if (_model.Provider == "llm"
+            && !string.IsNullOrWhiteSpace(_llmUserPromptText)
+            && !_llmUserPromptText.Contains("{source_text}", StringComparison.Ordinal))
+        {
+            _statusKind = "llmPromptInvalid";
+            return;
+        }
         try
         {
-            // `with` giữ nguyên overlay/capture options hiện có — form này chỉ sửa provider/ngôn ngữ.
+            // `with` giữ nguyên overlay/capture options hiện có — form này sửa provider/ngôn ngữ/LLM.
             SettingsStore.Save(SettingsStore.Load() with
             {
                 Provider = _model.Provider,
                 Src = _model.Src,
                 Dst = _model.Dst,
                 ApiKey = _model.ApiKey,
+                LlmMode = _llmMode,
+                LlmBaseUrl = _llmBaseUrl,
+                LlmApiKey = string.IsNullOrWhiteSpace(_llmApiKey) ? null : _llmApiKey,
+                LlmApiModel = _llmApiModel,
+                LlmActiveModel = _llmActiveModel,
+                LlmSystemPrompt = NormalizeLlmPrompt(_llmSystemPromptText, LlmPromptDefaults.SystemPrompt),
+                LlmUserPrompt = NormalizeLlmPrompt(_llmUserPromptText, LlmPromptDefaults.UserPrompt),
             });
             _statusKind = "saved";
             Toast.Show(L["settings.status.saved"]);
@@ -461,6 +647,11 @@
             _statusKind = "saveFailed";
         }
     }
+
+    // Trùng mặc định (hoặc rỗng/toàn khoảng trắng = Core coi như không ghi đè) → lưu null để giữ
+    // ngữ nghĩa "null = theo mặc định Hy-MT2", không ghim bản sao mặc định vào settings.json (D11).
+    private static string? NormalizeLlmPrompt(string text, string defaultValue) =>
+        text == defaultValue || string.IsNullOrWhiteSpace(text) ? null : text;
 
     // Cặp det/rec đang dùng của sidecar — hai model có cờ InUse trong catalog.
     private string OcrActivePairText
@@ -879,6 +1070,225 @@
         return value.ToJsonString();
     }
 
+    // ----- LLM provider (plan 2026-11-14) -----
+
+    // Chu kỳ poll sau khi bắt đầu tải runtime (2 s × 300 ≈ 10 phút — zip CPU nhỏ, CUDA vài trăm MB).
+    private static readonly TimeSpan LlmRuntimePollInterval = TimeSpan.FromSeconds(2);
+    private const int LlmRuntimePollAttempts = 300;
+
+    // Chỉ hiện nút Cập nhật khi check thấy tag mới khác tag đang cài.
+    private bool LlmUpdateAvailable =>
+        _llmRuntimeCheck?.Latest is { } latest
+        && !string.Equals(latest, _llmRuntimeCheck.Current, StringComparison.Ordinal);
+
+    private string LlmRuntimeText
+    {
+        get
+        {
+            if (_llmRuntime is null) return L["deck.llm.loading"];
+            if (!_llmRuntime.Installed) return L["deck.llm.runtime.notInstalled"];
+            string text = L.Fmt("deck.llm.runtime.installed", _llmRuntime.Tag ?? "?");
+            if (_llmRuntimeCheck?.Latest is { } latest
+                && !string.Equals(latest, _llmRuntimeCheck.Current, StringComparison.Ordinal))
+            {
+                text += " · " + L.Fmt("deck.llm.runtime.newer", latest);
+            }
+            return text;
+        }
+    }
+
+    private string LlmMetaText(LlmModelInfo m) =>
+        $"{m.SizeClass} · {m.Quant} · {FormatSize(m.SizeBytes)}";
+
+    private static string FormatSize(long bytes) => bytes >= 1_000_000_000
+        ? $"{bytes / 1_000_000_000.0:0.0#} GB"
+        : $"{bytes / 1_000_000.0:0} MB";
+
+    // Nạp catalog GGUF từ Core; lỗi → nút Làm mới thử lại (pattern OCR).
+    private async Task LoadLlmModelsAsync()
+    {
+        try
+        {
+            _llmModels = await Pipeline.ListLlmModelsAsync(CancellationToken.None);
+            _llmModelsFailed = false;
+        }
+        catch (Exception)
+        {
+            _llmModelsFailed = true;
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ReloadLlmModelsAsync()
+    {
+        if (_llmModelsBusy) return;
+        _llmModelsBusy = true;
+        try
+        {
+            await LoadLlmModelsAsync();
+            await LoadLlmRuntimeAsync();
+        }
+        finally
+        {
+            _llmModelsBusy = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task LoadLlmRuntimeAsync()
+    {
+        try
+        {
+            _llmRuntime = await Pipeline.GetLlmRuntimeStatusAsync(CancellationToken.None);
+        }
+        catch (Exception)
+        {
+            // Core chưa sẵn sàng — giữ trạng thái cũ; Kiểm tra/Làm mới thử lại.
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task DownloadLlmModelAsync(LlmModelInfo model)
+    {
+        if (_llmModelsBusy) return;
+        _llmModelsBusy = true;
+        try
+        {
+            await Pipeline.DownloadLlmModelAsync(model.Name, CancellationToken.None);
+            Toast.Show(L.Fmt("deck.llm.downloadStarted", model.Name));
+            await LoadLlmModelsAsync(); // tải ngầm phía Core — Làm mới để thấy Đang tải/Đã cài.
+        }
+        catch (Exception ex)
+        {
+            Toast.Show(L.Fmt("deck.llm.actionFailed", ex.Message), ToastSeverity.Error);
+        }
+        finally
+        {
+            _llmModelsBusy = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task DeleteLlmModelAsync(LlmModelInfo model)
+    {
+        if (_llmModelsBusy) return;
+        _llmModelsBusy = true;
+        try
+        {
+            await Pipeline.DeleteLlmModelAsync(model.Name, CancellationToken.None);
+            Toast.Show(L.Fmt("deck.llm.deleted", model.Name));
+            await LoadLlmModelsAsync();
+        }
+        catch (Exception ex)
+        {
+            Toast.Show(L.Fmt("deck.llm.actionFailed", ex.Message), ToastSeverity.Error);
+        }
+        finally
+        {
+            _llmModelsBusy = false;
+            StateHasChanged();
+        }
+    }
+
+    // "Đặt" = set active phía Core + ghim vào settings.json — core.start gửi đúng model này (D10).
+    private async Task UseLlmModelAsync(LlmModelInfo model)
+    {
+        if (_llmModelsBusy) return;
+        _llmModelsBusy = true;
+        try
+        {
+            await Pipeline.SetLlmModelAsync(model.Name, CancellationToken.None);
+            SettingsStore.Save(SettingsStore.Load() with { LlmActiveModel = model.Name });
+            _llmActiveModel = model.Name;
+            Toast.Show(L.Fmt("deck.llm.useSaved", model.Name));
+            await LoadLlmModelsAsync();
+        }
+        catch (Exception ex)
+        {
+            Toast.Show(L.Fmt("deck.llm.actionFailed", ex.Message), ToastSeverity.Error);
+        }
+        finally
+        {
+            _llmModelsBusy = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task CheckLlmRuntimeAsync()
+    {
+        if (_llmRuntimeBusy) return;
+        _llmRuntimeBusy = true;
+        try
+        {
+            _llmRuntimeCheck = await Pipeline.CheckLlmRuntimeAsync(CancellationToken.None);
+            await LoadLlmRuntimeAsync();
+            if (_llmRuntimeCheck.Latest is not { } latest)
+            {
+                Toast.Show(L["deck.llm.runtime.noAsset"]);
+            }
+            else if (string.Equals(latest, _llmRuntimeCheck.Current, StringComparison.Ordinal))
+            {
+                Toast.Show(L.Fmt("deck.llm.runtime.latest", latest));
+            }
+            else
+            {
+                Toast.Show(L.Fmt("deck.llm.runtime.checkFound", latest));
+            }
+        }
+        catch (Exception ex)
+        {
+            Toast.Show(L.Fmt("deck.llm.runtime.checkFailed", ex.Message), ToastSeverity.Error);
+        }
+        finally
+        {
+            _llmRuntimeBusy = false;
+            StateHasChanged();
+        }
+    }
+
+    // Tải runtime (đặt mới hoặc cập nhật) rồi poll trạng thái tới khi cài xong.
+    private async Task DownloadLlmRuntimeAsync(bool isUpdate)
+    {
+        if (_llmRuntimeBusy) return;
+        _llmRuntimeBusy = true;
+        try
+        {
+            string? previousTag = _llmRuntime?.Tag;
+            await Pipeline.DownloadLlmRuntimeAsync(_llmFlavor, CancellationToken.None);
+            Toast.Show(L.Fmt("deck.llm.runtime.downloadStarted", L["deck.llm.runtime.flavor." + _llmFlavor]));
+            // Tải ngầm phía Core — poll: cài mới xong khi Installed, cập nhật xong khi tag đổi.
+            for (int i = 0; i < LlmRuntimePollAttempts; i++)
+            {
+                await Task.Delay(LlmRuntimePollInterval);
+                if (_disposed) return;
+                _llmRuntime = await Pipeline.GetLlmRuntimeStatusAsync(CancellationToken.None);
+                StateHasChanged();
+                bool complete = _llmRuntime.Installed
+                    && (previousTag is null
+                        || !string.Equals(_llmRuntime.Tag, previousTag, StringComparison.Ordinal));
+                if (complete)
+                {
+                    Toast.Show(L["deck.llm.runtime.installedToast"]);
+                    if (isUpdate) _llmRuntimeCheck = null; // tag đổi → nút Cập nhật biến mất.
+                    break;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Toast.Show(L.Fmt("deck.llm.actionFailed", ex.Message), ToastSeverity.Error);
+        }
+        finally
+        {
+            _llmRuntimeBusy = false;
+            StateHasChanged();
+        }
+    }
+
+    private void RestoreLlmSystemPrompt() => _llmSystemPromptText = LlmPromptDefaults.SystemPrompt;
+
+    private void RestoreLlmUserPrompt() => _llmUserPromptText = LlmPromptDefaults.UserPrompt;
+
     private async Task SetThemeAsync(string theme)
     {
         try
@@ -980,6 +1390,7 @@
 
     public void Dispose()
     {
+        _disposed = true; // chặn poll runtime gọi StateHasChanged sau khi sheet bị gỡ.
         L.Changed -= OnStateChanged;
         Js.OnWebViewReady -= OnStateChanged;
         Setup.Changed -= OnSetupChanged;

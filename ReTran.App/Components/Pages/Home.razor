@@ -31,6 +31,14 @@
                     <button type="button" class="rt-btn rt-mini" @onclick="DismissOcrNotice">@(L["deck.ocr.firstRun.later"])</button>
                 </div>
             }
+            @if (_showLlmNotice)
+            {
+                @* First-run: provider llm thiếu runtime/model local (Core trả llm-*-missing) — dẫn tới mục LLM trong Cài đặt. *@
+                <div class="rt-alert" role="alert" style="align-items: center; margin-bottom: 12px;">
+                    <span style="flex: 1;"><b>@(L["deck.llm.firstRun.title"])</b> — @(L["deck.llm.firstRun.body"])</span>
+                    <button type="button" class="rt-btn rt-mini" @onclick="DismissLlmNotice">@(L["deck.llm.firstRun.later"])</button>
+                </div>
+            }
             <div class="rt-monitor">
                 <div class="rt-monitor-bar">
                     <span class="rt-plate"><b>@(L["home.preview.title"])</b></span>
@@ -256,6 +264,7 @@
     private string _pipelineState = "stopped";  // "stopped" | "running" | "coreError"
     private string? _pipelineError;
     private bool _showOcrNotice;                // first-run: chưa có model OCR nào cài
+    private bool _showLlmNotice;                // first-run: Start lỗi llm-*-missing (thiếu runtime/model LLM local)
     private bool _overlayOn;
     private bool _overlayFeedFailed;          // feed OBS không bind được cổng nào — card báo lỗi, không hiện URL chết
     private bool _busy;
@@ -391,6 +400,7 @@
         ApplySettings(SettingsStore.Load());
         // Notice first-run đang mở → kiểm tra lại: tải model + Lưu model (ghi settings) sẽ tắt nó.
         if (_showOcrNotice) await CheckOcrModelsAsync();
+        if (_showLlmNotice) await CheckLlmComponentsAsync();
         StateHasChanged();
     });
 
@@ -447,7 +457,25 @@
         await InvokeAsync(StateHasChanged);
     }
 
+    // Notice first-run LLM: chỉ tắt khi đã có runtime llama.cpp + ít nhất một model GGUF đã cài.
+    private async Task CheckLlmComponentsAsync()
+    {
+        try
+        {
+            LlmRuntimeStatusInfo runtime = await Pipeline.GetLlmRuntimeStatusAsync(CancellationToken.None);
+            IReadOnlyList<LlmModelInfo> models = await Pipeline.ListLlmModelsAsync(CancellationToken.None);
+            _showLlmNotice = !(runtime.Installed && models.Any(m => m.Installed));
+        }
+        catch (Exception)
+        {
+            // Core chưa sẵn sàng — giữ nguyên trạng thái hiện tại, lần check sau sẽ quyết.
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
     private void DismissOcrNotice() => _showOcrNotice = false;
+
+    private void DismissLlmNotice() => _showLlmNotice = false;
 
     private void SetSourceKind(string kind)
     {
@@ -498,6 +526,8 @@
         {
             // Cặp model OCR chưa tải — bật notice first-run dẫn tới mục Model OCR trong Cài đặt.
             if (PipelineController.IsOcrModelMissing(ex)) _showOcrNotice = true;
+            // LLM local thiếu runtime/model — notice tương tự dẫn tới mục LLM (spec 2026-11-14).
+            if (PipelineController.IsLlmComponentMissing(ex)) _showLlmNotice = true;
             _pipelineError = L.Fmt("deck.error.start", ex.Message);
         }
         finally

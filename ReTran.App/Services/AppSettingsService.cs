@@ -59,6 +59,13 @@ namespace ReTran_App.Services;
 /// hai dòng cùng cột; dải hợp lệ <c>0.0..1.0</c>, với <c>0.0</c> chỉ đòi hai box chạm nhau.
 /// Gửi trong <c>core.start</c> dưới dạng <c>ocr.mergeOverlapRatio</c>.
 /// </param>
+/// <param name="LlmMode">LLM mode: <c>local</c> (GGUF via llama.cpp) or <c>api</c> (OpenAI-compatible endpoint). Chế độ LLM: <c>local</c> (GGUF qua llama.cpp) hoặc <c>api</c> (endpoint OpenAI-compatible).</param>
+/// <param name="LlmBaseUrl">Base URL for API mode. URL gốc cho chế độ API.</param>
+/// <param name="LlmApiKey">Optional bearer key for API mode. Bearer key tuỳ chọn cho chế độ API.</param>
+/// <param name="LlmApiModel">Model id sent to the API endpoint. Model id gửi tới endpoint API.</param>
+/// <param name="LlmActiveModel">Catalog name of the installed GGUF used in local mode. Tên catalog của GGUF đã cài dùng ở chế độ local.</param>
+/// <param name="LlmSystemPrompt">System prompt override; <see langword="null"/> keeps the Hy-MT2 default (empty). System prompt ghi đè; <see langword="null"/> giữ mặc định Hy-MT2 (rỗng).</param>
+/// <param name="LlmUserPrompt">User prompt template override; <see langword="null"/> keeps the Hy-MT2 default. Template user prompt ghi đè; <see langword="null"/> giữ mặc định Hy-MT2.</param>
 public sealed record AppSettings(
     string Provider, string Src, string Dst, string? ApiKey,
     bool OverlayOnGame = false,
@@ -77,7 +84,14 @@ public sealed record AppSettings(
     string? SourceHwnd = null,
     double OcrMergeGap = 0.6,
     double OcrMergeHeight = 1.35,
-    double OcrMergeOverlap = 0.5)
+    double OcrMergeOverlap = 0.5,
+    string LlmMode = "local",
+    string LlmBaseUrl = "",
+    string? LlmApiKey = null,
+    string LlmApiModel = "Hy-MT2-1.8B",
+    string LlmActiveModel = "Hy-MT2-1.8B-UD-Q4_K_XL",
+    string? LlmSystemPrompt = null,
+    string? LlmUserPrompt = null)
 {
     /// <summary>
     /// Factory default: Google Translate, auto source, Vietnamese target, no API key.
