@@ -202,7 +202,7 @@ public class FrameAnnotatorTests
     public void Annotate_ParagraphBox_RendersValidJpeg()
     {
         using Frame frame = SolidFrame(1920, 1080, 0, 0, 0);
-        // text ~60 ký tự; box cao ~3 dòng (144 px ở 720p sau scale) — pill maxLines 4 (spec 2026-11-01)
+        // text ~60 ký tự; box cao ~3 dòng (144 px ở 720p sau scale) — pill wrap tự do theo lòng box (spec 2026-11-13)
         string text = "Đây là một đoạn văn bản dài được dịch và hiển thị trong khung ghi chú";
         var snapshot = new AnnotSnapshot(1920, 1080,
             [new AnnotBox(0.1, 0.1, 0.5, 0.2, text, text, IsParagraph: true)]);
@@ -213,6 +213,33 @@ public class FrameAnnotatorTests
         using Bitmap decoded = Decode(annotated.Jpeg);
         Assert.Equal(1280, decoded.Width);  // 1920×1080 → 1280×720 (giữ tỉ lệ)
         Assert.Equal(720, decoded.Height);
+    }
+
+    /// <summary>
+    /// Long text in a tiny box grows the pill below the box instead of truncating at the floor size.
+    /// Chữ dài trong box nhỏ làm pill nở xuống dưới đáy box thay vì bị cắt tại cỡ sàn.
+    /// </summary>
+    [Fact]
+    public void Annotate_TinyBox_LongText_PillGrowsBelowBox()
+    {
+        using Frame frame = SolidFrame(640, 360, 255, 255, 255);
+        const string longText =
+            "Đây là bản dịch tiếng Việt khá dài cho một đoạn hội thoại trong game, cần xuống dòng nhiều lần để hiển thị đầy đủ nội dung bên trong chiếc hộp này";
+        var snapshot = new AnnotSnapshot(640, 360,
+            [new AnnotBox(0.1, 0.1, 0.35, 0.06, longText, longText)]);
+
+        using Bitmap decoded = Decode(new FrameAnnotator().Annotate(frame, snapshot).Jpeg);
+
+        // Box is (64,36)-(288,57.6); the pill must grow below the box bottom (57.6) because the text
+        // cannot fit at the floor size. Box là (64,36)-(288,57,6); pill phải nở qua đáy box (57,6)
+        // vì chữ không thể vừa ở cỡ sàn.
+        int maxDarkY = -1;
+        for (int y = 36; y <= 140; y++)
+            for (int x = 60; x <= 300; x++)
+                if (IsDark(decoded.GetPixel(x, y))) maxDarkY = Math.Max(maxDarkY, y);
+
+        Assert.True(maxDarkY > 60,
+            $"expected pill pixels below the box bottom (57.6), got max dark y {maxDarkY}");
     }
 
     /// <summary>

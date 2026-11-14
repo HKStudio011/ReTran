@@ -115,21 +115,25 @@ public sealed class FrameAnnotator : IFrameAnnotator
             float innerW = inner.Width, innerH = inner.Height;
             if (innerW < 2f || innerH < 2f) continue;
 
-            // Paragraph blocks wrap up to four lines; single-line boxes stay at two (spec 2026-11-01).
-            // Block đoạn văn wrap tối đa bốn dòng; box đơn giữ hai dòng (spec 2026-11-01).
-            int maxLines = box.IsParagraph ? 4 : 2;
-
             BoxAnnotationStyle.TextFit fit = BoxAnnotationStyle.Fit(
-                g, label, innerW, innerH, h, format, maxLines);
+                g, label, innerW, innerH, h, format);
             SizeF block = fit.Block;
-            if (!fit.Fits)
-            {
-                label = BoxAnnotationStyle.TruncateToFit(g, label, fit.Size, innerW, innerH, format, maxLines);
-                block = BoxAnnotationStyle.MeasureBlock(g, label, fit.Size, innerW, format);
-            }
 
             float padX = BoxAnnotationStyle.PadX(fit.Size);
             float padY = BoxAnnotationStyle.PadY(fit.Size);
+
+            // Grow the pill below the box when the text cannot fit at the floor size; truncate only
+            // when even a full-viewport pill would not fit (spec 2026-11-13).
+            // Nở pill xuống dưới box khi chữ không vừa ở cỡ sàn; chỉ cắt khi pill tràn cả viewport
+            // vẫn không đủ chỗ (spec 2026-11-13).
+            float need = block.Height + 2f * padY;
+            if (need > outH)
+            {
+                int maxLines = Math.Max(1, (int)MathF.Floor(
+                    (outH - 2f * padY) / BoxAnnotationStyle.GetFont(fit.Size).GetHeight(g)));
+                label = BoxAnnotationStyle.TruncateToFit(g, label, fit.Size, innerW, outH, format, maxLines);
+                block = BoxAnnotationStyle.MeasureBlock(g, label, fit.Size, innerW, format);
+            }
             float pillW = innerW;
             float pillH = MathF.Max(innerH, block.Height + 2f * padY); // tiny-box fallback may overflow
             float pillX = Math.Clamp(inner.X, 0f, MathF.Max(0f, outW - pillW));
