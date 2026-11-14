@@ -1031,3 +1031,38 @@ Mục này là **mô tả code đã commit**, không phải số đo process m�
 - Đường dịch một text giữ nguyên; lưu lượng stdio/shared memory không đổi.
 - Nếu mapping kết quả lệch, batch rơi về dịch từng text (tối đa quay lại **N** request). Lỗi HTTP làm hỏng cả batch và không retry, giữ nguyên ngữ nghĩa M4.
 - Xác minh ngày 2026-11-14: build solution thành công (0 error); full suite **769/769 test pass**, 0 failed, 0 skipped.
+
+---
+
+## Overlay text fit theo lòng box (2026-11-14)
+
+### Bối cảnh đo
+
+- **A/B tách nhiễu (cùng phiên máy, chạy liền nhau):** "cũ" = worktree tạm ở `0f05633` (trước Task 1 của plan overlay-text-fit — thuật toán fit còn trần 2/4 dòng); "mới" = `70bc6a7`.
+- `Tools/Perf/annotbench`, build **Debug**, frame synthetic 1920×1080, 20 reps/N (đúng lệnh dùng ở các mục annotate trước).
+
+### Số đo (avg ms/khung)
+
+| Snapshot | Cũ `0f05633` | Mới `70bc6a7` (2 lượt) | JPEG cũ → mới |
+| --- | --- | --- | --- |
+| `null` | 15,73 | 15,36 / 17,32 | 263,2 KB |
+| 0 box | 16,18 | 14,70 / 16,92 | 263,2 KB |
+| **63 box** | **23,85** | **25,42 / 27,34** | 261,8 → 275,3 KB |
+| 150 box | 31,16 | 37,16 / 41,64 | 255,8 → 285,8 KB |
+| 300 box | 50,82 | 68,85 / 69,37 | 247,7 → 297,8 KB |
+
+- **Budget:** **đạt** — 63 box ≈ 25–27 ms ≤ 40 ms; delta so với code cũ ≈ **+1,6 ms (~+7 %)** tại cùng mật độ, nằm trong biên độ nhiễu của máy đang bận (baseline `null` giữa hai lượt đã lệch 1–2 ms).
+- Delta tăng theo mật độ (+19 % @150, +36 % @300) khớp đúng phần **chữ được vẽ nhiều hơn**, không phải chi phí thuật toán fit: không còn trần 2/4 dòng nên các box từng bị cắt "…" nay vẽ trọn bản dịch (JPEG @300 box +20 %), còn đường truncate ít hơn trước (chỉ khi tràn viewport). Số bước binary search không đổi.
+
+### Overlay OBS (`overlay.js`)
+
+- Thêm **1 phép đo layout mỗi box** trên một element đo ẩn tái sử dụng (set `width`/`fontSize`, đọc `offsetHeight`) + cap chữ scale theo canvas `40 × max(0,5; w/1280)` — ≤ ~60 box × 10–15 fps, trong ngân sách browser source; không network/timer mới.
+- `node --check` pass; checklist mắt thường deferred cho user như các mục trước.
+
+### Lệnh reproduce
+
+```powershell
+dotnet run -c Debug --project Tools/Perf/annotbench
+# A/B: git worktree add --detach <temp> 0f05633
+#      dotnet run -c Debug --project <temp>\Tools\Perf\annotbench
+```
