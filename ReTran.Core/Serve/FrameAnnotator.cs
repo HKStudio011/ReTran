@@ -77,11 +77,12 @@ public sealed class FrameAnnotator : IFrameAnnotator
 
     /// <summary>
     /// Draws every box: teal corner ticks on the source box, then a dark rounded pill inside
-    /// the box holding the translation (up to two wrapped lines — four for merged paragraph
-    /// blocks, spec 2026-11-01 — font size derived from the box height and shrunk until it fits).
+    /// the box holding the translation (font size = largest that fits the box interior, wrapped
+    /// without a line cap; the pill grows below the box when even the floor size does not fit,
+    /// and only truncates at the viewport edge — spec 2026-11-13).
     /// Vẽ mọi box: tick teal 4 góc trên box gốc, rồi pill bo góc tối bên trong box chứa bản dịch
-    /// (tối đa hai dòng wrap — bốn dòng cho block đoạn văn gộp, spec 2026-11-01 — cỡ chữ suy ra
-    /// từ chiều cao box và thu nhỏ dần đến khi vừa).
+    /// (cỡ chữ = lớn nhất vừa lòng box, wrap không trần dòng; pill nở xuống dưới box khi ngay cả
+    /// cỡ sàn cũng không vừa, chỉ cắt khi chạm mép viewport — spec 2026-11-13).
     /// </summary>
     private static void DrawBoxes(Graphics g, AnnotSnapshot snapshot, float scale, int outW,
         int outH)
