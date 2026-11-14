@@ -41,6 +41,14 @@ public sealed class LlamaRuntimeManager(
     private readonly Func<Uri, string, CancellationToken, Task> _downloader =
         downloader ?? DefaultDownloadAsync;
 
+    // One download at a time: two overlapping llm.runtime.download calls (setup + Settings, or a
+    // double fire) would otherwise extract into the same <tag>/ directory and interleave the
+    // runtime.json write. The second caller waits for the first, then runs its own download.
+    // Mỗi lần tải một lượt: hai lời gọi llm.runtime.download chồng nhau (setup + Settings, hoặc
+    // bắn đúp) nếu không sẽ giải nén vào cùng thư mục <tag>/ và ghi runtime.json xen kẽ. Nơi gọi
+    // thứ hai chờ nơi đầu xong rồi mới chạy lượt tải của mình.
+    private readonly SemaphoreSlim _downloadGate = new(1, 1);
+
     /// <summary>
     /// Reports the installed tag and the newest available tag for the CUDA flavor.
     /// Cho biết tag đã cài và tag mới nhất khả dụng cho nhánh CUDA.
@@ -70,8 +78,12 @@ public sealed class LlamaRuntimeManager(
     }
 
     /// <summary>
-    /// Downloads and extracts the newest matching build for <paramref name="flavor"/>.
-    /// Tải và giải nén bản build khớp mới nhất cho <paramref name="flavor"/>.
+    /// Downloads and extracts the newest matching build for <paramref name="flavor"/>. Calls are
+    /// serialized: a second caller waits until the in-flight download finishes, so extraction into
+    /// <c>&lt;tag&gt;/</c> and the <c>runtime.json</c> write never interleave.
+    /// Tải và giải nén bản build khớp mới nhất cho <paramref name="flavor"/>. Các lời gọi được tuần
+    /// tự hoá: nơi gọi thứ hai chờ lượt tải đang chạy xong, nên giải nén vào <c>&lt;tag&gt;/</c> và
+    /// ghi <c>runtime.json</c> không bao giờ xen kẽ nhau.
     /// </summary>
     /// <param name="flavor"><c>cuda</c> or <c>cpu</c>. <c>cuda</c> hoặc <c>cpu</c>.</param>
     /// <param name="ct">Token used to cancel the download. Token dùng để hủy tải.</param>
@@ -79,23 +91,31 @@ public sealed class LlamaRuntimeManager(
     /// <exception cref="InvalidOperationException">Thrown when no release carries a matching asset. Khi không release nào có asset khớp.</exception>
     public async Task DownloadAsync(string flavor, CancellationToken ct)
     {
-        string pattern = FlavorPattern(flavor);
-        (string tag, string mainUrl, string? cudartUrl)? release =
-            await FindReleaseAsync(flavor, ct).ConfigureAwait(false)
-            ?? throw new InvalidOperationException(
-                $"No llama.cpp release with a Windows asset matching '{pattern}' was found.");
-        _ = pattern;
+        _ = FlavorPattern(flavor); // validate before queueing / kiểm tra flavor trước khi xếp hàng
 
-        string targetDir = Path.Combine(_rootDir, release.Value.tag);
-        Directory.CreateDirectory(targetDir);
-
-        await DownloadAndExtractAsync(release.Value.mainUrl, targetDir, ct).ConfigureAwait(false);
-        if (release.Value.cudartUrl is not null)
+        await _downloadGate.WaitAsync(ct).ConfigureAwait(false);
+        try
         {
-            await DownloadAndExtractAsync(release.Value.cudartUrl, targetDir, ct).ConfigureAwait(false);
-        }
+            (string tag, string mainUrl, string? cudartUrl)? release =
+                await FindReleaseAsync(flavor, ct).ConfigureAwait(false)
+                ?? throw new InvalidOperationException(
+                    $"No llama.cpp release with a Windows asset matching '{FlavorPattern(flavor)}' was found.");
 
-        WriteTag(release.Value.tag);
+            string targetDir = Path.Combine(_rootDir, release.Value.tag);
+            Directory.CreateDirectory(targetDir);
+
+            await DownloadAndExtractAsync(release.Value.mainUrl, targetDir, ct).ConfigureAwait(false);
+            if (release.Value.cudartUrl is not null)
+            {
+                await DownloadAndExtractAsync(release.Value.cudartUrl, targetDir, ct).ConfigureAwait(false);
+            }
+
+            WriteTag(release.Value.tag);
+        }
+        finally
+        {
+            _downloadGate.Release();
+        }
     }
 
     private static string FlavorPattern(string flavor) => flavor switch

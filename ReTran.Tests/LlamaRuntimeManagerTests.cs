@@ -149,4 +149,62 @@ public class LlamaRuntimeManagerTests : IDisposable
         await Assert.ThrowsAsync<RpcMethodException>(() =>
             manager.DownloadAsync("vulkan", TestContext.Current.CancellationToken));
     }
+
+    [Fact]
+    public async Task Download_ConcurrentCalls_SerializeExtraction()
+    {
+        // Reviewer finding #1: hai lượt tải chồng nhau từng giải nén đè cùng thư mục <tag>/ và ghi
+        // runtime.json giao nhau. Khoá tuần tự phải giữ tối đa MỘT lượt tải/giải nén tại một thời
+        // điểm; lượt thứ hai chờ lượt đầu xong.
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int active = 0;
+        int maxActive = 0;
+        var manager = new LlamaRuntimeManager(
+            _dir, new HttpClient(new GhHandler(ReleasesJson)),
+            async (uri, target, ct) =>
+            {
+                int now = Interlocked.Increment(ref active);
+                Interlocked.Exchange(ref maxActive, Math.Max(maxActive, now));
+                await release.Task;
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                using FileStream fs = File.Create(target);
+                using var zip = new ZipArchive(fs, ZipArchiveMode.Create);
+                zip.CreateEntry(uri.ToString().Contains("cudart", StringComparison.Ordinal)
+                    ? "extra.dll"
+                    : "llama-server.exe");
+                Interlocked.Decrement(ref active);
+            });
+
+        Task first = manager.DownloadAsync("cpu", TestContext.Current.CancellationToken);
+        Task second = manager.DownloadAsync("cpu", TestContext.Current.CancellationToken);
+        release.SetResult();
+        await Task.WhenAll(first, second);
+
+        Assert.Equal(1, maxActive);
+    }
+
+    [Fact]
+    public async Task Download_TraversalZipEntry_Throws_AndWritesNothingOutside()
+    {
+        // Pin lưới an toàn supply-chain: entry "../evil.txt" phải bị BCL chặn khi giải nén (ném
+        // IOException, không ghi file nào thoát thư mục đích) — và vì thế runtime.json cũng không
+        // được ghi (tag chưa được coi là cài hợp lệ).
+        var manager = new LlamaRuntimeManager(
+            _dir, new HttpClient(new GhHandler(ReleasesJson)),
+            (uri, target, ct) =>
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                using FileStream fs = File.Create(target);
+                using var zip = new ZipArchive(fs, ZipArchiveMode.Create);
+                zip.CreateEntry("../evil.txt");
+                return Task.CompletedTask;
+            });
+
+        await Assert.ThrowsAsync<IOException>(() =>
+            manager.DownloadAsync("cpu", TestContext.Current.CancellationToken));
+
+        Assert.False(File.Exists(Path.Combine(_dir, "evil.txt")));
+        Assert.False(File.Exists(Path.Combine(Path.GetDirectoryName(_dir)!, "evil.txt")));
+        Assert.False(File.Exists(Path.Combine(_dir, "runtime.json")));
+    }
 }
