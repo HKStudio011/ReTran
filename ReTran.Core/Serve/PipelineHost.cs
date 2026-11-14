@@ -6,6 +6,7 @@ using ReTran.Core.Capture;
 using ReTran.Core.Cli;
 using ReTran.Core.Config;
 using ReTran.Core.JsonRpc;
+using ReTran.Core.Llm;
 using ReTran.Core.Ocr;
 using ReTran.Core.OcrClient;
 using ReTran.Core.Translate;
@@ -37,6 +38,7 @@ public sealed class PipelineHost : IAsyncDisposable
     private readonly object _sync = new();
     private readonly ISidecarRpc? _rpc;
     private readonly TranslatorRegistry _registry;
+    private readonly Func<LlmSettings, ITranslator>? _llmFactory;
     private readonly JsonRpcServer _server;
     private readonly TextWriter _stderr;
     private readonly Func<OcrLoopOptions, ICaptureSource>? _sourceFactory;
@@ -79,6 +81,12 @@ public sealed class PipelineHost : IAsyncDisposable
     /// Tên shared memory của channel preview; <see langword="null"/> dùng
     /// <see cref="PreviewProtocol.MapName"/> (test truyền tên riêng để không đụng nhau).
     /// </param>
+    /// <param name="llmFactory">
+    /// Optional factory building the <c>llm</c> provider from parsed <c>translate.llm</c> settings;
+    /// <see langword="null"/> makes <c>translate.provider = "llm"</c> a -32602. Factory tùy chọn dựng
+    /// provider <c>llm</c> từ cài đặt <c>translate.llm</c> đã parse; <see langword="null"/> biến
+    /// <c>translate.provider = "llm"</c> thành -32602.
+    /// </param>
     /// <exception cref="ArgumentNullException">Thrown when a non-nullable reference parameter is null. Ném khi tham số tham chiếu bắt buộc nào đó là null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">Thrown when <paramref name="annotatorFps"/> is outside 1..60. Khi <paramref name="annotatorFps"/> ngoài khoảng 1..60.</exception>
     public PipelineHost(
@@ -89,7 +97,8 @@ public sealed class PipelineHost : IAsyncDisposable
         Func<OcrLoopOptions, ICaptureSource>? sourceFactory = null,
         IFrameAnnotator? annotator = null,
         int annotatorFps = 10,
-        string? previewMapName = null)
+        string? previewMapName = null,
+        Func<LlmSettings, ITranslator>? llmFactory = null)
     {
         ArgumentNullException.ThrowIfNull(registry);
         ArgumentNullException.ThrowIfNull(server);
@@ -98,6 +107,7 @@ public sealed class PipelineHost : IAsyncDisposable
             throw new ArgumentOutOfRangeException(nameof(annotatorFps), annotatorFps, "annotatorFps must be 1..60.");
         _rpc = rpc;
         _registry = registry;
+        _llmFactory = llmFactory;
         _server = server;
         _stderr = stderr;
         _sourceFactory = sourceFactory;
@@ -608,6 +618,63 @@ public sealed class PipelineHost : IAsyncDisposable
     public async ValueTask DisposeAsync() => await StopAsync(null, CancellationToken.None);
 
     /// <summary>
+    /// Parses <c>translate.llm</c> and builds the LLM translator through the injected factory —
+    /// schema violations are -32602 here; a factory that rejects the local model or runtime
+    /// surfaces its own -32603 (<c>llm-model-missing</c> / <c>llm-runtime-missing</c>).
+    /// Parse <c>translate.llm</c> và dựng translator LLM qua factory được inject — vi phạm schema là
+    /// -32602 ở đây; factory từ chối model/runtime local nổi lên -32603 của chính nó
+    /// (<c>llm-model-missing</c> / <c>llm-runtime-missing</c>).
+    /// </summary>
+    /// <param name="translate">The <c>translate</c> object of core.start. Object <c>translate</c> của core.start.</param>
+    /// <returns>The translator built by the factory. Translator do factory dựng.</returns>
+    /// <exception cref="RpcMethodException">Thrown with -32602 on schema violations (spec 2026-11-14 D1). Ném -32602 khi vi phạm schema (spec 2026-11-14 D1).</exception>
+    private ITranslator BuildLlmTranslator(JsonObject translate)
+    {
+        if (_llmFactory is null)
+        {
+            throw new RpcMethodException(RpcErrorCodes.InvalidParams,
+                "translate.provider \"llm\" is not available in this build.");
+        }
+        if (translate["llm"] is not JsonObject llm)
+        {
+            throw new RpcMethodException(RpcErrorCodes.InvalidParams,
+                "missing 'translate.llm' object ({mode: \"local\"|\"api\", ...}).");
+        }
+
+        string mode = RequiredString(llm, "translate.llm", "mode").ToLowerInvariant();
+        if (mode is not ("local" or "api"))
+        {
+            throw new RpcMethodException(RpcErrorCodes.InvalidParams,
+                "'translate.llm.mode' must be \"local\" or \"api\".");
+        }
+
+        string? baseUrl = ReadString(llm, "baseUrl");
+        if (mode == "api" && string.IsNullOrWhiteSpace(baseUrl))
+        {
+            throw new RpcMethodException(RpcErrorCodes.InvalidParams,
+                "'translate.llm.baseUrl' is required when mode is \"api\".");
+        }
+
+        string? model = ReadString(llm, "model");
+        if (mode == "local" && string.IsNullOrWhiteSpace(model))
+        {
+            throw new RpcMethodException(RpcErrorCodes.InvalidParams,
+                "'translate.llm.model' is required when mode is \"local\".");
+        }
+
+        string? userPrompt = ReadString(llm, "userPrompt");
+        if (userPrompt is not null && !userPrompt.Contains("{source_text}", StringComparison.Ordinal))
+        {
+            throw new RpcMethodException(RpcErrorCodes.InvalidParams,
+                "'translate.llm.userPrompt' must contain the {source_text} placeholder.");
+        }
+
+        return _llmFactory(new LlmSettings(
+            mode, baseUrl, ReadString(llm, "apiKey"), model,
+            ReadString(llm, "systemPrompt"), userPrompt));
+    }
+
+    /// <summary>
     /// Validates one <c>core.start</c> payload in spec §3.1 order: params (-32602), then the
     /// caller checks state/sidecar/source (-32600/-32603).
     /// Kiểm tra một payload <c>core.start</c> theo đúng thứ tự spec §3.1: params (-32602), rồi
@@ -667,9 +734,11 @@ public sealed class PipelineHost : IAsyncDisposable
         string provider = RequiredString(translate, "translate", "provider");
         string src = RequiredString(translate, "translate", "src");
         string dst = RequiredString(translate, "translate", "dst");
-        ITranslator translator = _registry.Get(provider)
-            ?? throw new RpcMethodException(RpcErrorCodes.InvalidParams,
-                $"unknown translate.provider \"{provider}\".");
+        ITranslator translator = provider == "llm"
+            ? BuildLlmTranslator(translate)
+            : _registry.Get(provider)
+                ?? throw new RpcMethodException(RpcErrorCodes.InvalidParams,
+                    $"unknown translate.provider \"{provider}\".");
 
         CoreConfig config = CoreConfig.LoadFrom(CoreConfig.DefaultPath);
         int ocrFps = config.OcrFps;

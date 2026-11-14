@@ -245,7 +245,8 @@ public class PipelineHostTests
         TextWriter? stderr = null,
         Func<OcrLoopOptions, ICaptureSource>? sourceFactory = null,
         IFrameAnnotator? annotator = null,
-        string? previewMapName = null)
+        string? previewMapName = null,
+        Func<ReTran.Core.Llm.LlmSettings, ITranslator>? llmFactory = null)
     {
         Func<OcrLoopOptions, ICaptureSource>? factory = sourceFactory;
         if (factory is null && sources is not null)
@@ -259,7 +260,7 @@ public class PipelineHostTests
             };
         }
         return new PipelineHost(rpc, registry, server, stderr ?? new StringWriter(), factory, annotator,
-            previewMapName: previewMapName);
+            previewMapName: previewMapName, llmFactory: llmFactory);
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition, string what, int timeoutMs = 10_000)
@@ -334,6 +335,36 @@ public class PipelineHostTests
         var ex = await Assert.ThrowsAsync<RpcMethodException>(
             () => host.StartAsync(StartParams(provider: "deepl"), CancellationToken.None));
         Assert.Equal(RpcErrorCodes.InvalidParams, ex.Code);
+    }
+
+    [Fact]
+    public async Task Start_LlmLocal_RunsWithFactoryTranslator()
+    {
+        var sources = new List<FakeCaptureSource>();
+        ReTran.Core.Llm.LlmSettings? captured = null;
+        await using var host = CreateHost(
+            new FakeSidecarRpc { NextResult = SpotResult() },
+            RegistryWith(new CountingTranslator()), new JsonRpcServer(), sources,
+            llmFactory: settings =>
+            {
+                captured = settings;
+                return new CountingTranslator();
+            });
+
+        JsonObject parameters = StartParams(provider: "llm");
+        ((JsonObject)parameters["translate"]!)["llm"] = new JsonObject
+        {
+            ["mode"] = "local",
+            ["model"] = "Hy-MT2-1.8B-UD-Q4_K_XL",
+        };
+
+        JsonNode? started = await host.StartAsync(parameters, CancellationToken.None);
+
+        Assert.True(started!["running"]!.GetValue<bool>());
+        Assert.NotNull(captured);
+        Assert.True(captured!.IsLocal);
+        Assert.Equal("Hy-MT2-1.8B-UD-Q4_K_XL", captured.Model);
+        await host.StopAsync(null, CancellationToken.None);
     }
 
     [Fact]

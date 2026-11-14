@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using ReTran.Core.Capture;
 using ReTran.Core.Cli;
 using ReTran.Core.JsonRpc;
+using ReTran.Core.Llm;
 using ReTran.Core.Ocr;
 using ReTran.Core.OcrClient;
 using ReTran.Core.Serve;
@@ -86,8 +87,60 @@ public static class Program
         var registry = new TranslatorRegistry();
         registry.Register(new GoogleWebTranslator());
         Config.CoreConfig config = Config.CoreConfig.LoadFrom(Config.CoreConfig.DefaultPath);
+
+        // LLM provider (spec 2026-11-14): the managers live in Core — the setup wizard and the
+        // Settings UI drive them through the llm.* RPCs; one lazy llama-server serves the active
+        // model for this process and is killed on exit. Runtime binaries are downloaded by
+        // setup / Settings, never shipped in the release zip.
+        // Provider LLM (spec 2026-11-14): manager sống ở Core — setup wizard và UI Settings điều
+        // khiển qua RPC llm.*; một llama-server lazy phục vụ model đang dùng cho process này và bị
+        // kill khi thoát. Binary runtime do setup/Settings tải, không bao giờ nằm trong zip release.
+        string llmRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ReTran", "llm");
+        var llmModels = new LlmModelManager(
+            Path.Combine(llmRoot, "models"), Path.Combine(llmRoot, "models.json"));
+        var llmRuntime = new LlamaRuntimeManager(Path.Combine(llmRoot, "runtime"), new HttpClient());
+        LlamaServerHost? llmServer = null;
+        string? llmServerModel = null;
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => llmServer?.Dispose();
+
+        ITranslator LlmFactory(LlmSettings llmSettings)
+        {
+            var chat = new OpenAiChatClient(new HttpClient());
+            if (!llmSettings.IsLocal)
+            {
+                return new LlmTranslator(chat, llmSettings);
+            }
+
+            string modelName = llmSettings.Model!;
+            string modelPath = llmModels.ModelPath(modelName);
+            if (!File.Exists(modelPath))
+            {
+                throw new RpcMethodException(RpcErrorCodes.InternalError, $"llm-model-missing: {modelName}");
+            }
+            LlmRuntimeStatus runtime = llmRuntime.GetStatusAsync(CancellationToken.None).GetAwaiter().GetResult();
+            if (!runtime.Installed || runtime.ServerPath is null)
+            {
+                throw new RpcMethodException(RpcErrorCodes.InternalError,
+                    "llm-runtime-missing: download llama.cpp from Setup or Settings.");
+            }
+            if (llmServer is null || llmServerModel != modelName)
+            {
+                llmServer?.Dispose();
+                llmServer = new LlamaServerHost(runtime.ServerPath, modelPath);
+                llmServerModel = modelName;
+            }
+            LlamaServerHost serverRef = llmServer;
+            return new LlmTranslator(chat, llmSettings, async ct =>
+            {
+                await serverRef.EnsureStartedAsync(ct).ConfigureAwait(false);
+                return serverRef.BaseUrl;
+            });
+        }
+
         await using var host = new PipelineHost(rpc, registry, server, Console.Error,
-            sourceFactory: null, annotator: new FrameAnnotator(), annotatorFps: config.CaptureFps);
+            sourceFactory: null, annotator: new FrameAnnotator(), annotatorFps: config.CaptureFps,
+            llmFactory: LlmFactory);
         server.Register("core.start", p => host.StartAsync(p, CancellationToken.None));
         server.Register("core.stop", p => host.StopAsync(p, CancellationToken.None));
         server.Register("core.list_sources", _ => host.ListSourcesAsync(CancellationToken.None));
@@ -108,6 +161,9 @@ public static class Program
         // bao giờ qua được.
         server.Register("sidecar.ping", p => host.SidecarPingAsync(p, CancellationToken.None));
         server.Register("sidecar.device", p => host.SidecarDeviceAsync(p, CancellationToken.None));
+        // llm.*: runtime + model của provider LLM, quản lý phía Core — setup wizard và Settings
+        // dùng chung một đường RPC với các verb khác.
+        LlmRpcHandlers.Register(server, llmModels, llmRuntime);
         // ocr.config.* proxies: the Settings UI reads the engine-parameter schema and saves
         // values through the core; the core forces deferReload from the session state.
         // Proxy ocr.config.*: UI Settings đọc schema tham số engine và lưu giá trị qua core;
