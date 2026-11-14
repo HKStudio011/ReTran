@@ -36,7 +36,7 @@ public class PromptTemplateTests
         Assert.Equal(
             "Translate the following text into {target_lang}. Note that you should only output the translated result without any additional explanation:\n\n{source_text}",
             PromptTemplate.DefaultUserPrompt);
-        Assert.Equal(string.Empty, PromptTemplate.DefaultSystemPrompt);
+        Assert.Equal(PromptTemplate.DefaultSystemPrompt, string.Empty);
     }
 }
 
