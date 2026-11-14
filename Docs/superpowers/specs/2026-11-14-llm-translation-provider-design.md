@@ -15,7 +15,7 @@
 
 **Mục tiêu**
 - Provider **`llm`** với 2 mode: **local** (GGUF qua `llama-server` do Core quản lý vòng đời) và **api** (endpoint OpenAI-compatible: URL, key tuỳ chọn, model name).
-- Quản lý **runtime llama.cpp**: kiểm tra bản mới, tải, cập nhật, trạng thái — UI kiểu OCR.
+- Quản lý **runtime llama.cpp**: kiểm tra bản mới, tải, cập nhật, trạng thái — UI kiểu OCR. **Tải tự động trong setup wizard lần đầu** (flavor theo SystemCheck: GPU → cuda, còn lại → cpu/avx2; runtime KHÔNG nằm trong zip release; lỗi mạng → wizard cho phép bỏ qua, tải lại từ Settings) — user directive 2026-11-14.
 - Quản lý **model GGUF**: catalog 2 repo × 6 quant; tải (nền, có `.partial`), xoá, chọn active — UI kiểu OCR.
 - **Prompt**: system + user sửa được, có "Khôi phục mặc định" (mặc định = prompt Hy-MT2 ở §0); placeholder `{source_text}`, `{source_lang}`, `{target_lang}` (điền tên đầy đủ tiếng Anh khi có map, fallback = mã).
 
@@ -40,6 +40,7 @@
 | D10 | **AppSettings** thêm: `LlmMode = "local"`, `LlmBaseUrl = ""`, `LlmApiKey = null`, `LlmApiModel = "Hy-MT2-1.8B"` (free text cho api), `LlmActiveModel = "Hy-MT2-1.8B-UD-Q4_K_XL"` (local), `LlmSystemPrompt = null`, `LlmUserPrompt = null` (null = mặc định Core/UI). Provider select: bật option `llm`. | *(my call)* |
 | D11 | Prompt mặc định **đồng bộ 2 nơi**: hằng số Core (`PromptTemplate`) + hiển thị UI khi field null (UI lấy qua RPC? giữ đơn giản: UI có bản sao hằng số + test so khớp Core↔App như pattern `BoxAnnotationStyleSyncTests`). | *(my call)* |
 | D12 | Budget: ghi mục `Docs/performance.md` "LLM provider" — số VRAM/RAM **đo thật khi user smoke** (deferred); ghi trước các con số file/kích thước + cơ chế; cảnh báo UI "ngoài budget OCR". | *(my call)* |
+| D13 | **Setup tự tải runtime** (user directive 2026-11-14): bước mới trong `SetupCoordinator` sau `VerifyingSidecar` — gọi `llm.runtime.download {flavor}` qua `ISetupCoreBridge` rồi poll `llm.runtime.status` tới khi `installed` (reuse hằng số poll/timeout của bước tải model OCR); flavor = GPU khi SystemCheck + capability gate chọn GPU, ngược lại CPU (avx2). Runtime **không nằm trong zip release**. Thất bại → retry mềm ×4 như mọi bước; sau đó user có thể bỏ qua qua popup sẵn có và tải lại từ Settings. | *(user)* |
 
 ## 3. Thay đổi code theo file
 

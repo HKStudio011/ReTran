@@ -151,6 +151,16 @@ Phần test được: `BuildArguments` (có flag, có model path quoted); `PickF
 ```
 - [ ] Steps: tests (settings round-trip 7 field; sync prompt; DTO mapping nhẹ) → fail → implement (UI là phần lớn) → build + full suite → commit `feat(app): LLM provider settings, model manager UI and prompt editor`.
 
+### Task 9: Setup wizard tự tải runtime llama.cpp (user directive 2026-11-14)
+
+**Files:** Modify `ReTran.App/Services/Setup/SetupCoordinator.cs` (thêm `SetupStep.DownloadingLlmRuntime` — chèn sau `VerifyingSidecar` trong `PipelineSteps`; method chạy: `bridge.CallAsync("llm.runtime.download", {flavor})` (flavor = `cuda` khi SystemCheck + capability gate chọn GPU, còn lại `cpu`) → poll `llm.runtime.status` tới `installed` bằng hằng số poll/timeout hiện có), `ReTran.App/Services/Setup/SetupState.cs` (đọc kỹ semantics resume: thêm bước mới vào thứ tự — bước cũ đã done vẫn resume đúng), `ReTran.App/Components/Shared/SetupModal.razor` + `I18nStrings` (`setup.step.*` label/hint vi/en cho bước mới); tests mở rộng `ReTran.Tests/Setup/SetupCoordinatorTests.cs`.
+
+**Interfaces:** Consumes T6 (`llm.runtime.download`/`llm.runtime.status` RPC — đã có từ Task 6); Produces: wizard hoàn tất với runtime đã cài (hoặc bỏ qua được như mọi bước mềm).
+
+- [ ] Steps: tests (fake bridge: download gọi đúng flavor theo máy; poll tới installed → bước done; status không bao giờ installed → fail mềm rồi retry; resume từ `setup.json` cũ — bước mới được chạy lại) → fail → implement → build + full suite → commit `feat(setup): auto-download the llama.cpp runtime for the chosen flavor`.
+
+---
+
 ### Task 8: Verification + perf note + smoke list
 
 - [ ] build + full suite (≥ 789 + số test mới) 0 failed; ghi `Docs/performance.md` mục "LLM provider": kích thước file quant (spec §0), cơ chế (per-text requests, 120 s timeout, lazy server start), **số VRAM/RAM chờ smoke thật — deferred cho user**; checklist smoke: tải runtime cuda → tải 1.8B-UD-Q4_K_XL → chọn provider LLM/local → Start → dịch chạy; đổi prompt + khôi phục mặc định; mode API với endpoint thật (nếu có); xoá model khi idle.
