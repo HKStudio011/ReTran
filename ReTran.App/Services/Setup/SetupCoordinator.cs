@@ -145,12 +145,14 @@ public sealed class SetupCoordinator
     private readonly Action _closeApp;
     private readonly Func<SetupState> _stateFactory;
     private readonly Func<string, bool> _fileExists;
+    private readonly Func<string, int>? _countModelEntries;
     private readonly TimeSpan _modelPollInterval;
     private readonly TimeSpan _modelDownloadTimeout;
     private readonly ILogger<SetupCoordinator>? _logger;
 
     private SetupState _state;
     private int _running; // 0 idle / 1 a run is in progress (Interlocked) — guards against double starts
+    private SetupCheckItem[] _checks = []; // snapshot checklist Checking — thay nguyên khối mỗi event
 
     /// <summary>
     /// Creates the coordinator. Every dependency is injectable so the whole machine runs on fakes in
@@ -169,6 +171,7 @@ public sealed class SetupCoordinator
     /// <param name="closeApp">Called by <see cref="Skip"/> to close the app (spec §3.6). Được gọi bởi <see cref="Skip"/> để đóng app (spec §3.6).</param>
     /// <param name="stateFactory">Loads <c>setup.json</c>; defaults to <c>SetupState.Load()</c>. Tests point it at a temp path. Đọc <c>setup.json</c>; mặc định <c>SetupState.Load()</c>. Test trỏ sang path temp.</param>
     /// <param name="fileExists">File-existence probe for uv.exe (Checking + VerifyingFiles); defaults to <see cref="File.Exists"/>. Probe tồn tại file cho uv.exe (Checking + VerifyingFiles); mặc định <see cref="File.Exists"/>.</param>
+    /// <param name="countModelEntries">Counts installed models for the Checking checklist; defaults to the real models directory. Đếm model đã cài cho checklist Checking; mặc định là thư mục models thật.</param>
     /// <param name="modelPollInterval">Delay between <c>ocr.models.list</c> polls while models download; default 2 s. Khoảng cách giữa các lần poll <c>ocr.models.list</c> khi đang tải model; mặc định 2 s.</param>
     /// <param name="modelDownloadTimeout">Total window per download attempt; default 60 min. Cửa sổ tổng cho mỗi lượt tải; mặc định 60 phút.</param>
     /// <param name="logger">DI logger, or <see langword="null"/> to log nothing. Logger DI, hoặc <see langword="null"/> để không ghi log.</param>
@@ -183,6 +186,7 @@ public sealed class SetupCoordinator
         Action closeApp,
         Func<SetupState>? stateFactory = null,
         Func<string, bool>? fileExists = null,
+        Func<string, int>? countModelEntries = null,
         TimeSpan? modelPollInterval = null,
         TimeSpan? modelDownloadTimeout = null,
         ILogger<SetupCoordinator>? logger = null)
@@ -204,6 +208,7 @@ public sealed class SetupCoordinator
         _closeApp = closeApp;
         _stateFactory = stateFactory ?? (static () => SetupState.Load());
         _fileExists = fileExists ?? File.Exists;
+        _countModelEntries = countModelEntries;
         _modelPollInterval = modelPollInterval ?? DefaultModelPollInterval;
         _modelDownloadTimeout = modelDownloadTimeout ?? DefaultModelDownloadTimeout;
         _logger = logger;
@@ -246,6 +251,16 @@ public sealed class SetupCoordinator
     /// flavor đang chờ, giữ cho UI hiển thị; resolve qua i18n như <see cref="Error"/>.
     /// </summary>
     public SetupMessage? Notice { get; private set; }
+
+    /// <summary>
+    /// Snapshot of the Checking checklist (latest event per Id, in display order); empty before the
+    /// first run. Every event swaps the whole array, so a UI thread reading while the background run
+    /// updates never sees a torn list; reset at the start of every <c>RunCheckingStep</c>.
+    /// Snapshot checklist của bước Checking (mục mới nhất theo Id, đúng thứ tự hiển thị); rỗng trước
+    /// lượt chạy đầu. Mỗi event thay nguyên mảng nên luồng UI đọc trong lúc thread nền cập nhật không
+    /// bao giờ thấy danh sách bị xé; reset ở đầu mỗi <c>RunCheckingStep</c>.
+    /// </summary>
+    public IReadOnlyList<SetupCheckItem> Checks => _checks;
 
     /// <summary>
     /// Wheel flavor the wizard is installing (decided by Checking, or switched to CPU via
@@ -617,7 +632,12 @@ public sealed class SetupCoordinator
     /// </summary>
     private StepOutcome RunCheckingStep()
     {
-        SystemCheckResult result = SystemCheck.Run(_adapterSource, _diskFreeBytes, _isHostReachable, _fileExists);
+        // Reset danh sách checklist: lượt chạy lại phải sạch, không dính trạng thái của lượt trước.
+        // Reset the checklist: a re-run must start clean, never keeping the previous run's states.
+        _checks = [];
+        SystemCheckResult result = SystemCheck.Run(
+            _adapterSource, _diskFreeBytes, _isHostReachable, _fileExists,
+            progress: OnCheckProgress, countModelEntries: _countModelEntries);
         if (!result.Ok)
         {
             Error = result.FailureReason;
@@ -637,6 +657,24 @@ public sealed class SetupCoordinator
         };
         _state.Save();
         return StepOutcome.Done;
+    }
+
+    /// <summary>
+    /// Folds one checklist event into <see cref="Checks"/> (replace by Id; a new Id appends — the
+    /// Pending batch always arrives first, so replace is the normal path) and publishes. The array is
+    /// swapped wholesale so a UI read during the background run can never tear.
+    /// Ghép một sự kiện checklist vào <see cref="Checks"/> (thay theo Id; id mới thì append — batch
+    /// Pending luôn đến trước nên đường thường là replace) và publish. Mảng được thay nguyên khối để
+    /// lượt đọc của UI trong lúc thread nền chạy không bao giờ bị xé.
+    /// </summary>
+    private void OnCheckProgress(SetupCheckItem item)
+    {
+        var updated = new List<SetupCheckItem>(_checks);
+        int index = updated.FindIndex(existing => existing.Id == item.Id);
+        if (index >= 0) updated[index] = item;
+        else updated.Add(item);
+        _checks = [.. updated];
+        Publish();
     }
 
     /// <summary>

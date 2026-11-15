@@ -92,7 +92,8 @@ public class SetupCoordinatorTests : IDisposable
         Func<string, long>? diskFree = null,
         Func<string, bool>? isHostReachable = null,
         Func<string, bool>? fileExists = null,
-        TimeSpan? modelDownloadTimeout = null)
+        TimeSpan? modelDownloadTimeout = null,
+        Func<string, int>? countModelEntries = null)
     {
         var coordinator = new SetupCoordinator(
             adapters ?? Adapters(NvidiaCurrent),
@@ -104,6 +105,7 @@ public class SetupCoordinatorTests : IDisposable
             () => _closeAppCalled = true,
             stateFactory: () => SetupState.Load(_setupJson),
             fileExists: fileExists ?? (_ => true),
+            countModelEntries: countModelEntries ?? (_ => 0),
             modelPollInterval: TimeSpan.FromMilliseconds(10),
             modelDownloadTimeout: modelDownloadTimeout ?? TimeSpan.FromSeconds(5));
         coordinator.Changed += () => Interlocked.Increment(ref _changedCount);
@@ -591,6 +593,65 @@ public class SetupCoordinatorTests : IDisposable
         Assert.Empty(_uvFake.SyncCalls);
         Assert.Empty(_bridge.Downloaded);
         Assert.Equal("done", ReadSetupJson().Steps!["downloadingllmruntime"]);
+    }
+
+    // ── Checklist tiến độ Checking (2026-11-15) ──────────────────────────────────────────────────
+
+    [Fact]
+    public void Checks_BeforeAnyRun_Empty()
+    {
+        var coordinator = NewCoordinator();
+
+        Assert.Empty(coordinator.Checks);
+    }
+
+    [Fact]
+    public async Task CheckingProgress_Checks_ContainNineItems_InOrder_AllOk()
+    {
+        WriteSetupJson("""{"flavor":"gpu","language":"vi"}""");
+        var coordinator = NewCoordinator();
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        // setup.json đã có language → lượt chạy đi trọn pipeline trên fake tới Done; Checking đã
+        // điền xong danh sách trước đó và danh sách còn nguyên sau khi xong.
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        string[] expectedIds =
+        [
+            "files", "env", "models", "arch", "gpu", "disk",
+            "net:pypi.org", "net:www.paddlepaddle.org.cn", "net:github.com",
+        ];
+        Assert.Equal(expectedIds, coordinator.Checks.Select(i => i.Id));
+        Assert.All(coordinator.Checks, i => Assert.Equal(SetupCheckState.Ok, i.State));
+        // fileExists fake mặc định true → env "đã có"; models fake 0 → "chưa có".
+        Assert.Equal("setup.check.env.present",
+            coordinator.Checks.Single(i => i.Id == "env").Detail!.Key);
+        Assert.Equal("setup.check.models.absent",
+            coordinator.Checks.Single(i => i.Id == "models").Detail!.Key);
+    }
+
+    [Fact]
+    public async Task Checks_ResetOnRetry_NoStaleFailures()
+    {
+        WriteSetupJson("""{"flavor":"gpu","language":"vi"}""");
+        bool githubReachable = false;
+        var coordinator = NewCoordinator(
+            isHostReachable: host => githubReachable || host != "github.com");
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+        Assert.Contains(coordinator.Checks, i => i.Id == "net:github.com" && i.State == SetupCheckState.Fail);
+
+        // Mạng sống lại: retry phải dựng lại danh sách sạch — không dính dòng ✗ cũ.
+        githubReachable = true;
+        await coordinator.RetryAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Equal(9, coordinator.Checks.Count);
+        Assert.DoesNotContain(coordinator.Checks, i => i.State == SetupCheckState.Fail);
+        Assert.Equal("net:github.com", coordinator.Checks.Last().Id);
+        Assert.Equal(SetupCheckState.Ok, coordinator.Checks.Last().State);
     }
 
     // ── R59: sync fail có thể để lại KHÔNG venv ⇒ mỗi retry là full re-sync ────────────────────────
