@@ -77,6 +77,7 @@ hướng **A. Live** (checklist cập nhật từng dòng), và thêm 2 hạng m
 ```
 
 - Trạng thái: `·` Pending (mờ) · `◌` Running (xoay, CSS scoped) · `✓` Ok · `⚠` Warn (màu tally) · `✗` Fail (đỏ).
+- **Màu chữ (sửa 2026-11-15 sau feedback mockup):** nhãn dùng `var(--surface)` — ĐÚNG cặp biến với vỏ modal (`bg-background`/`text-surface`) nên luôn tương phản trong cả 2 theme (kể cả trạng thái chưa set `data-theme` lúc wizard hiện sớm); chú thích dùng `var(--rt-dim)` (đậm hơn `--rt-faint` để dễ đọc ở 11px); mục Pending dùng `--rt-dim`, mark của Pending dùng `--rt-faint`.
 - Style nằm trong `<style>` scoped của `SetupModal` — theo rationale sẵn có: modal không phụ thuộc rebuild Vite.
 - Tự cuộn tới item đang chạy (nhỏ, làm nếu không vướng).
 - Fail: item `✗` hiện thoáng rồi wizard chuyển màn **Failed như hiện tại** (không đổi luồng).

@@ -124,15 +124,17 @@ public static SystemCheckResult Run(
         {
             <li class="@CheckItemClass(item.State)">
                 <span class="mark">@if (item.State == SetupCheckState.Running) { <span class="rt-spinner"></span> } else { @CheckGlyph(item.State) }</span>
-                <span class="lbl">@L.Fmt(item.Label.Key, item.Label.Args.ToArray())</span>
-                @if (item.Detail is { } det) { <span class="det">@L.Fmt(det.Key, det.Args.ToArray())</span> }
+                <span class="body">
+                    <span class="lbl">@L.Fmt(item.Label.Key, item.Label.Args.ToArray())</span>
+                    @if (item.Detail is { } det) { <span class="det">@L.Fmt(det.Key, det.Args.ToArray())</span> }
+                </span>
             </li>
         }
     </ul>
 }
 ```
   helpers: `CheckItemClass` (`pending|running|ok|warn|fail`), `CheckGlyph` (`· ✓ ⚠ ✗`).
-- `<style>` scoped (trong block style sẵn có của modal) theo mockup: `.setup-checks` grid gap 7px, `max-height:264px; overflow-y:auto`, `li` grid `18px 1fr`, `.mark` 18×18, `.det` faint 11px + `overflow-wrap:anywhere`, màu theo class (`ok→--rt-data`, `warn→--rt-tally`, `fail→--rt-danger`, `pending→--rt-faint`), `.rt-spinner` (11px, border-top tally, `rt-mock-spin .9s linear infinite` + `@keyframes`).
+- `<style>` scoped (trong block style sẵn có của modal) theo mockup: `.setup-checks` grid gap 7px, `max-height:264px; overflow-y:auto`; `li` grid `18px 1fr`, **màu chữ `var(--surface)`** (cùng cặp biến với vỏ modal `bg-background`/`text-surface` — tương phản đúng cả 2 theme kể cả khi `data-theme` chưa được set; sửa sau feedback mockup 2026-11-15); `.mark` 18×18; `.body` grid gap 1px + `min-width:0`; `.lbl` + `.det` `overflow-wrap:anywhere`; `.det` **`var(--rt-dim)`** (đậm hơn `--rt-faint` cho chữ 11px) ; màu theo class (`ok→--rt-data`, `warn→--rt-tally`, `fail→--rt-danger`; `pending`: chữ+det `--rt-dim`, mark `--rt-faint`); `.rt-spinner` (11px, border-top tally, `rt-spin .9s linear infinite` + `@keyframes`).
 - i18n (VI / EN) — thêm vào đúng 2 block setup sẵn có:
   - `setup.check.files.label`: "Tệp cài đặt (uv.exe)" / "Setup files (uv.exe)"
   - `setup.check.env.label`: "Môi trường OCR (venv)" / "OCR environment (venv)"
