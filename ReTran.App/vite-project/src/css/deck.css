@@ -786,6 +786,12 @@ body { background: var(--rt-page); }
 .rt-srow--num > input { grid-row: 1; grid-column: 2; justify-self: end; }
 .rt-srow--num > .rt-hint { grid-row: 2; grid-column: 1 / -1; }
 
+/* Hàng chọn ngôn ngữ của wizard setup (SetupModal): radio + tên + meta model trên một hàng, meta
+   dồn phải. Class từng thiếu trong CSS nên hàng render dạng inline — thêm để đúng bố cục dự kiến. */
+.rt-setup-opt { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.rt-setup-opt input[type="radio"] { margin: 0; accent-color: var(--rt-tally); cursor: pointer; }
+.rt-setup-opt > .rt-hint { margin-left: auto; text-align: right; }
+
 .rt-input {
   height: 32px;
   width: 100%;
