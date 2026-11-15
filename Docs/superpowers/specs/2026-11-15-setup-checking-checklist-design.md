@@ -41,7 +41,7 @@ hướng **A. Live** (checklist cập nhật từng dòng), và thêm 2 hạng m
 - Thêm:
   ```csharp
   public enum SetupCheckState { Pending, Running, Ok, Warn, Fail }
-  public sealed record SetupCheckItem(string Id, SetupCheckState State, SetupMessage? Detail = null);
+  public sealed record SetupCheckItem(string Id, SetupCheckState State, SetupMessage Label, SetupMessage? Detail = null);
   ```
   (`SetupMessage` = key i18n + args, tái dùng hạ tầng vừa làm 2026-11-15.)
 - `Run(..., Action<SetupCheckItem>? progress = null)` — tham số optional, call site cũ không đổi.
