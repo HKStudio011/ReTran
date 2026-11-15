@@ -17,6 +17,25 @@
         .rt-setup-modal .rt-setup-track { position: relative; height: 8px; border-radius: 4px; background: var(--rt-line); overflow: hidden; margin-top: 12px; }
         .rt-setup-modal .rt-setup-bar { position: absolute; top: 0; bottom: 0; left: -40%; width: 40%; border-radius: 4px; background: var(--rt-tally); animation: rt-setup-sweep 1.4s ease-in-out infinite; }
         @@keyframes rt-setup-sweep { from { left: -40%; } to { left: 100%; } }
+
+        @* Checklist live bước Checking (2026-11-15). Màu chữ dùng CÙNG họ biến với vỏ modal
+           (--surface trên bg-background) để tương phản đúng cả 2 theme kể cả khi data-theme chưa set;
+           chú thích dùng --rt-dim (đậm hơn --rt-faint cho cỡ 11px). *@
+        .rt-setup-modal .setup-checks { list-style: none; margin: 10px 0 0; padding: 0 4px 0 0; display: grid; gap: 7px; max-height: 264px; overflow-y: auto; }
+        .rt-setup-modal .setup-checks li { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 8px; align-items: start; font-size: 12.5px; line-height: 1.45; color: var(--surface); }
+        .rt-setup-modal .setup-checks .mark { display: inline-grid; place-items: center; width: 18px; height: 18px; font-size: 12px; }
+        .rt-setup-modal .setup-checks .body { display: grid; gap: 1px; min-width: 0; }
+        .rt-setup-modal .setup-checks .lbl { overflow-wrap: anywhere; }
+        .rt-setup-modal .setup-checks .det { color: var(--rt-dim); font-size: 11px; overflow-wrap: anywhere; }
+        .rt-setup-modal .setup-checks li.ok .mark { color: var(--rt-data); }
+        .rt-setup-modal .setup-checks li.warn .mark { color: var(--rt-tally); }
+        .rt-setup-modal .setup-checks li.warn .det { color: var(--rt-tally); }
+        .rt-setup-modal .setup-checks li.fail .mark { color: var(--rt-danger); }
+        .rt-setup-modal .setup-checks li.fail .det { color: var(--rt-danger); }
+        .rt-setup-modal .setup-checks li.pending, .rt-setup-modal .setup-checks li.pending .det { color: var(--rt-dim); }
+        .rt-setup-modal .setup-checks li.pending .mark { color: var(--rt-faint); }
+        .rt-setup-modal .rt-spinner { width: 11px; height: 11px; border-radius: 50%; border: 1.6px solid var(--rt-line2); border-top-color: var(--rt-tally); display: inline-block; animation: rt-setup-spin 0.9s linear infinite; margin-top: 3px; }
+        @@keyframes rt-setup-spin { to { transform: rotate(360deg); } }
     </style>
 
     @* z-index 60 inline (lớn hơn z-50 của .rt-sheet): settings sheet đứng sau trong DOM nên với cùng
@@ -31,10 +50,34 @@
             {
                 case SetupStep.Checking:
                     <p class="text-sm text-surface">@(L["setup.checking"])</p>
-                    @if (Coordinator.Notice is { } notice)
+                    @* Checklist live: SystemCheck phát từng mục (Pending → Running → kết quả). Cảnh báo hạ
+                       GPU→CPU nằm trong dòng gpu (Warn) — khối paragraph Notice cũ đã bỏ (2026-11-15). *@
+                    @if (Coordinator.Checks.Count > 0)
                     {
-                        @* Notice hạ GPU→CPU từ SystemCheck — coordinator giữ key i18n + args, modal resolve. *@
-                        <p class="rt-hint" style="white-space: pre-wrap;">@L.Fmt(notice.Key, notice.Args.ToArray())</p>
+                        <ul class="setup-checks">
+                            @foreach (SetupCheckItem item in Coordinator.Checks)
+                            {
+                                <li class="@CheckItemClass(item.State)">
+                                    <span class="mark">
+                                        @if (item.State == SetupCheckState.Running)
+                                        {
+                                            <span class="rt-spinner" aria-hidden="true"></span>
+                                        }
+                                        else
+                                        {
+                                            @CheckGlyph(item.State)
+                                        }
+                                    </span>
+                                    <span class="body">
+                                        <span class="lbl">@L.Fmt(item.Label.Key, item.Label.Args.ToArray())</span>
+                                        @if (item.Detail is { } detail)
+                                        {
+                                            <span class="det">@L.Fmt(detail.Key, detail.Args.ToArray())</span>
+                                        }
+                                    </span>
+                                </li>
+                            }
+                        </ul>
                     }
                     break;
 
@@ -214,6 +257,25 @@
         : "border: 1px solid var(--rt-line); border-radius: 6px; padding: 8px;";
 
     private static string FlavorLabel(OcrFlavor flavor) => flavor == OcrFlavor.Gpu ? "GPU" : "CPU";
+
+    // Checklist Checking (2026-11-15): class theo trạng thái + glyph tĩnh (Running dùng spinner riêng).
+    private static string CheckItemClass(SetupCheckState state) => state switch
+    {
+        SetupCheckState.Pending => "pending",
+        SetupCheckState.Running => "running",
+        SetupCheckState.Ok => "ok",
+        SetupCheckState.Warn => "warn",
+        SetupCheckState.Fail => "fail",
+        _ => "pending",
+    };
+
+    private static string CheckGlyph(SetupCheckState state) => state switch
+    {
+        SetupCheckState.Ok => "✓",
+        SetupCheckState.Warn => "⚠",
+        SetupCheckState.Fail => "✗",
+        _ => "·",
+    };
 
     // Bước → key i18n: các key theo brief là camelCase (verifyingFiles…) nên KHÔNG suy được từ
     // Step.ToString().ToLowerInvariant() (sẽ ra "verifyingfiles" — key thiếu, UI hiện nguyên key).
