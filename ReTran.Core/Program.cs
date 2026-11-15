@@ -106,7 +106,11 @@ public static class Program
 
         ITranslator LlmFactory(LlmSettings llmSettings)
         {
-            var chat = new OpenAiChatClient(new HttpClient());
+            // The .NET default HttpClient timeout (100 s) would fire before OpenAiChatClient's own
+            // CancelAfter (300 s); pin the client to infinite so the constant is the only cap.
+            // Timeout mặc định 100 s của HttpClient sẽ chặn trước CancelAfter (300 s) của
+            // OpenAiChatClient; đặt client về vô hạn để hằng số là trần duy nhất.
+            var chat = new OpenAiChatClient(new HttpClient { Timeout = Timeout.InfiniteTimeSpan });
             if (!llmSettings.IsLocal)
             {
                 return new LlmTranslator(chat, llmSettings);

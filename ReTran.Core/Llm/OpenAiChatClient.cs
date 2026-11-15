@@ -19,8 +19,15 @@ namespace ReTran.Core.Llm;
 /// <param name="client">HTTP client used for every request. HTTP client dùng cho mọi yêu cầu.</param>
 public sealed class OpenAiChatClient(HttpClient client)
 {
-    /// <summary>Request timeout; local generation can be slow on first tokens. Timeout yêu cầu; sinh cục bộ có thể chậm ở token đầu.</summary>
-    public static readonly TimeSpan Timeout = TimeSpan.FromSeconds(120);
+    /// <summary>
+    /// Request timeout; local generation can be slow on the first tokens and CPU-flavour machines
+    /// generate slowly throughout, so the cap is generous. This constant is the EFFECTIVE cap: the
+    /// Core wiring creates its <see cref="HttpClient"/> with an infinite timeout so the .NET default
+    /// (100 s) can never fire first. Timeout yêu cầu; sinh cục bộ chậm ở token đầu và máy flavor CPU
+    /// sinh chậm suốt lượt nên trần đặt rộng. Hằng số này là trần HIỆU LỰC: chỗ nối ở Core tạo
+    /// <see cref="HttpClient"/> với timeout vô hạn để mặc định 100 s của .NET không bao giờ chặn trước.
+    /// </summary>
+    public static readonly TimeSpan Timeout = TimeSpan.FromSeconds(300);
 
     private readonly HttpClient _client = client ?? throw new ArgumentNullException(nameof(client));
 

@@ -42,7 +42,7 @@ public static class TranslateCommands
         }
 
         var registry = new TranslatorRegistry();
-        registry.Register(injected ?? new GoogleWebTranslator(timeout: TimeSpan.FromSeconds(10)));
+        registry.Register(injected ?? new GoogleWebTranslator());
         ITranslator? translator = registry.Get(options.Provider);
         if (translator is null)
         {

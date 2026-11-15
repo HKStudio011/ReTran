@@ -10,7 +10,7 @@ namespace ReTran.Core.Translate;
 /// </summary>
 public sealed class GoogleWebTranslator : ITranslator
 {
-    private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(60);
 
     /// <summary>
     /// Shared client for the default path (no custom handler, default timeout), so production calls pool connections.
@@ -21,14 +21,14 @@ public sealed class GoogleWebTranslator : ITranslator
     private readonly HttpClient _client;
 
     /// <summary>
-    /// Creates a translator over an optional test handler and timeout (default 5 seconds).
-    /// Tạo trình dịch với handler test tùy chọn và timeout (mặc định 5 giây).
+    /// Creates a translator over an optional test handler and timeout (default 60 seconds).
+    /// Tạo trình dịch với handler test tùy chọn và timeout (mặc định 60 giây).
     /// </summary>
     /// <param name="handler">
     /// Optional <see cref="HttpMessageHandler"/> injected by tests; <see langword="null"/> uses the shared client.
     /// <see cref="HttpMessageHandler"/> tùy chọn do test inject; <see langword="null"/> dùng client dùng chung.
     /// </param>
-    /// <param name="timeout">Request timeout; <see langword="null"/> means 5 seconds. Timeout yêu cầu; <see langword="null"/> nghĩa là 5 giây.</param>
+    /// <param name="timeout">Request timeout; <see langword="null"/> means 60 seconds. Timeout yêu cầu; <see langword="null"/> nghĩa là 60 giây.</param>
     public GoogleWebTranslator(HttpMessageHandler? handler = null, TimeSpan? timeout = null)
     {
         var effectiveTimeout = timeout ?? DefaultTimeout;

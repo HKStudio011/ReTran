@@ -269,22 +269,24 @@ namespace ReTran_App
             return app;
         }
 
-        // Dedicated probe client for the setup Checking step: 15 s timeout — the slow paddle host
+        // Dedicated probe client for the setup Checking step: 60 s timeout — the slow paddle host
         // (www.paddlepaddle.org.cn answered in ~8.2 s, measured live 2026-11-11, while pypi ~1.5 s and
         // pytorch ~0.25 s stayed fast) made the old 3 s value fail the wizard's network gate
-        // spuriously 3/3 times. The gate walks SystemCheck.NetworkProbeHosts (3 hosts: pypi,
+        // spuriously 3/3 times, and a hung host may sit out the whole probe, so the value trades
+        // wizard latency for tolerance. The gate walks SystemCheck.NetworkProbeHosts (3 hosts: pypi,
         // paddlepaddle.org.cn, github) SEQUENTIALLY, so the real worst case is 3 hung hosts at
-        // 15 s each — up to 45 s — not a single 15 s; offline still fails fast (DNS errors
+        // 60 s each — up to 180 s — not a single 60 s; offline still fails fast (DNS errors
         // immediately) and only a hung host sits out its full timeout, which stays acceptable for
         // a one-time wizard check.
-        // Probe client riêng cho bước Checking của setup: timeout 15 s — host paddle chậm
+        // Probe client riêng cho bước Checking của setup: timeout 60 s — host paddle chậm
         // (www.paddlepaddle.org.cn trả lời ~8,2 s, đo thật 2026-11-11, trong khi pypi ~1,5 s và
-        // pytorch ~0,25 s vẫn nhanh) làm mốc 3 s cũ chặn oan cổng mạng của wizard 3/3 lần. Cổng này
-        // duyệt SystemCheck.NetworkProbeHosts (3 host: pypi, paddlepaddle.org.cn, github) TUẦN TỰ,
-        // nên worst case thật là 3 host treo × 15 s — tối đa 45 s — không phải một lần 15 s; offline
+        // pytorch ~0,25 s vẫn nhanh) làm mốc 3 s cũ chặn oan cổng mạng của wizard 3/3 lần, và host
+        // treo có thể chờ hết probe nên mốc này đổi độ trễ wizard lấy độ bao dung. Cổng này duyệt
+        // SystemCheck.NetworkProbeHosts (3 host: pypi, paddlepaddle.org.cn, github) TUẦN TỰ, nên
+        // worst case thật là 3 host treo × 60 s — tối đa 180 s — không phải một lần 60 s; offline
         // vẫn fail nhanh (DNS lỗi ngay) và chỉ host treo mới chờ hết timeout của nó, vẫn chấp nhận
         // được cho một lần kiểm tra wizard.
-        private static readonly HttpClient NetworkProbeClient = new() { Timeout = TimeSpan.FromSeconds(15) };
+        private static readonly HttpClient NetworkProbeClient = new() { Timeout = TimeSpan.FromSeconds(60) };
 
         /// <summary>
         /// Free bytes on the volume containing <paramref name="path"/>; 0 when unreadable (fail-safe:
@@ -299,10 +301,10 @@ namespace ReTran_App
         }
 
         /// <summary>
-        /// HTTPS reachability probe for the setup network gate, one host at a time with the 15 s
+        /// HTTPS reachability probe for the setup network gate, one host at a time with the 60 s
         /// probe timeout: any HTTP answer (even 4xx/5xx) proves the host is reachable; DNS/TLS/connect
         /// failures report unreachable.
-        /// Probe HTTPS cho cổng mạng của setup, mỗi lần một host với timeout 15 s của probe: bất kỳ
+        /// Probe HTTPS cho cổng mạng của setup, mỗi lần một host với timeout 60 s của probe: bất kỳ
         /// đáp HTTP nào (kể cả 4xx/5xx) chứng minh tới được host; lỗi DNS/TLS/kết nối báo không tới được.
         /// </summary>
         private static bool IsHostReachable(string host)
