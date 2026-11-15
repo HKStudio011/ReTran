@@ -419,9 +419,21 @@ public static class I18nStrings
         ["setup.error.retry"] = "Thử lại",
         ["setup.error.skip"] = "Bỏ qua",
         ["setup.error.switchCpu"] = "Chuyển sang bản CPU",
-        // Ba notice hạ GPU→CPU — bản song ngữ của đúng 3 chuỗi SystemCheck tương ứng. Modal hiện
-        // Notice do coordinator giữ (nguồn sự thật duy nhất); các key này là cặp EN/Vi chuẩn cho
-        // từng loại notice khi cần localize UI.
+        // Thông điệp lỗi wizard: SystemCheck/SetupCoordinator trả key + args (SetupMessage), modal
+        // resolve qua i18n theo ngôn ngữ UI — không còn chuỗi cứng tiếng Việt.
+        ["setup.fail.arch"] = "ReTran yêu cầu Windows chạy trên nền x64; kiến trúc OS của máy này là '{0}' — uv.exe đi kèm và wheel paddle chỉ có bản x64.",
+        ["setup.fail.uvMissing"] = "Thiếu uv.exe trong thư mục app ({0}) — hãy giải nén lại zip đầy đủ.",
+        ["setup.fail.disk"] = "Không đủ dung lượng đĩa trên ổ chứa thư mục app: bản {0} cần tối thiểu {1} GB, hiện chỉ còn {2} GB.",
+        ["setup.fail.network"] = "Không kết nối được tới host '{0}' — setup cần mạng để tải Python, wheel paddle và model; kiểm tra mạng/proxy rồi chạy lại check.",
+        ["setup.fail.sync"] = "Cài môi trường OCR thất bại sau {0} lần thử (uv sync trả về exit code {1}).",
+        ["setup.fail.syncTail"] = "Cài môi trường OCR thất bại sau {0} lần thử (uv sync trả về exit code {1}).\n\nĐuôi output của uv:\n{2}",
+        ["setup.fail.ccGate"] = "Card đồ hoạ của bạn (compute capability {0}) không được bản GPU PaddlePaddle 3.4.0 hỗ trợ — hãy bấm \"Chuyển sang bản CPU\" để tiếp tục.",
+        ["setup.fail.ccGateUnknown"] = "Card đồ hoạ của bạn (không xác định được compute capability) không được bản GPU PaddlePaddle 3.4.0 hỗ trợ — hãy bấm \"Chuyển sang bản CPU\" để tiếp tục.",
+        ["setup.fail.sidecar"] = "Không xác minh được sidecar OCR sau {0} lần thử (sidecar không trả lời ping/catalog).",
+        ["setup.fail.models"] = "Không tải được model OCR sau {0} lần thử (mỗi lần giới hạn {1} phút).",
+        ["setup.fail.applying"] = "Không ghi được cặp model OCR vào settings.json sau {0} lần thử.",
+        ["setup.fail.llmRuntime"] = "Không tải được runtime llama.cpp sau {0} lần thử (mỗi lần giới hạn {1} phút). Có thể bỏ qua bước này và tải lại trong Cài đặt → mục LLM.",
+        // Ba notice hạ GPU→CPU — SystemCheck trả đúng các key này (không args); modal resolve qua i18n.
         ["setup.notice.amdCpu"] = "Không cài được bản GPU cho card AMD trên Windows, sẽ thay bằng bản CPU.",
         ["setup.notice.noGpu"] = "Không có GPU NVIDIA hỗ trợ — wizard sẽ dùng bản CPU.",
         ["setup.notice.oldDriver"] = "Driver NVIDIA hiện tại chưa đủ mới cho bản GPU (cần tối thiểu 576.02 cho CUDA 12.9) — Setup sẽ cài bản CPU. Cập nhật driver rồi chạy lại Setup để dùng bản GPU.",
@@ -433,6 +445,7 @@ public static class I18nStrings
         ["setup.flavorSwitch.sizeGpu"] = "~1,6 GB (bản GPU)",
         ["setup.flavorSwitch.sizeCpu"] = "~0,3 GB (bản CPU)",
         ["setup.flavorSwitch.confirm"] = "Đổi sang bản mới",
+        ["setup.flavorSwitch.notice"] = "Bản đang cài trên máy này là {0}, nhưng cấu hình hiện tại của máy cần bản {1}. Bấm \"Đổi sang bản mới\" để gỡ bản cũ và cài bản mới (dung lượng tải ước tính: GPU ~1,6 GB / CPU ~0,3 GB wheel).",
         ["setup.section"] = "Cài đặt (setup)",
         ["setup.rerun"] = "Chạy lại setup",
 
@@ -878,6 +891,20 @@ public static class I18nStrings
         ["setup.error.retry"] = "Retry",
         ["setup.error.skip"] = "Skip",
         ["setup.error.switchCpu"] = "Switch to the CPU build",
+        // Wizard failure messages: SystemCheck/SetupCoordinator return a key + args (SetupMessage) and
+        // the modal resolves them through i18n in the current UI language.
+        ["setup.fail.arch"] = "ReTran requires Windows on x64; this machine's OS architecture is '{0}' — the bundled uv.exe and the paddle wheels are x64-only.",
+        ["setup.fail.uvMissing"] = "uv.exe is missing from the app folder ({0}) — extract the full zip again.",
+        ["setup.fail.disk"] = "Not enough free disk space on the volume containing the app folder: the {0} build needs at least {1} GB, with only {2} GB free.",
+        ["setup.fail.network"] = "Could not reach the host '{0}' — setup needs the network to download Python, paddle wheels and models; check the network/proxy and run the check again.",
+        ["setup.fail.sync"] = "Installing the OCR environment failed after {0} attempts (uv sync exited with code {1}).",
+        ["setup.fail.syncTail"] = "Installing the OCR environment failed after {0} attempts (uv sync exited with code {1}).\n\nuv output tail:\n{2}",
+        ["setup.fail.ccGate"] = "Your graphics card (compute capability {0}) is not supported by the PaddlePaddle 3.4.0 GPU build — press \"Switch to the CPU build\" to continue.",
+        ["setup.fail.ccGateUnknown"] = "Your graphics card (compute capability could not be determined) is not supported by the PaddlePaddle 3.4.0 GPU build — press \"Switch to the CPU build\" to continue.",
+        ["setup.fail.sidecar"] = "Could not verify the OCR sidecar after {0} attempts (the sidecar did not answer ping/catalog).",
+        ["setup.fail.models"] = "Could not download the OCR models after {0} attempts (each limited to {1} minutes).",
+        ["setup.fail.applying"] = "Could not write the OCR model pair to settings.json after {0} attempts.",
+        ["setup.fail.llmRuntime"] = "Could not download the llama.cpp runtime after {0} attempts (each limited to {1} minutes). You can skip this step and download it later from Settings → LLM.",
         ["setup.notice.amdCpu"] = "The GPU build cannot be installed for AMD cards on Windows; the CPU build will be used instead.",
         ["setup.notice.noGpu"] = "No supported NVIDIA GPU found — the wizard will use the CPU build.",
         ["setup.notice.oldDriver"] = "Your current NVIDIA driver is too old for the GPU build (576.02 minimum for CUDA 12.9) — Setup will install the CPU build. Update the driver and re-run Setup to use the GPU build.",
@@ -888,6 +915,7 @@ public static class I18nStrings
         ["setup.flavorSwitch.sizeGpu"] = "~1.6 GB (GPU build)",
         ["setup.flavorSwitch.sizeCpu"] = "~0.3 GB (CPU build)",
         ["setup.flavorSwitch.confirm"] = "Switch to the new build",
+        ["setup.flavorSwitch.notice"] = "The build installed on this machine is {0}, but the current machine configuration needs {1}. Press \"Switch to the new build\" to replace it (estimated download: GPU ~1.6 GB / CPU ~0.3 GB wheel).",
         ["setup.section"] = "Setup",
         ["setup.rerun"] = "Re-run setup",
 
@@ -935,6 +963,10 @@ public static class I18nStrings
         ["fr"] = "Français",
         ["de"] = "Deutsch",
         ["es"] = "Español",
+        ["ar"] = "العربية",
+        ["th"] = "ไทย",
+        ["el"] = "Ελληνικά",
+        ["hi"] = "हिन्दी",
     };
 
     /// <summary>

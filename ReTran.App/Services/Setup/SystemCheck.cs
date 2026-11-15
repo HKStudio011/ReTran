@@ -74,12 +74,15 @@ public interface IVideoAdapterSource
 /// Flavor wheel OCR được chọn cho máy này.
 /// </param>
 /// <param name="Notice">
-/// Advisory text to show the user when the decision downgraded to CPU (driver/AMD/no-NVIDIA); null on GPU.
+/// Advisory message to show the user when the decision downgraded to CPU (driver/AMD/no-NVIDIA); null on
+/// GPU. Carries an i18n key the UI resolves in the current language.
 /// Thông báo advisory cho người dùng khi quyết định hạ xuống CPU (driver/AMD/không NVIDIA); null khi GPU.
+/// Mang key i18n để UI resolve theo ngôn ngữ hiện hành.
 /// </param>
 /// <param name="FailureReason">
-/// Non-null only when <paramref name="Ok"/> is false; names the failed gate (host, file, disk, arch).
-/// Chỉ non-null khi <paramref name="Ok"/> false; nêu rõ cổng đã fail (host, file, đĩa, arch).
+/// Non-null only when <paramref name="Ok"/> is false; a localizable message naming the failed gate
+/// (host, file, disk, arch). Chỉ non-null khi <paramref name="Ok"/> false; thông điệp bản địa hoá nêu
+/// rõ cổng đã fail (host, file, đĩa, arch).
 /// </param>
 /// <param name="UvExePresent">
 /// Whether the bundled uv.exe exists on disk — later wizard steps skip with it (spec §4).
@@ -98,8 +101,8 @@ public interface IVideoAdapterSource
 public sealed record SystemCheckResult(
     bool Ok,
     OcrFlavor Flavor,
-    string? Notice,
-    string? FailureReason,
+    SetupMessage? Notice,
+    SetupMessage? FailureReason,
     bool UvExePresent,
     bool VenvPresent,
     string? CudaWheel);
@@ -250,20 +253,19 @@ public static class SystemCheck
         if (architecture != Architecture.X64)
         {
             return Fail(OcrFlavor.Cpu,
-                $"ReTran yêu cầu Windows chạy trên nền x64; kiến trúc OS của máy này là '{architecture}' — " +
-                "uv.exe đi kèm và wheel paddle chỉ có bản x64.",
+                SetupMessage.Of("setup.fail.arch", architecture.ToString()),
                 uvExePresent, venvPresent);
         }
 
         if (!uvExePresent)
         {
             return Fail(OcrFlavor.Cpu,
-                $"Thiếu uv.exe trong thư mục app ({SetupPaths.UvExe}) — hãy giải nén lại zip đầy đủ.",
+                SetupMessage.Of("setup.fail.uvMissing", SetupPaths.UvExe),
                 uvExePresent, venvPresent);
         }
 
         OcrFlavor flavor;
-        string? notice;
+        SetupMessage? notice;
         string? cudaWheel;
         (flavor, notice, cudaWheel) = DecideFlavor(adapters.GetAdapters());
 
@@ -273,8 +275,10 @@ public static class SystemCheck
         {
             string flavorLabel = flavor == OcrFlavor.Gpu ? "GPU" : "CPU";
             return Fail(flavor,
-                $"Không đủ dung lượng đĩa trên ổ chứa thư mục app: bản {flavorLabel} cần tối thiểu " +
-                $"{minimumFree / BytesPerGb} GB, hiện chỉ còn {freeBytes / (double)BytesPerGb:0.##} GB.",
+                SetupMessage.Of("setup.fail.disk",
+                    flavorLabel,
+                    (minimumFree / BytesPerGb).ToString(),
+                    (freeBytes / (double)BytesPerGb).ToString("0.##")),
                 uvExePresent, venvPresent);
         }
 
@@ -283,8 +287,7 @@ public static class SystemCheck
             if (!isHostReachable(host))
             {
                 return Fail(flavor,
-                    $"Không kết nối được tới host '{host}' — setup cần mạng để tải Python, wheel paddle " +
-                    "và model; kiểm tra mạng/proxy rồi chạy lại check.",
+                    SetupMessage.Of("setup.fail.network", host),
                     uvExePresent, venvPresent);
             }
         }
@@ -292,7 +295,7 @@ public static class SystemCheck
         return new SystemCheckResult(true, flavor, notice, null, uvExePresent, venvPresent, cudaWheel);
     }
 
-    private static SystemCheckResult Fail(OcrFlavor flavor, string reason, bool uvExePresent, bool venvPresent)
+    private static SystemCheckResult Fail(OcrFlavor flavor, SetupMessage reason, bool uvExePresent, bool venvPresent)
         => new(false, flavor, null, reason, uvExePresent, venvPresent, CudaWheel: null);
 
     /// <summary>
@@ -307,7 +310,7 @@ public static class SystemCheck
     /// dùng bản GPU; AMD rời → CPU + notice AMD đúng spec; còn lại → CPU + notice nhẹ, tuyệt đối không
     /// nhắc "card AMD".
     /// </summary>
-    private static (OcrFlavor Flavor, string? Notice, string? CudaWheel) DecideFlavor(
+    private static (OcrFlavor Flavor, SetupMessage? Notice, string? CudaWheel) DecideFlavor(
         IReadOnlyList<VideoAdapterInfo> adapters)
     {
         bool nvidiaDiscretePresent = false;
@@ -354,20 +357,17 @@ public static class SystemCheck
 
         if (nvidiaDiscretePresent)
         {
-            return (OcrFlavor.Cpu,
-                $"Driver NVIDIA hiện tại chưa đủ mới cho bản GPU (cần tối thiểu {FormatMinDriver()} " +
-                "cho CUDA 12.9) — Setup sẽ cài bản CPU. Cập nhật driver rồi chạy lại Setup để dùng bản GPU.",
-                null);
+            // Nội dung notice (kèm mốc sàn driver) nằm ở key i18n setup.notice.oldDriver.
+            // The notice text (including the driver floor) lives in the i18n key setup.notice.oldDriver.
+            return (OcrFlavor.Cpu, SetupMessage.Of("setup.notice.oldDriver"), null);
         }
 
         if (amdDiscrete)
         {
-            return (OcrFlavor.Cpu,
-                "Không cài được bản GPU cho card AMD trên Windows, sẽ thay bằng bản CPU.",
-                null);
+            return (OcrFlavor.Cpu, SetupMessage.Of("setup.notice.amdCpu"), null);
         }
 
-        return (OcrFlavor.Cpu, "Không có GPU NVIDIA hỗ trợ — wizard sẽ dùng bản CPU.", null);
+        return (OcrFlavor.Cpu, SetupMessage.Of("setup.notice.noGpu"), null);
     }
 
     private static string? CudaWheelForAdapter(VideoAdapterInfo adapter)
@@ -500,11 +500,4 @@ public static class SystemCheck
         productVersion = (productBase + tail / 100, tail % 100);
         return true;
     }
-
-    /// <summary>
-    /// Formats the cu129 driver floor (57_602) as the user-facing "576.02" minimum quoted in the
-    /// CPU-downgrade notice. / Định dạng ngưỡng driver 57_602 thành "576.02" hiển thị cho user trong notice hạ CPU.
-    /// </summary>
-    private static string FormatMinDriver()
-        => $"{MinDriverForCu129 / 100}.{MinDriverForCu129 % 100:00}";
 }

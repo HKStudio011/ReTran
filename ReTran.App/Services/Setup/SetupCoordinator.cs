@@ -230,18 +230,22 @@ public sealed class SetupCoordinator
     public SetupStep Step { get; private set; } = SetupStep.Checking;
 
     /// <summary>
-    /// User-facing message of the current failure (includes the uv output tail for sync failures);
-    /// <see langword="null"/> outside <see cref="SetupStep.Failed"/>.
-    /// Thông điệp lỗi cho user (kèm đuôi output uv với lỗi sync); <see langword="null"/> khi không ở <see cref="SetupStep.Failed"/>.
+    /// Localizable message of the current failure (the uv output tail travels as a format arg for
+    /// sync failures); <see langword="null"/> outside <see cref="SetupStep.Failed"/>. The modal
+    /// resolves it through <c>I18nService</c> in the current UI language.
+    /// Thông điệp lỗi bản địa hoá được của lượt fail hiện tại (đuôi output uv đi kèm như tham số
+    /// format với lỗi sync); <see langword="null"/> khi không ở <see cref="SetupStep.Failed"/>. Modal
+    /// resolve qua <c>I18nService</c> theo ngôn ngữ UI hiện hành.
     /// </summary>
-    public string? Error { get; private set; }
+    public SetupMessage? Error { get; private set; }
 
     /// <summary>
-    /// Advisory notice from the system check (GPU→CPU downgrade reasons) or the pending flavor-switch
-    /// explanation, kept for the UI to display. Notice advisory từ check system (lý do hạ GPU→CPU) hoặc
-    /// giải thích đổi flavor đang chờ, giữ cho UI hiển thị.
+    /// Advisory message from the system check (GPU→CPU downgrade reasons) or the pending
+    /// flavor-switch explanation, kept for the UI to display; resolved via i18n like
+    /// <see cref="Error"/>. Notice advisory từ check system (lý do hạ GPU→CPU) hoặc giải thích đổi
+    /// flavor đang chờ, giữ cho UI hiển thị; resolve qua i18n như <see cref="Error"/>.
     /// </summary>
-    public string? Notice { get; private set; }
+    public SetupMessage? Notice { get; private set; }
 
     /// <summary>
     /// Wheel flavor the wizard is installing (decided by Checking, or switched to CPU via
@@ -645,7 +649,7 @@ public sealed class SetupCoordinator
     {
         if (!_fileExists(SetupPaths.UvExe))
         {
-            Error = $"Thiếu uv.exe trong thư mục app ({SetupPaths.UvExe}) — hãy giải nén lại zip đầy đủ.";
+            Error = SetupMessage.Of("setup.fail.uvMissing", SetupPaths.UvExe);
             return StepOutcome.Failed;
         }
 
@@ -709,7 +713,11 @@ public sealed class SetupCoordinator
                 Flavor, attempt, MaxRetries + 1, lastExit);
         }
 
-        Error = BuildSyncError(lastExit, _uvSync.LastOutputTail);
+        string? tail = _uvSync.LastOutputTail;
+        string attempts = (MaxRetries + 1).ToString();
+        Error = string.IsNullOrWhiteSpace(tail)
+            ? SetupMessage.Of("setup.fail.sync", attempts, lastExit.ToString())
+            : SetupMessage.Of("setup.fail.syncTail", attempts, lastExit.ToString(), tail!);
         return StepOutcome.Failed;
     }
 
@@ -740,7 +748,9 @@ public sealed class SetupCoordinator
                     (bool known, int major, int minor) = TryParseCapability(device);
                     if (!known || major * 10 + minor < MinGpuComputeCapabilityCode)
                     {
-                        Error = BuildCcGateError(known, major, minor);
+                        Error = known
+                            ? SetupMessage.Of("setup.fail.ccGate", $"{major}.{minor}")
+                            : SetupMessage.Of("setup.fail.ccGateUnknown");
                         CanSwitchToCpuFlavor = true;
                         _logger?.LogWarning("setup: cổng capability GPU — known={Known} cc={Major}.{Minor}", known, major, minor);
                         return StepOutcome.Failed;
@@ -758,7 +768,7 @@ public sealed class SetupCoordinator
             }
         }
 
-        Error = $"Không xác minh được sidecar OCR sau {MaxRetries + 1} lần thử (sidecar không trả lời ping/catalog).";
+        Error = SetupMessage.Of("setup.fail.sidecar", (MaxRetries + 1).ToString());
         return StepOutcome.Failed;
     }
 
@@ -833,8 +843,8 @@ public sealed class SetupCoordinator
             }
         }
 
-        Error = $"Không tải được runtime llama.cpp sau {MaxRetries + 1} lần thử (mỗi lần giới hạn " +
-            $"{_modelDownloadTimeout.TotalMinutes:0} phút). Có thể bỏ qua bước này và tải lại trong Cài đặt → mục LLM.";
+        Error = SetupMessage.Of("setup.fail.llmRuntime",
+            (MaxRetries + 1).ToString(), _modelDownloadTimeout.TotalMinutes.ToString("0"));
         return StepOutcome.Failed;
     }
 
@@ -904,7 +914,8 @@ public sealed class SetupCoordinator
             }
         }
 
-        Error = $"Không tải được model OCR sau {MaxRetries + 1} lần thử (mỗi lần giới hạn {_modelDownloadTimeout.TotalMinutes:0} phút).";
+        Error = SetupMessage.Of("setup.fail.models",
+            (MaxRetries + 1).ToString(), _modelDownloadTimeout.TotalMinutes.ToString("0"));
         return StepOutcome.Failed;
     }
 
@@ -938,7 +949,7 @@ public sealed class SetupCoordinator
             }
         }
 
-        Error = $"Không ghi được cặp model OCR vào settings.json sau {MaxRetries + 1} lần thử.";
+        Error = SetupMessage.Of("setup.fail.applying", (MaxRetries + 1).ToString());
         return StepOutcome.Failed;
     }
 
@@ -947,7 +958,7 @@ public sealed class SetupCoordinator
     private void EnterFlavorSwitchPause(OcrFlavor installed)
     {
         PendingFlavorSwitch = new FlavorSwitchInfo(installed, Flavor);
-        Notice = BuildFlavorSwitchNotice(installed, Flavor);
+        Notice = SetupMessage.Of("setup.flavorSwitch.notice", Label(installed), Label(Flavor));
         Error = null;
         Step = SetupStep.ConfirmingFlavorSwitch;
         Publish();
@@ -1091,23 +1102,6 @@ public sealed class SetupCoordinator
         if (array[0] is not JsonValue majorValue || !majorValue.TryGetValue<int>(out int major)) return (false, 0, 0);
         if (array[1] is not JsonValue minorValue || !minorValue.TryGetValue<int>(out int minor)) return (false, 0, 0);
         return (true, major, minor);
-    }
-
-    private static string BuildFlavorSwitchNotice(OcrFlavor installed, OcrFlavor target) =>
-        $"Bản đang cài trên máy này là {Label(installed)}, nhưng cấu hình hiện tại của máy cần bản " +
-        $"{Label(target)}. Bấm \"Đổi sang bản mới\" để gỡ bản cũ và cài bản mới (dung lượng tải ước tính: " +
-        "GPU ~1,6 GB / CPU ~0,3 GB wheel).";
-
-    private static string BuildCcGateError(bool knownCapability, int major, int minor) => knownCapability
-        ? $"Card đồ hoạ của bạn (compute capability {major}.{minor}) không được bản GPU PaddlePaddle 3.4.0 " +
-          $"hỗ trợ — hãy bấm \"Chuyển sang bản CPU\" để tiếp tục."
-        : "Card đồ hoạ của bạn (không xác định được compute capability) không được bản GPU PaddlePaddle " +
-          "3.4.0 hỗ trợ — hãy bấm \"Chuyển sang bản CPU\" để tiếp tục.";
-
-    private static string BuildSyncError(int exitCode, string? outputTail)
-    {
-        string message = $"Cài môi trường OCR thất bại sau {MaxRetries + 1} lần thử (uv sync trả về exit code {exitCode}).";
-        return string.IsNullOrWhiteSpace(outputTail) ? message : message + "\n\nĐuôi output của uv:\n" + outputTail;
     }
 
     private static string Label(OcrFlavor flavor) => flavor == OcrFlavor.Gpu ? "GPU" : "CPU";

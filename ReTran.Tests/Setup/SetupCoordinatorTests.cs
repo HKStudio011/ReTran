@@ -27,6 +27,15 @@ public class SetupCoordinatorTests : IDisposable
 {
     private const long GB = 1024L * 1024 * 1024;
 
+    // Message wizard giờ là key + args (SetupMessage) — helper resolve đúng như UI (I18nService, VI)
+    // để các assert chuỗi hiện có vẫn kiểm tra nguyên văn thông điệp người dùng thấy.
+    private static string Text(SetupMessage? message)
+    {
+        var i18n = new I18nService();
+        i18n.Set("vi");
+        return message is null ? string.Empty : i18n.Fmt(message.Key, message.Args.ToArray());
+    }
+
     // Chuỗi WMI đo thật trên máy dev (branch 16 ⇒ họ 6xx, driver 617.42 ≥ sàn 576.02) ⇒ flavor GPU.
     // Measured on the dev machine (branch 16 ⇒ 6xx family, driver 617.42 ≥ the 576.02 floor) ⇒ GPU.
     private static readonly VideoAdapterInfo NvidiaCurrent =
@@ -288,7 +297,7 @@ public class SetupCoordinatorTests : IDisposable
 
         Assert.Equal(SetupStep.Failed, coordinator.Step);
         Assert.NotNull(coordinator.Error);
-        Assert.Contains("giải nén lại zip", coordinator.Error, StringComparison.Ordinal);
+        Assert.Contains("giải nén lại zip", Text(coordinator.Error), StringComparison.Ordinal);
         // Hard-fail step: exactly one VerifyingFiles probe (no auto-retry), nothing downstream ran.
         // Bước fail cứng: đúng 1 lần dò của VerifyingFiles (không retry tự động), không bước nào sau chạy.
         Assert.Equal(2, uvProbes);
@@ -305,7 +314,7 @@ public class SetupCoordinatorTests : IDisposable
 
         Assert.Equal(SetupStep.Failed, coordinator.Step);
         Assert.NotNull(coordinator.Error);
-        Assert.Contains("GB", coordinator.Error, StringComparison.Ordinal);
+        Assert.Contains("GB", Text(coordinator.Error), StringComparison.Ordinal);
         Assert.Empty(_uvFake.SyncCalls);
         Assert.Empty(_bridge.Calls);
         // A hard Checking failure persists no "done" step at all.
@@ -402,9 +411,9 @@ public class SetupCoordinatorTests : IDisposable
         Assert.NotNull(coordinator.PendingFlavorSwitch);
         Assert.Equal(OcrFlavor.Cpu, coordinator.PendingFlavorSwitch!.Installed);
         Assert.Equal(OcrFlavor.Gpu, coordinator.PendingFlavorSwitch.Target);
-        Assert.Contains("Đổi sang bản mới", coordinator.Notice, StringComparison.Ordinal);
-        Assert.Contains("1,6 GB", coordinator.Notice, StringComparison.Ordinal);
-        Assert.Contains("0,3 GB", coordinator.Notice, StringComparison.Ordinal);
+        Assert.Contains("Đổi sang bản mới", Text(coordinator.Notice), StringComparison.Ordinal);
+        Assert.Contains("1,6 GB", Text(coordinator.Notice), StringComparison.Ordinal);
+        Assert.Contains("0,3 GB", Text(coordinator.Notice), StringComparison.Ordinal);
         Assert.Empty(_uvFake.SyncCalls); // no sync before confirmation / không sync trước xác nhận
 
         // The user confirms: the checked flavor is synced and setup.json records it.
@@ -435,8 +444,8 @@ public class SetupCoordinatorTests : IDisposable
 
         Assert.Equal(SetupStep.Failed, coordinator.Step);
         Assert.NotNull(coordinator.Error);
-        Assert.Contains("6.1", coordinator.Error, StringComparison.Ordinal);
-        Assert.Contains("PaddlePaddle 3.4.0", coordinator.Error, StringComparison.Ordinal);
+        Assert.Contains("6.1", Text(coordinator.Error), StringComparison.Ordinal);
+        Assert.Contains("PaddlePaddle 3.4.0", Text(coordinator.Error), StringComparison.Ordinal);
         Assert.True(coordinator.CanSwitchToCpuFlavor);
 
         // The CPU-switch entry point loops back into Syncing with flavor Cpu — the user does not have
@@ -465,7 +474,7 @@ public class SetupCoordinatorTests : IDisposable
 
         Assert.Equal(SetupStep.Failed, coordinator.Step);
         Assert.NotNull(coordinator.Error);
-        Assert.Contains("PaddlePaddle 3.4.0", coordinator.Error, StringComparison.Ordinal);
+        Assert.Contains("PaddlePaddle 3.4.0", Text(coordinator.Error), StringComparison.Ordinal);
         Assert.True(coordinator.CanSwitchToCpuFlavor);
     }
 
@@ -542,7 +551,7 @@ public class SetupCoordinatorTests : IDisposable
         // hướng dẫn tải lại từ Settings — không chặn user bỏ qua phiên.
         Assert.Equal(SetupStep.Failed, coordinator.Step);
         Assert.NotNull(coordinator.Error);
-        Assert.Contains("runtime llama.cpp", coordinator.Error, StringComparison.Ordinal);
+        Assert.Contains("runtime llama.cpp", Text(coordinator.Error), StringComparison.Ordinal);
         Assert.Equal(SetupCoordinator.MaxRetries + 1, _bridge.LlmRuntimeDownloads.Count);
 
         // User bấm "Thử lại" với mạng hoạt động: bước xong, pipeline chạy tiếp tới Done.
@@ -607,7 +616,7 @@ public class SetupCoordinatorTests : IDisposable
         Assert.Equal(SetupCoordinator.MaxRetries + 1, _uvFake.SyncCalls.Count);
         foreach (string[] args in _uvFake.SyncCalls)
             Assert.Equal(["sync", "--no-default-groups", "--group", "gpu", "--frozen"], args);
-        Assert.Contains(tail, coordinator.Error, StringComparison.Ordinal);
+        Assert.Contains(tail, Text(coordinator.Error), StringComparison.Ordinal);
     }
 
     // ── resume nhanh cho máy đã xong ───────────────────────────────────────────────────────────────

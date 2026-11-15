@@ -31,10 +31,10 @@
             {
                 case SetupStep.Checking:
                     <p class="text-sm text-surface">@(L["setup.checking"])</p>
-                    @if (Coordinator.Notice is not null)
+                    @if (Coordinator.Notice is { } notice)
                     {
-                        @* Notice hạ GPU→CPU từ SystemCheck — chuỗi hoàn chỉnh do coordinator giữ. *@
-                        <p class="rt-hint" style="white-space: pre-wrap;">@Coordinator.Notice</p>
+                        @* Notice hạ GPU→CPU từ SystemCheck — coordinator giữ key i18n + args, modal resolve. *@
+                        <p class="rt-hint" style="white-space: pre-wrap;">@L.Fmt(notice.Key, notice.Args.ToArray())</p>
                     }
                     break;
 
@@ -75,7 +75,8 @@
                     break;
 
                 case SetupStep.Failed:
-                    <p class="text-sm" style="color: var(--rt-danger); white-space: pre-wrap; margin-bottom: 12px;">@Coordinator.Error</p>
+                    @* Lỗi từ coordinator là key i18n + args — resolve theo ngôn ngữ UI hiện hành. *@
+                    <p class="text-sm" style="color: var(--rt-danger); white-space: pre-wrap; margin-bottom: 12px;">@(Coordinator.Error is { } error ? L.Fmt(error.Key, error.Args.ToArray()) : string.Empty)</p>
                     <div class="flex gap-2">
                         <button type="button" class="rt-btn rt-mini" disabled="@_busy" @onclick="RetryAsync">@(L["setup.error.retry"])</button>
                         @if (Coordinator.CanSwitchToCpuFlavor)

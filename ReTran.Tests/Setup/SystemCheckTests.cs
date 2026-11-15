@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using ReTran_App.Services;
 using ReTran_App.Services.Setup;
 
 /// <summary>
@@ -19,6 +20,15 @@ using ReTran_App.Services.Setup;
 public class SystemCheckTests
 {
     private const long GB = 1024L * 1024 * 1024;
+
+    // Message wizard giờ là key + args (SetupMessage) — helper resolve đúng như UI (I18nService, VI)
+    // để các assert chuỗi hiện có vẫn kiểm tra nguyên văn thông điệp người dùng thấy.
+    private static string Text(SetupMessage? message)
+    {
+        var i18n = new I18nService();
+        i18n.Set("vi");
+        return message is null ? string.Empty : i18n.Fmt(message.Key, message.Args.ToArray());
+    }
 
     // Chuỗi WMI đo thật trên máy dev ngày 2026-11-05: DriverVersion "32.0.16.1742" == nvidia-smi
     // driver_version 617.42 (branch 16 ⇒ họ 6xx). Máy dev hiện mang RTX 5060 Ti.
@@ -135,7 +145,7 @@ public class SystemCheckTests
         Assert.Equal(OcrFlavor.Cpu, result.Flavor);
         Assert.Null(result.CudaWheel);
         Assert.NotNull(result.Notice);
-        Assert.Contains("576.02", result.Notice);
+        Assert.Contains("576.02", Text(result.Notice));
     }
 
     [Fact]
@@ -150,7 +160,7 @@ public class SystemCheckTests
         Assert.Equal(OcrFlavor.Cpu, result.Flavor);
         Assert.Null(result.CudaWheel);
         Assert.NotNull(result.Notice);
-        Assert.Contains("576.02", result.Notice);
+        Assert.Contains("576.02", Text(result.Notice));
     }
 
     [Fact]
@@ -167,8 +177,8 @@ public class SystemCheckTests
         Assert.Equal(OcrFlavor.Cpu, result.Flavor);
         Assert.Null(result.CudaWheel);
         Assert.NotNull(result.Notice);
-        Assert.Contains("576.02", result.Notice);
-        Assert.Contains("chạy lại Setup", result.Notice);
+        Assert.Contains("576.02", Text(result.Notice));
+        Assert.Contains("chạy lại Setup", Text(result.Notice));
     }
 
     [Fact]
@@ -213,8 +223,8 @@ public class SystemCheckTests
         Assert.Equal(OcrFlavor.Cpu, result.Flavor);
         Assert.Null(result.CudaWheel);
         Assert.NotNull(result.Notice);
-        Assert.DoesNotContain("576.02", result.Notice);
-        Assert.Contains("CPU", result.Notice);
+        Assert.DoesNotContain("576.02", Text(result.Notice));
+        Assert.Contains("CPU", Text(result.Notice));
     }
 
     [Fact]
@@ -232,7 +242,7 @@ public class SystemCheckTests
         Assert.True(result.Ok);
         Assert.Equal(OcrFlavor.Cpu, result.Flavor);
         Assert.Null(result.CudaWheel);
-        Assert.Contains("576.02", result.Notice);
+        Assert.Contains("576.02", Text(result.Notice));
     }
 
     // ----- chuỗi INF/WMI NVIDIA thật: driver → wheel (regression 560.94 từng ra cu130; nay chỉ còn cu129) -----
@@ -270,7 +280,7 @@ public class SystemCheckTests
         Assert.Equal(OcrFlavor.Cpu, result.Flavor);
         Assert.Null(result.CudaWheel);
         Assert.NotNull(result.Notice);
-        Assert.Contains("576.02", result.Notice);
+        Assert.Contains("576.02", Text(result.Notice));
     }
 
     // ----- AMD / iGPU notices (spec §5.7) -----
@@ -284,8 +294,8 @@ public class SystemCheckTests
         Assert.Equal(OcrFlavor.Cpu, result.Flavor);
         Assert.Null(result.CudaWheel);
         Assert.NotNull(result.Notice);
-        Assert.Contains("AMD", result.Notice);
-        Assert.Contains("CPU", result.Notice);
+        Assert.Contains("AMD", Text(result.Notice));
+        Assert.Contains("CPU", Text(result.Notice));
     }
 
     [Fact]
@@ -297,7 +307,7 @@ public class SystemCheckTests
         Assert.Equal(OcrFlavor.Cpu, result.Flavor);
         Assert.NotNull(result.Notice);
         // spec §5.7: chỉ adapter RỜI mới được nhắc "card AMD"; iGPU dùng thông báo chung.
-        Assert.DoesNotContain("AMD", result.Notice);
+        Assert.DoesNotContain("AMD", Text(result.Notice));
     }
 
     [Fact]
@@ -308,7 +318,7 @@ public class SystemCheckTests
         Assert.True(result.Ok);
         Assert.Equal(OcrFlavor.Cpu, result.Flavor);
         Assert.NotNull(result.Notice);
-        Assert.DoesNotContain("AMD", result.Notice);
+        Assert.DoesNotContain("AMD", Text(result.Notice));
     }
 
     // ----- cổng fail cứng -----
@@ -337,8 +347,8 @@ public class SystemCheckTests
         }
 
         Assert.NotNull(result.FailureReason);
-        Assert.DoesNotContain("32-bit", result.FailureReason);
-        Assert.Contains("x64", result.FailureReason);
+        Assert.DoesNotContain("32-bit", Text(result.FailureReason));
+        Assert.Contains("x64", Text(result.FailureReason));
         Assert.Equal(OcrFlavor.Cpu, result.Flavor);
     }
 
@@ -358,7 +368,7 @@ public class SystemCheckTests
         Assert.False(result.Ok);
         Assert.False(result.UvExePresent);
         Assert.Null(result.CudaWheel);
-        Assert.Contains("uv.exe", result.FailureReason);
+        Assert.Contains("uv.exe", Text(result.FailureReason));
     }
 
     [Fact]
@@ -368,7 +378,7 @@ public class SystemCheckTests
 
         Assert.False(result.Ok);
         Assert.NotNull(result.FailureReason);
-        Assert.Contains("2 GB", result.FailureReason);
+        Assert.Contains("2 GB", Text(result.FailureReason));
     }
 
     [Fact]
@@ -377,7 +387,7 @@ public class SystemCheckTests
         var gpuTooLittle = Check(Adapters(NvidiaCurrent), freeBytes: 3 * GB);
 
         Assert.False(gpuTooLittle.Ok);
-        Assert.Contains("8 GB", gpuTooLittle.FailureReason);
+        Assert.Contains("8 GB", Text(gpuTooLittle.FailureReason));
 
         // Cùng 3 GB đó nhưng chỉ có iGPU → flavor CPU với ngưỡng 2 GB → pass.
         Assert.True(Check(Adapters(IntelIgpu), freeBytes: 3 * GB).Ok);
@@ -399,7 +409,7 @@ public class SystemCheckTests
             FileSystem());
 
         Assert.False(result.Ok);
-        Assert.Contains("github.com", result.FailureReason);
+        Assert.Contains("github.com", Text(result.FailureReason));
         Assert.Contains("github.com", probed);
     }
 
@@ -463,7 +473,7 @@ public class SystemCheckTests
         var legacyResult = Check(Adapters(new VideoAdapterInfo("NVIDIA GeForce RTX 2060", true, "27.21.14.5609")));
         Assert.Equal(OcrFlavor.Cpu, legacyResult.Flavor);
         Assert.Null(legacyResult.CudaWheel);
-        Assert.Contains("576.02", legacyResult.Notice);
+        Assert.Contains("576.02", Text(legacyResult.Notice));
     }
 
     [Theory]
