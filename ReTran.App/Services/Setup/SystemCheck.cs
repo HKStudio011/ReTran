@@ -222,6 +222,19 @@ public static class SystemCheck
     /// <see cref="RuntimeInformation.OSArchitecture"/> và inject được để nhánh ARM64/X86 unit-test được.
     /// Optional nên mọi call site đang có vẫn compile.
     /// </param>
+    /// <param name="progress">
+    /// Optional checklist-progress sink: the run emits one Pending batch for the whole display order,
+    /// then Running → Ok/Warn/Fail per item. Reporting failures are swallowed so the channel can never
+    /// break the check itself.
+    /// Kênh tiến độ checklist tuỳ chọn: lượt chạy phát một batch Pending cho toàn bộ thứ tự hiển thị,
+    /// rồi Running → Ok/Warn/Fail từng mục. Lỗi của kênh báo cáo bị nuốt để không bao giờ phá lượt check.
+    /// </param>
+    /// <param name="countModelEntries">
+    /// Counts installed models for one directory (0 when unreadable); injectable for tests, defaults to
+    /// counting the entries of <c>models/official_models</c>.
+    /// Đếm model đã cài trong một thư mục (0 khi không đọc được); inject cho test, mặc định đếm entry
+    /// của <c>models/official_models</c>.
+    /// </param>
     /// <returns>
     /// The decision (Flavor, CudaWheel, Notice) when every gate passes; otherwise Ok=false with
     /// FailureReason naming the failed gate.
@@ -233,63 +246,118 @@ public static class SystemCheck
         Func<string, long> diskFreeBytes,
         Func<string, bool> isHostReachable,
         Func<string, bool>? fileExists = null,
-        Func<Architecture>? osArchitecture = null)
+        Func<Architecture>? osArchitecture = null,
+        Action<SetupCheckItem>? progress = null,
+        Func<string, int>? countModelEntries = null)
     {
         ArgumentNullException.ThrowIfNull(adapters);
         ArgumentNullException.ThrowIfNull(diskFreeBytes);
         ArgumentNullException.ThrowIfNull(isHostReachable);
         fileExists ??= File.Exists;
         osArchitecture ??= static () => RuntimeInformation.OSArchitecture;
+        countModelEntries ??= DefaultCountModelEntries;
 
         bool uvExePresent = fileExists(SetupPaths.UvExe);
         bool venvPresent = fileExists(SetupPaths.VenvPythonExe);
 
-        // Không dùng Environment.Is64BitOperatingSystem: máy ARM64 trả true (Win32-on-ARM) nhưng uv.exe
-        // đi kèm + wheel paddle chỉ có bản x64. Thông báo cũng không được nói "Windows 32-bit".
-        // Environment.Is64BitOperatingSystem is deliberately not used: an ARM64 machine reports true
-        // (Win32-on-ARM) while the bundled uv.exe and the paddle wheels are x64-only. The message must
-        // not claim "Windows 32-bit" either.
-        Architecture architecture = osArchitecture();
-        if (architecture != Architecture.X64)
-        {
-            return Fail(OcrFlavor.Cpu,
-                SetupMessage.Of("setup.fail.arch", architecture.ToString()),
-                uvExePresent, venvPresent);
-        }
+        // UI nhận một lượt Pending cho đủ danh sách trước khi mục nào chạy — checklist hiện đủ dòng
+        // ngay từ giây đầu.
+        // The UI receives one Pending batch for the full list before anything runs, so the checklist
+        // shows every row from the very first moment.
+        EmitAllPending(progress);
 
+        // 1) files — cổng uv.exe, chạy TRƯỚC cổng arch (2026-11-15) để thứ tự chạy = thứ tự hiển thị
+        // của checklist; hệ quả chấp nhận: máy vừa sai arch vừa thiếu uv.exe báo lỗi uv trước.
+        // 1) files — the uv.exe gate, run BEFORE the arch gate (2026-11-15) so execution order equals
+        // the checklist's display order; accepted consequence: a machine that is both wrong-arch and
+        // missing uv.exe reports the uv error first.
+        Emit(progress, new SetupCheckItem(FilesCheckId, SetupCheckState.Running, LabelFiles));
         if (!uvExePresent)
         {
-            return Fail(OcrFlavor.Cpu,
-                SetupMessage.Of("setup.fail.uvMissing", SetupPaths.UvExe),
-                uvExePresent, venvPresent);
+            SetupMessage missingUv = SetupMessage.Of("setup.fail.uvMissing", SetupPaths.UvExe);
+            Emit(progress, new SetupCheckItem(FilesCheckId, SetupCheckState.Fail, LabelFiles, missingUv));
+            return Fail(OcrFlavor.Cpu, missingUv, uvExePresent, venvPresent);
         }
+        Emit(progress, new SetupCheckItem(FilesCheckId, SetupCheckState.Ok, LabelFiles));
 
-        OcrFlavor flavor;
-        SetupMessage? notice;
-        string? cudaWheel;
-        (flavor, notice, cudaWheel) = DecideFlavor(adapters.GetAdapters());
+        // 2) env + 3) models — thông tin, KHÔNG phải cổng: máy mới chưa có gì vẫn qua bình thường.
+        // 2) env + 3) models — informational, NOT gates: a clean machine still passes.
+        Emit(progress, new SetupCheckItem(EnvCheckId, SetupCheckState.Running, LabelEnv));
+        Emit(progress, new SetupCheckItem(EnvCheckId, SetupCheckState.Ok, LabelEnv,
+            SetupMessage.Of(venvPresent ? "setup.check.env.present" : "setup.check.env.absent")));
 
+        int modelCount = countModelEntries(
+            Path.Combine(SetupPaths.ModelsDir, SetupState.OfficialModelsSubdir));
+        Emit(progress, new SetupCheckItem(ModelsCheckId, SetupCheckState.Running, LabelModels));
+        Emit(progress, new SetupCheckItem(ModelsCheckId, SetupCheckState.Ok, LabelModels,
+            modelCount > 0
+                ? SetupMessage.Of("setup.check.models.present", modelCount.ToString())
+                : SetupMessage.Of("setup.check.models.absent")));
+
+        // 4) arch — Không dùng Environment.Is64BitOperatingSystem: máy ARM64 trả true (Win32-on-ARM)
+        // nhưng uv.exe đi kèm + wheel paddle chỉ có bản x64. Thông báo cũng không được nói "Windows 32-bit".
+        // 4) arch — Environment.Is64BitOperatingSystem is deliberately not used: an ARM64 machine
+        // reports true (Win32-on-ARM) while the bundled uv.exe and the paddle wheels are x64-only.
+        // The message must not claim "Windows 32-bit" either.
+        Architecture architecture = osArchitecture();
+        SetupMessage archLabel = SetupMessage.Of(
+            "setup.check.arch.label", $"Windows {architecture.ToString().ToLowerInvariant()}");
+        Emit(progress, new SetupCheckItem(ArchCheckId, SetupCheckState.Running, archLabel));
+        if (architecture != Architecture.X64)
+        {
+            SetupMessage archFail = SetupMessage.Of("setup.fail.arch", architecture.ToString());
+            Emit(progress, new SetupCheckItem(ArchCheckId, SetupCheckState.Fail, archLabel, archFail));
+            return Fail(OcrFlavor.Cpu, archFail, uvExePresent, venvPresent);
+        }
+        Emit(progress, new SetupCheckItem(ArchCheckId, SetupCheckState.Ok, archLabel));
+
+        // 5) gpu — quyết định flavor; có notice hạ cấp (driver/AMD/không NVIDIA) là Warn, kèm notice
+        // làm detail. Cảnh báo của màn 1b cũ giờ sống trong dòng này.
+        // 5) gpu — the flavor decision; a downgrade notice (driver/AMD/no NVIDIA) makes it Warn with
+        // the notice as its detail line. The old screen-1b advisory now lives on this row.
+        (OcrFlavor flavor, SetupMessage? notice, string? cudaWheel, SetupMessage gpuLabel) =
+            DecideFlavor(adapters.GetAdapters());
+        Emit(progress, new SetupCheckItem(GpuCheckId, SetupCheckState.Running, gpuLabel));
+        Emit(progress, new SetupCheckItem(
+            GpuCheckId,
+            notice is null ? SetupCheckState.Ok : SetupCheckState.Warn,
+            gpuLabel,
+            notice ?? SetupMessage.Of(
+                flavor == OcrFlavor.Gpu ? "setup.check.gpu.build.gpu" : "setup.check.gpu.build.cpu")));
+
+        // 6) disk
         long minimumFree = flavor == OcrFlavor.Gpu ? MinFreeBytesGpu : MinFreeBytesCpu;
         long freeBytes = diskFreeBytes(SetupPaths.AppDir);
+        string flavorLabel = flavor == OcrFlavor.Gpu ? "GPU" : "CPU";
+        SetupMessage diskLabel = SetupMessage.Of(
+            "setup.check.disk.label", (freeBytes / (double)BytesPerGb).ToString("0.##"));
+        Emit(progress, new SetupCheckItem(DiskCheckId, SetupCheckState.Running, diskLabel));
         if (freeBytes < minimumFree)
         {
-            string flavorLabel = flavor == OcrFlavor.Gpu ? "GPU" : "CPU";
-            return Fail(flavor,
-                SetupMessage.Of("setup.fail.disk",
-                    flavorLabel,
-                    (minimumFree / BytesPerGb).ToString(),
-                    (freeBytes / (double)BytesPerGb).ToString("0.##")),
-                uvExePresent, venvPresent);
+            SetupMessage diskFail = SetupMessage.Of("setup.fail.disk",
+                flavorLabel,
+                (minimumFree / BytesPerGb).ToString(),
+                (freeBytes / (double)BytesPerGb).ToString("0.##"));
+            Emit(progress, new SetupCheckItem(DiskCheckId, SetupCheckState.Fail, diskLabel, diskFail));
+            return Fail(flavor, diskFail, uvExePresent, venvPresent);
         }
+        Emit(progress, new SetupCheckItem(DiskCheckId, SetupCheckState.Ok, diskLabel,
+            SetupMessage.Of("setup.check.disk.detail",
+                (minimumFree / BytesPerGb).ToString(), flavorLabel)));
 
+        // 7) net — probe tuần tự; host lỗi dừng ngay (Fail), các mục sau giữ Pending.
+        // 7) net — sequential probes; the failing host stops the run (Fail), later rows stay Pending.
         foreach (string host in NetworkProbeHosts)
         {
+            SetupMessage netLabel = SetupMessage.Of("setup.check.net.label", host);
+            Emit(progress, new SetupCheckItem(NetCheckId(host), SetupCheckState.Running, netLabel));
             if (!isHostReachable(host))
             {
-                return Fail(flavor,
-                    SetupMessage.Of("setup.fail.network", host),
-                    uvExePresent, venvPresent);
+                SetupMessage netFail = SetupMessage.Of("setup.fail.network", host);
+                Emit(progress, new SetupCheckItem(NetCheckId(host), SetupCheckState.Fail, netLabel, netFail));
+                return Fail(flavor, netFail, uvExePresent, venvPresent);
             }
+            Emit(progress, new SetupCheckItem(NetCheckId(host), SetupCheckState.Ok, netLabel));
         }
 
         return new SystemCheckResult(true, flavor, notice, null, uvExePresent, venvPresent, cudaWheel);
@@ -298,25 +366,104 @@ public static class SystemCheck
     private static SystemCheckResult Fail(OcrFlavor flavor, SetupMessage reason, bool uvExePresent, bool venvPresent)
         => new(false, flavor, null, reason, uvExePresent, venvPresent, CudaWheel: null);
 
+    // ── checklist ids & labels (kênh tiến độ, 2026-11-15) ─────────────────────────────────────────
+    // ── checklist ids & labels (progress channel, 2026-11-15) ─────────────────────────────────────
+
+    private const string FilesCheckId = "files";
+    private const string EnvCheckId = "env";
+    private const string ModelsCheckId = "models";
+    private const string ArchCheckId = "arch";
+    private const string GpuCheckId = "gpu";
+    private const string DiskCheckId = "disk";
+
+    private static string NetCheckId(string host) => $"net:{host}";
+
+    private static readonly SetupMessage LabelFiles = SetupMessage.Of("setup.check.files.label");
+    private static readonly SetupMessage LabelEnv = SetupMessage.Of("setup.check.env.label");
+    private static readonly SetupMessage LabelModels = SetupMessage.Of("setup.check.models.label");
+
+    /// <summary>
+    /// Reports one checklist item, swallowing reporting failures: the progress channel is advisory
+    /// and must never break the check itself.
+    /// Báo cáo một mục checklist, nuốt lỗi báo cáo: kênh tiến độ chỉ để hiển thị, không bao giờ được
+    /// phá chính lượt check.
+    /// </summary>
+    private static void Emit(Action<SetupCheckItem>? progress, SetupCheckItem item)
+    {
+        try { progress?.Invoke(item); }
+        catch (Exception) { }
+    }
+
+    /// <summary>
+    /// Emits the full Pending batch in display order so the checklist renders every row upfront;
+    /// placeholders ("…") stand for values only known once the item runs.
+    /// Phát một lượt Pending cho toàn bộ danh sách theo thứ tự hiển thị để checklist hiện đủ dòng;
+    /// giá trị chưa biết dùng placeholder ("…").
+    /// </summary>
+    private static void EmitAllPending(Action<SetupCheckItem>? progress)
+    {
+        if (progress is null) return;
+
+        Emit(progress, new SetupCheckItem(FilesCheckId, SetupCheckState.Pending, LabelFiles));
+        Emit(progress, new SetupCheckItem(EnvCheckId, SetupCheckState.Pending, LabelEnv));
+        Emit(progress, new SetupCheckItem(ModelsCheckId, SetupCheckState.Pending, LabelModels));
+        Emit(progress, new SetupCheckItem(ArchCheckId, SetupCheckState.Pending,
+            SetupMessage.Of("setup.check.arch.label", "…")));
+        Emit(progress, new SetupCheckItem(GpuCheckId, SetupCheckState.Pending,
+            SetupMessage.Of("setup.check.gpu.label", "…", "…")));
+        Emit(progress, new SetupCheckItem(DiskCheckId, SetupCheckState.Pending,
+            SetupMessage.Of("setup.check.disk.label", "…")));
+        foreach (string host in NetworkProbeHosts)
+        {
+            Emit(progress, new SetupCheckItem(NetCheckId(host), SetupCheckState.Pending,
+                SetupMessage.Of("setup.check.net.label", host)));
+        }
+    }
+
+    /// <summary>
+    /// Counts entries of the official-models directory (0 when missing or unreadable) — the same
+    /// existence notion <see cref="SetupState.NeedsSetup"/> uses.
+    /// Đếm entry của thư mục official_models (0 khi thiếu hoặc không đọc được) — cùng định nghĩa tồn
+    /// tại mà <see cref="SetupState.NeedsSetup"/> dùng.
+    /// </summary>
+    private static int DefaultCountModelEntries(string dir)
+    {
+        try
+        {
+            return Directory.Exists(dir) ? Directory.EnumerateFileSystemEntries(dir).Count() : 0;
+        }
+        catch (Exception)
+        {
+            return 0;
+        }
+    }
+
     /// <summary>
     /// Flavor decision (spec §3.5, §5.7): a DISCRETE NVIDIA adapter whose driver reaches the cu129 floor
     /// (≥ 576.02) → GPU flavor with the "cu129" wheel; a discrete NVIDIA adapter present but none
     /// qualifies (old or unreadable driver) → CPU + the "driver chưa đủ mới" notice that quotes 576.02
     /// and offers updating the driver and re-running Setup for the GPU flavor; discrete AMD → CPU + the
     /// spec's AMD notice; nothing else matches → CPU + a light notice that never says "card AMD".
+    /// Also returns the checklist's gpu-row label (card name + driver display) for the progress channel.
     /// Quyết định flavor (spec §3.5, §5.7): adapter NVIDIA RỜI có driver đạt sàn cu129 (≥ 576.02) → GPU
     /// flavor kèm wheel "cu129"; có NVIDIA rời nhưng không adapter nào đạt (driver cũ hoặc không đọc được)
     /// → CPU + notice "driver chưa đủ mới" nêu mốc 576.02 và gợi ý cập nhật driver rồi chạy lại Setup để
     /// dùng bản GPU; AMD rời → CPU + notice AMD đúng spec; còn lại → CPU + notice nhẹ, tuyệt đối không
-    /// nhắc "card AMD".
+    /// nhắc "card AMD". Kèm label dòng gpu của checklist (tên card + driver hiển thị) cho kênh tiến độ.
     /// </summary>
-    private static (OcrFlavor Flavor, SetupMessage? Notice, string? CudaWheel) DecideFlavor(
+    private static (OcrFlavor Flavor, SetupMessage? Notice, string? CudaWheel, SetupMessage GpuLabel) DecideFlavor(
         IReadOnlyList<VideoAdapterInfo> adapters)
     {
         bool nvidiaDiscretePresent = false;
         bool amdDiscrete = false;
         string? bestWheel = null;
         int bestWheelRank = 0;
+        string? bestName = null;
+        string? bestDriver = null;
+        string? firstNvidiaName = null;
+        string? firstNvidiaDriver = null;
+        string? amdName = null;
+        string? amdDriver = null;
 
         foreach (VideoAdapterInfo adapter in adapters)
         {
@@ -334,6 +481,8 @@ public static class SystemCheck
             if (adapter.IsDiscrete && NameContains(adapter.Name, "NVIDIA"))
             {
                 nvidiaDiscretePresent = true;
+                firstNvidiaName ??= adapter.Name;
+                firstNvidiaDriver ??= adapter.DriverVersion;
                 string? wheel = CudaWheelForAdapter(adapter);
                 int rank = WheelRank(wheel);
                 // Optimus/nhiều card NVIDIA: giữ wheel có hạng CAO NHẤT (rank số nguyên, không so nhãn).
@@ -342,33 +491,53 @@ public static class SystemCheck
                 {
                     bestWheel = wheel;
                     bestWheelRank = rank;
+                    bestName = adapter.Name;
+                    bestDriver = adapter.DriverVersion;
                 }
             }
             else if (adapter.IsDiscrete && (NameContains(adapter.Name, "Radeon") || NameContains(adapter.Name, "AMD")))
             {
                 amdDiscrete = true;
+                amdName ??= adapter.Name;
+                amdDriver ??= adapter.DriverVersion;
             }
         }
 
         if (bestWheel is not null)
         {
-            return (OcrFlavor.Gpu, null, bestWheel);
+            return (OcrFlavor.Gpu, null, bestWheel,
+                SetupMessage.Of("setup.check.gpu.label", bestName ?? "NVIDIA", NvidiaDriverDisplay(bestDriver)));
         }
 
         if (nvidiaDiscretePresent)
         {
             // Nội dung notice (kèm mốc sàn driver) nằm ở key i18n setup.notice.oldDriver.
             // The notice text (including the driver floor) lives in the i18n key setup.notice.oldDriver.
-            return (OcrFlavor.Cpu, SetupMessage.Of("setup.notice.oldDriver"), null);
+            return (OcrFlavor.Cpu, SetupMessage.Of("setup.notice.oldDriver"), null,
+                SetupMessage.Of("setup.check.gpu.label",
+                    firstNvidiaName ?? "NVIDIA", NvidiaDriverDisplay(firstNvidiaDriver)));
         }
 
         if (amdDiscrete)
         {
-            return (OcrFlavor.Cpu, SetupMessage.Of("setup.notice.amdCpu"), null);
+            return (OcrFlavor.Cpu, SetupMessage.Of("setup.notice.amdCpu"), null,
+                SetupMessage.Of("setup.check.gpu.label", amdName ?? "AMD", amdDriver ?? "—"));
         }
 
-        return (OcrFlavor.Cpu, SetupMessage.Of("setup.notice.noGpu"), null);
+        return (OcrFlavor.Cpu, SetupMessage.Of("setup.notice.noGpu"), null,
+            SetupMessage.Of("setup.check.gpu.none"));
     }
+
+    /// <summary>
+    /// Formats an NVIDIA WMI driver string as the product version ("617.42"); unreadable strings fall
+    /// back to the raw value, a missing one to "—".
+    /// Định dạng chuỗi driver WMI của NVIDIA thành product version ("617.42"); không đọc được thì trả
+    /// chuỗi thô, thiếu hẳn thì "—".
+    /// </summary>
+    private static string NvidiaDriverDisplay(string? rawDriver) =>
+        TryGetNvidiaProductVersion(rawDriver, out (int Major, int Minor) productVersion)
+            ? $"{productVersion.Major}.{productVersion.Minor:00}"
+            : rawDriver ?? "—";
 
     private static string? CudaWheelForAdapter(VideoAdapterInfo adapter)
         => TryGetNvidiaProductVersion(adapter.DriverVersion, out var productVersion)

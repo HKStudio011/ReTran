@@ -16,7 +16,9 @@ namespace ReTran_App.Services.Setup;
 /// <param name="Steps">Completed/failed steps keyed by step name (<c>done</c>/<c>failed</c>); <see langword="null"/> for a fresh state. Các bước đã xong/thất bại, khóa theo tên bước (<c>done</c>/<c>failed</c>); <see langword="null"/> với state mới.</param>
 public sealed record SetupState(string? Flavor = null, string? Language = null, Dictionary<string, string>? Steps = null)
 {
-    private const string OfficialModelsSubdir = "official_models";
+    // internal để SystemCheck (checklist Checking) đếm model có sẵn theo cùng định nghĩa với NeedsSetup.
+    // internal so SystemCheck (Checking checklist) counts installed models by the same definition as NeedsSetup.
+    internal const string OfficialModelsSubdir = "official_models";
 
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {

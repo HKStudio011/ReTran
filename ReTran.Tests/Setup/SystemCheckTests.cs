@@ -441,6 +441,141 @@ public class SystemCheckTests
         Assert.True(result.VenvPresent);
     }
 
+    // ----- tiến độ từng mục cho checklist live (2026-11-15) -----
+
+    /// <summary>
+    /// Runs the check with a progress collector; defaults are the happy path (everything present,
+    /// all hosts reachable, zero models) so each test overrides only what it pins.
+    /// Chạy check kèm bộ thu tiến độ; mặc định là đường thuận lợi (mọi thứ có sẵn, mọi host tới được,
+    /// 0 model) để mỗi test chỉ ghi đè thứ nó ghim.
+    /// </summary>
+    private static (SystemCheckResult Result, List<SetupCheckItem> Events) RunWithProgress(
+        IVideoAdapterSource adapters,
+        long freeBytes = 500 * GB,
+        Func<string, bool>? isHostReachable = null,
+        bool uvPresent = true,
+        bool venvPresent = false,
+        Func<string, int>? countModelEntries = null,
+        Func<Architecture>? osArchitecture = null)
+    {
+        var events = new List<SetupCheckItem>();
+        SystemCheckResult result = SystemCheck.Run(
+            adapters,
+            _ => freeBytes,
+            isHostReachable ?? (_ => true),
+            FileSystem(uvPresent, venvPresent),
+            osArchitecture,
+            events.Add,
+            countModelEntries ?? (_ => 0));
+        return (result, events);
+    }
+
+    [Fact]
+    public void Progress_EmitsPendingThenRunningAndResults_InOrder()
+    {
+        (SystemCheckResult result, List<SetupCheckItem> events) = RunWithProgress(Adapters(NvidiaCurrent));
+
+        string[] expectedIds =
+        [
+            "files", "env", "models", "arch", "gpu", "disk",
+            "net:pypi.org", "net:www.paddlepaddle.org.cn", "net:github.com",
+        ];
+
+        // 9 event đầu: Pending cho toàn bộ, đúng thứ tự hiển thị.
+        Assert.Equal(expectedIds, events.Take(9).Select(e => e.Id));
+        Assert.All(events.Take(9), e => Assert.Equal(SetupCheckState.Pending, e.State));
+
+        // Phần còn lại: với mỗi mục theo đúng thứ tự đó — Running, rồi một kết quả.
+        List<SetupCheckItem> rest = events.Skip(9).ToList();
+        int next = 0;
+        foreach (string id in expectedIds)
+        {
+            Assert.Equal(id, rest[next].Id);
+            Assert.Equal(SetupCheckState.Running, rest[next].State);
+            next++;
+            Assert.Equal(id, rest[next].Id);
+            Assert.True(
+                rest[next].State is SetupCheckState.Ok or SetupCheckState.Warn or SetupCheckState.Fail,
+                $"mục {id} kết thúc ở trạng thái {rest[next].State}");
+            next++;
+        }
+        Assert.Equal(rest.Count, next);
+        Assert.Equal(SetupCheckState.Ok, rest[^1].State);
+        Assert.True(result.Ok);
+    }
+
+    [Fact]
+    public void UvMissing_WithWrongArch_ReportsUv_AndFilesItemFails()
+    {
+        // Cổng uv.exe chạy TRƯỚC cổng arch (2026-11-15: thứ tự chạy = thứ tự hiển thị checklist).
+        (SystemCheckResult result, List<SetupCheckItem> events) = RunWithProgress(
+            Adapters(NvidiaCurrent), uvPresent: false, osArchitecture: () => Architecture.Arm64);
+
+        Assert.False(result.Ok);
+        Assert.Equal("setup.fail.uvMissing", result.FailureReason!.Key);
+
+        SetupCheckItem filesFail = Assert.Single(events, e => e.Id == "files" && e.State == SetupCheckState.Fail);
+        Assert.Equal("setup.fail.uvMissing", filesFail.Detail!.Key);
+        Assert.Equal("files", events[^1].Id);
+        Assert.Equal(SetupCheckState.Fail, events[^1].State);
+        Assert.DoesNotContain(events, e => e.Id == "arch" && e.State != SetupCheckState.Pending);
+    }
+
+    [Fact]
+    public void Progress_EnvAndModels_ReportPresence()
+    {
+        (_, List<SetupCheckItem> envPresent) = RunWithProgress(Adapters(NvidiaCurrent), venvPresent: true);
+        Assert.Equal("setup.check.env.present",
+            Assert.Single(envPresent, e => e.Id == "env" && e.State == SetupCheckState.Ok).Detail!.Key);
+
+        (_, List<SetupCheckItem> envAbsent) = RunWithProgress(Adapters(NvidiaCurrent), venvPresent: false);
+        Assert.Equal("setup.check.env.absent",
+            Assert.Single(envAbsent, e => e.Id == "env" && e.State == SetupCheckState.Ok).Detail!.Key);
+
+        (_, List<SetupCheckItem> withModels) = RunWithProgress(Adapters(NvidiaCurrent), countModelEntries: _ => 3);
+        SetupCheckItem models3 = Assert.Single(withModels, e => e.Id == "models" && e.State == SetupCheckState.Ok);
+        Assert.Equal("setup.check.models.present", models3.Detail!.Key);
+        Assert.Equal(["3"], models3.Detail.Args);
+
+        (_, List<SetupCheckItem> noModels) = RunWithProgress(Adapters(NvidiaCurrent));
+        Assert.Equal("setup.check.models.absent",
+            Assert.Single(noModels, e => e.Id == "models" && e.State == SetupCheckState.Ok).Detail!.Key);
+    }
+
+    [Fact]
+    public void Progress_NetworkFail_StopsAtFailingHost_LastItemFails()
+    {
+        (SystemCheckResult result, List<SetupCheckItem> events) = RunWithProgress(
+            Adapters(NvidiaCurrent), isHostReachable: host => host != "github.com");
+
+        Assert.False(result.Ok);
+        Assert.Equal("setup.fail.network", result.FailureReason!.Key);
+        Assert.Equal(3, events.Count(e => e.Id.StartsWith("net:") && e.State == SetupCheckState.Running));
+        Assert.Equal("net:github.com", events[^1].Id);
+        Assert.Equal(SetupCheckState.Fail, events[^1].State);
+        Assert.Equal("setup.fail.network", events[^1].Detail!.Key);
+    }
+
+    [Fact]
+    public void Progress_GpuWarn_EmitsNoticeAsDetail()
+    {
+        (_, List<SetupCheckItem> events) = RunWithProgress(Adapters(NvidiaWithDriver(560, 76)));
+
+        SetupCheckItem gpu = Assert.Single(events, e => e.Id == "gpu" && e.State == SetupCheckState.Warn);
+        Assert.Equal("setup.notice.oldDriver", gpu.Detail!.Key);
+    }
+
+    [Fact]
+    public void Progress_CallbackThrows_CheckStillSucceeds()
+    {
+        // Kênh báo cáo lỗi không được phá kết quả check.
+        SystemCheckResult result = SystemCheck.Run(
+            Adapters(NvidiaCurrent), _ => 500 * GB, _ => true, FileSystem(),
+            progress: _ => throw new InvalidOperationException("callback boom"));
+
+        Assert.True(result.Ok);
+    }
+
     // ----- mapping + ladder helpers -----
 
     [Fact]
