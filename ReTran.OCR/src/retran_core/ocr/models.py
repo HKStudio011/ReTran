@@ -17,6 +17,7 @@ import os
 import shutil
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -44,6 +45,12 @@ _MIGRATED_MARKER = ".migrated"
 # this one.
 _RETRAN_LEGACY_MARKER = ".migrated-retran"
 
+# Sampler interval for in-flight download progress (wizard vòng 2 §9): paddlex exposes no byte
+# callbacks, so progress is estimated from the growing model directory twice a second.
+# Khoảng lấy mẫu cho tiến độ tải (wizard vòng 2 §9): paddlex không có callback byte, nên tiến độ
+# được ước lượng từ thư mục model đang lớn lên, hai lần mỗi giây.
+_PROGRESS_INTERVAL = 0.5
+
 Downloader = Callable[[str], Any]
 
 
@@ -66,6 +73,25 @@ def model_cache_dir() -> Path:
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
         return Path(base) / "ReTran" / "models"
     return Path.home() / ".paddlex"
+
+
+def _dir_bytes(path: Path) -> int:
+    """Total size of every file under `path`, 0 when it is missing or unreadable.
+
+    Args:
+        path: Directory to measure.
+
+    Returns:
+        Summed file sizes in bytes; filesystem errors are treated as 0.
+    """
+    total = 0
+    try:
+        for entry in path.rglob("*"):
+            if entry.is_file():
+                total += entry.stat().st_size
+    except OSError:
+        pass
+    return total
 
 
 def _paddlex_downloader(name: str) -> Path:
@@ -143,6 +169,7 @@ class ModelManager:
         self._downloader: Downloader = downloader or _paddlex_downloader
         self._lock = threading.Lock()
         self._threads: dict[str, threading.Thread] = {}
+        self._progress: dict[str, dict] = {}
         if engine is not None:
             self._det: str = engine.det_model
             self._rec: str = engine.rec_model
@@ -193,24 +220,30 @@ class ModelManager:
         """Return catalog states and the active pair for the UI.
 
         Returns:
-            ``{"catalog": [{name, kind, langs, sizeMb, installed, inUse}],
-            "active": {"det": ..., "rec": ...}}`` — one entry per catalog
-            model in catalog order. ``inUse`` is true only for the two
+            ``{"catalog": [{name, kind, langs, sizeMb, installed, inUse[,
+            progress]}], "active": {"det": ..., "rec": ...}}`` — one entry per
+            catalog model in catalog order. ``inUse`` is true only for the two
             models of the active pair; ``installed`` is derived from the
-            filesystem.
+            filesystem. ``progress`` (``receivedBytes``/``totalBytes``/
+            ``bytesPerSec``) appears only while a download is running and the
+            model directory is growing (wizard vòng 2 §9 — % + ETA).
         """
+        with self._lock:
+            progress_by_name = dict(self._progress)
         entries = []
         for m in self._catalog:
-            entries.append(
-                {
-                    "name": m.name,
-                    "kind": m.kind,
-                    "langs": list(m.langs),
-                    "sizeMb": m.size_mb,
-                    "installed": self._installed(m.name),
-                    "inUse": m.name == self._det or m.name == self._rec,
-                }
-            )
+            item = {
+                "name": m.name,
+                "kind": m.kind,
+                "langs": list(m.langs),
+                "sizeMb": m.size_mb,
+                "installed": self._installed(m.name),
+                "inUse": m.name == self._det or m.name == self._rec,
+            }
+            progress = progress_by_name.get(m.name)
+            if progress is not None:
+                item["progress"] = progress
+            entries.append(item)
         return {"catalog": entries, "active": {"det": self._det, "rec": self._rec}}
 
     def download(self, name: str) -> None:
@@ -249,6 +282,14 @@ class ModelManager:
     def _download_async(self, name: str) -> None:
         """Run one download to completion; keep the marker on failure."""
         model_dir = self._model_dir(name)
+        stop_monitor = threading.Event()
+        monitor = threading.Thread(
+            target=self._monitor_progress,
+            args=(name, model_dir, stop_monitor),
+            daemon=True,
+            name=f"model-progress-{name}",
+        )
+        monitor.start()
         try:
             if model_dir.exists():
                 # Leftovers of a failed attempt would make paddlex treat the
@@ -264,8 +305,42 @@ class ModelManager:
         else:
             self._marker(name).unlink(missing_ok=True)
         finally:
+            stop_monitor.set()
             with self._lock:
                 self._threads.pop(name, None)
+                self._progress.pop(name, None)
+
+    def _monitor_progress(self, name: str, model_dir: Path, stop: threading.Event) -> None:
+        """Sample the growing model directory so the UI can show percent and ETA.
+
+        paddlex exposes no byte callbacks, so progress is an estimate: bytes
+        measured under the model directory against the catalog's published
+        size. When the downloader stages files elsewhere the sample stays at 0
+        until the move — the UI then keeps its indeterminate bar.
+
+        Args:
+            name: Catalog model name.
+            model_dir: Directory paddlex fills for this model.
+            stop: Set when the download finished (or failed).
+        """
+        total = int(self._find(name).size_mb * 1024 * 1024)
+        received = 0
+        speed: Optional[float] = None
+        last = time.monotonic()
+        while not stop.wait(_PROGRESS_INTERVAL):
+            current = _dir_bytes(model_dir)
+            now = time.monotonic()
+            elapsed = now - last
+            if elapsed > 0 and current > received:
+                speed = (current - received) / elapsed
+            received = current
+            last = now
+            with self._lock:
+                self._progress[name] = {
+                    "receivedBytes": received,
+                    "totalBytes": total,
+                    "bytesPerSec": speed,
+                }
 
     def delete(self, name: str) -> None:
         """Delete one model's files from the cache.

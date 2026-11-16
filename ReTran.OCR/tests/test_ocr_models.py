@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import types
 from pathlib import Path
 
@@ -252,6 +253,37 @@ def test_download_handler_returns_accepted_without_blocking(cache):
     downloader.release.set()
     join_download(manager, REC)
     assert entry(manager, REC)["installed"]
+
+
+def test_progress_reported_while_downloading(cache):
+    """Progress (received/total/speed) appears mid-download and clears after.
+
+    totalBytes comes from the catalog's published size; receivedBytes is the
+    measured model-directory size (wizard vòng 2 §9: % + ETA).
+    """
+    downloader = BlockingDownloader(cache)
+    manager = ModelManager(cache, downloader=downloader)
+    assert "progress" not in entry(manager, REC)  # not downloading → no progress
+
+    manager.download(REC)
+    assert downloader.entered.wait(timeout=10)
+
+    deadline = time.monotonic() + 5
+    progress = None
+    while time.monotonic() < deadline and progress is None:
+        progress = entry(manager, REC).get("progress")
+        if progress is None:
+            time.sleep(0.05)
+
+    assert progress is not None
+    assert progress["receivedBytes"] == 1  # install() wrote a 1-byte file
+    assert progress["totalBytes"] == int(spec(REC).size_mb * 1024 * 1024)
+    assert progress["bytesPerSec"] is None or progress["bytesPerSec"] >= 0
+
+    downloader.release.set()
+    join_download(manager, REC)
+    assert entry(manager, REC)["installed"]
+    assert "progress" not in entry(manager, REC)  # cleared once the download ends
 
 
 # ---------------------------------------------------------------------------
