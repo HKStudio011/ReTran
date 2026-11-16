@@ -36,6 +36,23 @@
         .rt-setup-modal .setup-checks li.pending .mark { color: var(--rt-faint); }
         .rt-setup-modal .rt-spinner { width: 11px; height: 11px; border-radius: 50%; border: 1.6px solid var(--rt-line2); border-top-color: var(--rt-tally); display: inline-block; animation: rt-setup-spin 0.9s linear infinite; margin-top: 3px; }
         @@keyframes rt-setup-spin { to { transform: rotate(360deg); } }
+
+        @* Bảng chọn 2 màn mới (2026-11-16, mockup A1–A4/B1–B3): cùng họ biến với vỏ modal như checklist;
+           dòng đã cài dùng tag + checkbox disabled (chỉ khoá checkbox — radio vẫn chọn được). *@
+        .rt-setup-modal .setup-choices { list-style: none; margin: 10px 0 0; padding: 0 4px 0 0; display: grid; gap: 7px; max-height: 300px; overflow-y: auto; }
+        .rt-setup-modal .setup-choices li { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 8px; align-items: center; font-size: 12.5px; line-height: 1.45; color: var(--surface); }
+        .rt-setup-modal .setup-choices input[type=checkbox] { width: 15px; height: 15px; margin: 0; accent-color: var(--rt-tally); cursor: pointer; }
+        .rt-setup-modal .setup-choices input[type=checkbox]:disabled { cursor: default; opacity: .75; }
+        .rt-setup-modal .setup-choices .body { display: grid; gap: 1px; min-width: 0; align-self: start; padding-top: 1px; }
+        .rt-setup-modal .setup-choices .lbl { overflow-wrap: anywhere; }
+        .rt-setup-modal .setup-choices .det { color: var(--rt-dim); font-size: 11px; overflow-wrap: anywhere; font-family: var(--rt-mono); }
+        .rt-setup-modal .setup-choices .use { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--rt-dim); white-space: nowrap; cursor: pointer; }
+        .rt-setup-modal .setup-choices .use input[type=radio] { margin: 0; accent-color: var(--rt-tally); cursor: pointer; }
+        .rt-setup-modal .setup-choices .use.on { color: var(--rt-tally); font-weight: 600; }
+        .rt-setup-modal .tag-installed { display: inline-block; font-size: 10px; color: var(--rt-data); border: 1px solid currentColor; border-radius: 99px; padding: 0 6px; line-height: 1.7; white-space: nowrap; vertical-align: 1px; margin-left: 4px; }
+        .rt-setup-modal .setup-hintline { margin: 8px 0 0; color: var(--rt-dim); font-size: 11px; line-height: 1.6; }
+        .rt-setup-modal .setup-total { margin: 10px 0 0; color: var(--rt-dim); font-size: 11.5px; }
+        .rt-setup-modal .setup-warn { margin: 8px 0 0; color: var(--rt-danger); font-size: 11.5px; }
     </style>
 
     @* z-index 60 inline (lớn hơn z-50 của .rt-sheet): settings sheet đứng sau trong DOM nên với cùng
@@ -81,6 +98,49 @@
                     }
                     break;
 
+                case SetupStep.ChoosingOcrTier:
+                    @* Màn A (spec 2026-11-16 §4): tick nhiều tier (ít nhất 1); dòng đã cài tick sẵn + KHOÁ;
+                       radio "Dùng chính" chỉ trên dòng tick; tổng tải = phần còn thiếu. *@
+                    <p class="text-sm text-surface mb-1">@(L["setup.tier.title"]) <span class="rt-hint">@(L["setup.tier.hint"])</span></p>
+                    <ul class="setup-choices">
+                        @foreach (string tier in OcrModelChoices.Tiers)
+                        {
+                            bool locked = _tierLocked.Contains(tier);
+                            float missing = TierRowMissingMb(tier);
+                            <li>
+                                <input type="checkbox" checked="@_tierTicks.Contains(tier)" disabled="@locked" @onchange='() => ToggleTier(tier)' />
+                                <span class="body">
+                                    <span class="lbl">
+                                        @(L[$"setup.tier.name.{tier}"]) — @(L[$"setup.tier.desc.{tier}"])
+                                        @if (locked)
+                                        {
+                                            <span class="tag-installed">@(L["setup.tier.installed"])</span>
+                                        }
+                                    </span>
+                                    <span class="det">@TierMeta(tier)</span>
+                                    @if (missing > 0)
+                                    {
+                                        <span class="det">@(L.Fmt("setup.tier.willDownload", FormatMb(missing)))</span>
+                                    }
+                                </span>
+                                @if (_tierTicks.Contains(tier))
+                                {
+                                    <label class="@(_activeTierPick == tier ? "use on" : "use")">
+                                        <input type="radio" name="setup-tier" checked="@(_activeTierPick == tier)" @onchange='() => PickActiveTier(tier)' />
+                                        @(L["setup.tier.use"])
+                                    </label>
+                                }
+                            </li>
+                        }
+                    </ul>
+                    <p class="setup-total">@(L.Fmt("setup.tier.total", FormatMb(_tierTicks.Sum(TierRowMissingMb))))</p>
+                    @if (_tierTicks.Count == 0)
+                    {
+                        <p class="setup-warn">@(L["setup.tier.minOne"])</p>
+                    }
+                    <button type="button" class="rt-btn rt-btn-primary" disabled="@(_busy || _tierTicks.Count == 0)" @onclick="ConfirmOcrTierAsync">@(L["setup.next"])</button>
+                    break;
+
                 case SetupStep.ChoosingLanguage:
                     <p class="text-sm text-surface mb-1">@(L["setup.chooseLang"])</p>
                     <div class="flex flex-col gap-2">
@@ -100,6 +160,35 @@
                     </div>
                     <p class="rt-hint mb-3">@(L.Fmt("setup.totalSize", FormatMb(SelectedTotalMb)))</p>
                     <button type="button" class="rt-btn rt-btn-primary" disabled="@_busy" @onclick="ConfirmLanguageAsync">@(L["setup.confirm"])</button>
+                    break;
+
+                case SetupStep.ChoosingExtraLanguages:
+                    @* Màn B (spec 2026-11-16 §5): ngôn ngữ ngoài phủ v6 — tick nhiều hoặc để trống; rec đã
+                       cài tick sẵn + KHOÁ; chỉ tải sẵn, cặp chạy vẫn theo ngôn ngữ chính. *@
+                    <p class="text-sm text-surface mb-1">@(L["setup.extra.title"]) <span class="rt-hint">@(L["setup.extra.hint"])</span></p>
+                    <p class="setup-hintline">@(L["setup.extra.note"])</p>
+                    <ul class="setup-choices">
+                        @foreach (string lang in OcrModelChoices.LegacyLanguageCodes)
+                        {
+                            string? rec = OcrModelChoices.LegacyRecFor(lang);
+                            bool locked = rec is not null && _installedModels.Contains(rec);
+                            <li>
+                                <input type="checkbox" checked="@_extraTicks.Contains(lang)" disabled="@locked" @onchange='() => ToggleExtra(lang)' />
+                                <span class="body">
+                                    <span class="lbl">
+                                        @I18nStrings.LanguageName(lang)
+                                        @if (locked)
+                                        {
+                                            <span class="tag-installed">@(L["setup.tier.installed"])</span>
+                                        }
+                                    </span>
+                                    <span class="det">@rec · @FormatMb(OcrModelChoices.SizeMbOf(rec ?? string.Empty))</span>
+                                </span>
+                            </li>
+                        }
+                    </ul>
+                    <p class="setup-total">@(L.Fmt("setup.extra.total", FormatMb(_extraTicks.Sum(ExtraRowMissingMb))))</p>
+                    <button type="button" class="rt-btn rt-btn-primary" disabled="@_busy" @onclick="ConfirmExtraLanguagesAsync">@(L["setup.next"])</button>
                     break;
 
                 case SetupStep.ConfirmingFlavorSwitch:
@@ -172,12 +261,26 @@
     private string _selected = "auto";
     private readonly List<LangOption> _options = [];
 
+    // Màn A/B (2026-11-16): state nhập liệu, khởi tạo 1 lần mỗi lần VÀO màn từ preselect thực tế
+    // (filesystem + settings); rời màn reset để lượt rerun sau lấy lại đúng thực tế.
+    private bool _tierInit;
+    private bool _extraInit;
+    private List<string> _tierTicks = [];
+    private HashSet<string> _tierLocked = [];
+    private string _activeTierPick = "small";
+    private List<string> _extraTicks = [];
+    private HashSet<string> _installedModels = [];
+
     private string ModalTitle => L["setup.title"];
 
     protected override void OnInitialized()
     {
         Coordinator.Changed += OnChanged;
         BuildOptions();
+        // Modal được mount lại (điều hướng qua lại) trong khi wizard đang đứng sẵn ở màn A/B →
+        // khởi tạo state nhập liệu ngay; Changed có thể không bắn thêm khi đang pause.
+        if (Coordinator.Step == SetupStep.ChoosingOcrTier) EnsureTierState();
+        if (Coordinator.Step == SetupStep.ChoosingExtraLanguages) EnsureExtraState();
         if (!_wizardActive)
         {
             _selected = PreselectLanguage();
@@ -199,6 +302,12 @@
     private void OnChanged() => _ = InvokeAsync(() =>
     {
         if (!Coordinator.IsComplete) _wizardActive = true;
+        // Cặp hiển thị màn ngôn ngữ phụ thuộc tier "Dùng chính" — dựng lại mỗi lần vào màn.
+        if (Coordinator.Step == SetupStep.ChoosingLanguage) BuildOptions();
+        if (Coordinator.Step == SetupStep.ChoosingOcrTier) EnsureTierState();
+        else _tierInit = false;
+        if (Coordinator.Step == SetupStep.ChoosingExtraLanguages) EnsureExtraState();
+        else _extraInit = false;
         StateHasChanged();
     });
 
@@ -209,6 +318,7 @@
 
     private void BuildOptions()
     {
+        _options.Clear(); // vào lại màn (hoặc ActiveTier đổi) phải dựng lại theo tier hiện tại
         foreach (string code in CommonLangCodes)
             _options.Add(new LangOption(code, I18nStrings.LanguageName(code), PairFor(code)));
     }
@@ -220,28 +330,13 @@
         return _options.Any(o => o.Code == src) ? src : "auto";
     }
 
-    // Cặp model chỉ-để-hiển-thị — mirror routing recommended() của catalog.py: phủ v6 → cặp default;
-    // không thì rec legacy đầu tiên phủ mã đó. Cặp THẬT vẫn lấy từ ocr.models.recommend ở bước
-    // DownloadingModels — lệch hiển thị tối đa sai số dung lượng (spec §13).
-    private static (string Det, string Rec) PairFor(string code)
-    {
-        if (code == "auto" || Covers(OcrCatalogDisplay.DefaultRec, code))
-            return (OcrCatalogDisplay.DefaultDet, OcrCatalogDisplay.DefaultRec);
+    // Cặp model chỉ-để-hiển-thị cho màn ngôn ngữ: det của tier "Dùng chính" + rec của tier đó nếu v6
+    // phủ mã chọn, ngược lại rec legacy — cùng luật với bước Applying (OcrModelChoices).
+    private (string Det, string Rec) PairFor(string code) =>
+        OcrModelChoices.ExpectedPair(Coordinator.ActiveTier ?? "small", code);
 
-        OcrModelInfo? legacy = OcrCatalogDisplay.Models.FirstOrDefault(m =>
-            m.Kind == "rec" && !m.Name.StartsWith("PP-OCRv6", StringComparison.Ordinal) && m.Langs.Contains(code));
-        return legacy is null
-            ? (OcrCatalogDisplay.DefaultDet, OcrCatalogDisplay.DefaultRec)
-            : (OcrCatalogDisplay.DefaultDet, legacy.Name);
-    }
-
-    private static bool Covers(string recName, string code) =>
-        OcrCatalogDisplay.Models.FirstOrDefault(m => m.Name == recName)?.Langs.Contains(code) ?? false;
-
-    private static double SizeMb(string name) =>
-        OcrCatalogDisplay.Models.FirstOrDefault(m => m.Name == name)?.SizeMb ?? 0.0;
-
-    private static double TotalMb((string Det, string Rec) pair) => SizeMb(pair.Det) + SizeMb(pair.Rec);
+    private static double TotalMb((string Det, string Rec) pair) =>
+        OcrModelChoices.SizeMbOf(pair.Det) + OcrModelChoices.SizeMbOf(pair.Rec);
 
     private static string FormatMb(double mb) => $"{mb:0.#} MB";
 
@@ -289,6 +384,97 @@
         SetupStep.Applying => "setup.step.applying",
         _ => "setup.checking",
     };
+
+    // ── Màn A "Chọn model OCR" (2026-11-16) ───────────────────────────────────────────────────────
+
+    // Preselect từ thực tế: tier đủ det+rec đã cài → tick + khoá; máy sạch → Small tự do; activeTier
+    // theo cặp det trong settings khi tier đó được tick.
+    private void EnsureTierState()
+    {
+        if (_tierInit) return;
+        _tierInit = true;
+        _installedModels = OcrModelChoices.ScanInstalledModels(SetupPaths.ModelsDir);
+        TierPreselect preselect = OcrModelChoices.PreselectTiers(_installedModels, SettingsStore.Load().OcrDet);
+        _tierTicks = [.. preselect.Ticked];
+        _tierLocked = [.. preselect.Locked];
+        _activeTierPick = preselect.ActiveTier;
+    }
+
+    private static string TierMeta(string tier) =>
+        $"{OcrModelChoices.TierDet(tier)} · {OcrModelChoices.TierRec(tier)} · " +
+        FormatMb(OcrModelChoices.SizeMbOf(OcrModelChoices.TierDet(tier)) + OcrModelChoices.SizeMbOf(OcrModelChoices.TierRec(tier)));
+
+    private float TierRowMissingMb(string tier)
+    {
+        float missing = 0;
+        if (!_installedModels.Contains(OcrModelChoices.TierDet(tier))) missing += OcrModelChoices.SizeMbOf(OcrModelChoices.TierDet(tier));
+        if (!_installedModels.Contains(OcrModelChoices.TierRec(tier))) missing += OcrModelChoices.SizeMbOf(OcrModelChoices.TierRec(tier));
+        return missing;
+    }
+
+    private void ToggleTier(string tier)
+    {
+        if (_tierLocked.Contains(tier)) return; // đã cài → checkbox disabled; nhánh này chỉ là chốt an toàn
+        if (!_tierTicks.Remove(tier)) _tierTicks.Add(tier);
+        // Bỏ tick dòng đang giữ "Dùng chính" → dời sang dòng tick đầu theo thứ tự tiny → small → medium.
+        if (_tierTicks.Count > 0 && !_tierTicks.Contains(_activeTierPick))
+            _activeTierPick = OcrModelChoices.Tiers.First(_tierTicks.Contains);
+    }
+
+    private void PickActiveTier(string tier) => _activeTierPick = tier;
+
+    private async Task ConfirmOcrTierAsync()
+    {
+        if (_busy || _tierTicks.Count == 0) return;
+        _busy = true;
+        try
+        {
+            await Coordinator.ContinueWithOcrTierAsync(_tierTicks, _activeTierPick);
+        }
+        finally
+        {
+            _busy = false;
+            StateHasChanged();
+        }
+    }
+
+    // ── Màn B "Ngôn ngữ bổ sung" (2026-11-16) ─────────────────────────────────────────────────────
+
+    // Preselect từ thực tế: rec legacy đã cài → tick + khoá; tick/bỏ tự do cho các ngôn ngữ còn lại;
+    // không chọn gì vẫn hợp lệ.
+    private void EnsureExtraState()
+    {
+        if (_extraInit) return;
+        _extraInit = true;
+        _installedModels = OcrModelChoices.ScanInstalledModels(SetupPaths.ModelsDir);
+        _extraTicks = [.. OcrModelChoices.PreselectLegacyLanguages(_installedModels)];
+    }
+
+    private float ExtraRowMissingMb(string lang)
+    {
+        string? rec = OcrModelChoices.LegacyRecFor(lang);
+        return rec is null || _installedModels.Contains(rec) ? 0 : OcrModelChoices.SizeMbOf(rec);
+    }
+
+    private void ToggleExtra(string lang)
+    {
+        if (!_extraTicks.Remove(lang)) _extraTicks.Add(lang);
+    }
+
+    private async Task ConfirmExtraLanguagesAsync()
+    {
+        if (_busy) return;
+        _busy = true;
+        try
+        {
+            await Coordinator.ContinueWithExtraLanguagesAsync(_extraTicks);
+        }
+        finally
+        {
+            _busy = false;
+            StateHasChanged();
+        }
+    }
 
     private void SelectLanguage(string code) => _selected = code;
 
