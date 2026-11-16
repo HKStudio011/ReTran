@@ -156,6 +156,7 @@ public sealed class SetupCoordinator
     private readonly Func<SetupState> _stateFactory;
     private readonly Func<string, bool> _fileExists;
     private readonly Func<string, int>? _countModelEntries;
+    private readonly Func<string, bool> _modelDirExists;
     private readonly TimeSpan _modelPollInterval;
     private readonly TimeSpan _modelDownloadTimeout;
     private readonly ILogger<SetupCoordinator>? _logger;
@@ -182,6 +183,7 @@ public sealed class SetupCoordinator
     /// <param name="stateFactory">Loads <c>setup.json</c>; defaults to <c>SetupState.Load()</c>. Tests point it at a temp path. Đọc <c>setup.json</c>; mặc định <c>SetupState.Load()</c>. Test trỏ sang path temp.</param>
     /// <param name="fileExists">File-existence probe for uv.exe (Checking + VerifyingFiles); defaults to <see cref="File.Exists"/>. Probe tồn tại file cho uv.exe (Checking + VerifyingFiles); mặc định <see cref="File.Exists"/>.</param>
     /// <param name="countModelEntries">Counts installed models for the Checking checklist; defaults to the real models directory. Đếm model đã cài cho checklist Checking; mặc định là thư mục models thật.</param>
+    /// <param name="modelDirExists">File-system probe for one model's directory under the models cache, used by the rerun reconcile; defaults to <see cref="Directory.Exists"/>. Probe file-system cho thư mục của một model trong cache model, dùng bởi reconcile khi chạy lại; mặc định <see cref="Directory.Exists"/>.</param>
     /// <param name="modelPollInterval">Delay between <c>ocr.models.list</c> polls while models download; default 2 s. Khoảng cách giữa các lần poll <c>ocr.models.list</c> khi đang tải model; mặc định 2 s.</param>
     /// <param name="modelDownloadTimeout">Total window per download attempt; default 60 min. Cửa sổ tổng cho mỗi lượt tải; mặc định 60 phút.</param>
     /// <param name="logger">DI logger, or <see langword="null"/> to log nothing. Logger DI, hoặc <see langword="null"/> để không ghi log.</param>
@@ -197,6 +199,7 @@ public sealed class SetupCoordinator
         Func<SetupState>? stateFactory = null,
         Func<string, bool>? fileExists = null,
         Func<string, int>? countModelEntries = null,
+        Func<string, bool>? modelDirExists = null,
         TimeSpan? modelPollInterval = null,
         TimeSpan? modelDownloadTimeout = null,
         ILogger<SetupCoordinator>? logger = null)
@@ -219,6 +222,7 @@ public sealed class SetupCoordinator
         _stateFactory = stateFactory ?? (static () => SetupState.Load());
         _fileExists = fileExists ?? File.Exists;
         _countModelEntries = countModelEntries;
+        _modelDirExists = modelDirExists ?? Directory.Exists;
         _modelPollInterval = modelPollInterval ?? DefaultModelPollInterval;
         _modelDownloadTimeout = modelDownloadTimeout ?? DefaultModelDownloadTimeout;
         _logger = logger;
@@ -474,6 +478,7 @@ public sealed class SetupCoordinator
                 Steps = WithStep(_state.Steps, StepKey(SetupStep.ChoosingOcrTier), "done"),
             };
             _state.Save();
+            ReconcileMarkers();
 
             await ContinueAfterAnswersAsync(ct).ConfigureAwait(false);
         }
@@ -518,6 +523,7 @@ public sealed class SetupCoordinator
                 Steps = WithStep(_state.Steps, StepKey(SetupStep.ChoosingExtraLanguages), "done"),
             };
             _state.Save();
+            ReconcileMarkers();
 
             await RunPipelineAsync(SetupStep.VerifyingFiles, ct).ConfigureAwait(false);
         }
@@ -750,7 +756,7 @@ public sealed class SetupCoordinator
             SetupStep.VerifyingSidecar => await RunVerifySidecarStepAsync(ct).ConfigureAwait(false),
             SetupStep.DownloadingLlmRuntime => await RunDownloadLlmRuntimeStepAsync(ct).ConfigureAwait(false),
             SetupStep.DownloadingModels => await RunDownloadModelsStepAsync(ct).ConfigureAwait(false),
-            SetupStep.Applying => await RunApplyingStepAsync(ct).ConfigureAwait(false),
+            SetupStep.Applying => RunApplyingStep(),
             _ => throw new InvalidOperationException($"Không phải bước pipeline: {step}"),
         };
 
@@ -796,6 +802,7 @@ public sealed class SetupCoordinator
             Steps = WithStep(_state.Steps, StepKey(SetupStep.Checking), "done"),
         };
         _state.Save();
+        ReconcileMarkers();
         return StepOutcome.Done;
     }
 
@@ -1042,15 +1049,19 @@ public sealed class SetupCoordinator
     }
 
     /// <summary>
-    /// DownloadingModels: asks <c>ocr.models.recommend</c> for the pair of the chosen language,
-    /// downloads every member not reported installed (a <c>.partial</c> model counts as not installed —
-    /// the sidecar re-downloads it idempotently), then polls <c>ocr.models.list</c> every
-    /// <see cref="_modelPollInterval"/> until both are installed or the
+    /// DownloadingModels: downloads every model the saved answers need — the det+rec pair of every
+    /// ticked tier, the main language's legacy rec when v6 does not cover it, and each extra
+    /// language's legacy rec (<see cref="OcrModelChoices.NeededModels"/>) — skipping models the
+    /// catalog reports installed (a <c>.partial</c> model counts as not installed — the sidecar
+    /// re-downloads it idempotently), then polls <c>ocr.models.list</c> every
+    /// <see cref="_modelPollInterval"/> until ALL needed models are installed or the
     /// <see cref="_modelDownloadTimeout"/> window elapses (a fresh attempt follows).
-    /// DownloadingModels: hỏi <c>ocr.models.recommend</c> lấy cặp model của ngôn ngữ đã chọn, tải mọi
-    /// model chưa được báo installed (model có <c>.partial</c> coi như chưa cài — sidecar tải lại
-    /// idempotent), rồi poll <c>ocr.models.list</c> mỗi <see cref="_modelPollInterval"/> cho tới khi cả
-    /// hai installed hoặc hết cửa sổ <see cref="_modelDownloadTimeout"/> (lượt thử mới sẽ chạy).
+    /// DownloadingModels: tải mọi model mà câu trả lời đã lưu cần — cặp det+rec của từng tier được
+    /// tick, rec legacy của ngôn ngữ chính khi ngoài phủ v6, và rec legacy của từng ngôn ngữ bổ sung
+    /// (<see cref="OcrModelChoices.NeededModels"/>) — bỏ qua model catalog báo đã cài (model có
+    /// <c>.partial</c> coi như chưa cài — sidecar tải lại idempotent), rồi poll <c>ocr.models.list</c>
+    /// mỗi <see cref="_modelPollInterval"/> cho tới khi MỌI model cần đều installed hoặc hết cửa sổ
+    /// <see cref="_modelDownloadTimeout"/> (lượt thử mới sẽ chạy).
     /// </summary>
     private async Task<StepOutcome> RunDownloadModelsStepAsync(CancellationToken ct)
     {
@@ -1058,13 +1069,10 @@ public sealed class SetupCoordinator
         {
             try
             {
-                JsonNode? recommend = await _bridge
-                    .CallAsync("ocr.models.recommend", new JsonObject { ["src"] = LanguageCode }, ct)
-                    .ConfigureAwait(false);
-                if (TryParsePair(recommend) is not (string det, string rec)) continue;
+                IReadOnlyList<string> needed = NeededModelsForState();
 
                 JsonNode? list = await _bridge.CallAsync("ocr.models.list", null, ct).ConfigureAwait(false);
-                foreach (string name in new[] { det, rec })
+                foreach (string name in needed)
                 {
                     if (!IsInstalledInCatalog(list, name))
                         await _bridge
@@ -1077,7 +1085,7 @@ public sealed class SetupCoordinator
                 while (true)
                 {
                     list = await _bridge.CallAsync("ocr.models.list", null, ct).ConfigureAwait(false);
-                    if (IsInstalledInCatalog(list, det) && IsInstalledInCatalog(list, rec)) break;
+                    if (needed.All(name => IsInstalledInCatalog(list, name))) break;
                     await Task.Delay(_modelPollInterval, window.Token).ConfigureAwait(false);
                 }
 
@@ -1098,29 +1106,38 @@ public sealed class SetupCoordinator
     }
 
     /// <summary>
-    /// Applying (Review Focus #5 — ALWAYS runs, even when nothing was downloaded): re-asks
-    /// <c>ocr.models.recommend</c> for the pair and writes it into settings via
-    /// <see cref="AppSettingsService.Save"/>.
-    /// Applying (Review Focus #5 — LUÔN chạy, kể cả khi không tải model nào): hỏi lại
-    /// <c>ocr.models.recommend</c> lấy cặp và ghi vào settings qua <see cref="AppSettingsService.Save"/>.
+    /// The models the download step must ensure for the saved answers, with the coordinator's
+    /// defensive fallback (small tier, no extras) when a field is missing.
+    /// Các model bước tải phải đảm bảo theo câu trả lời đã lưu, kèm fallback phòng thủ của
+    /// coordinator (tier small, không extra) khi thiếu field.
     /// </summary>
-    private async Task<StepOutcome> RunApplyingStepAsync(CancellationToken ct)
+    private IReadOnlyList<string> NeededModelsForState() =>
+        OcrModelChoices.NeededModels(
+            _state.Tiers ?? ["small"],
+            _state.ActiveTier ?? "small",
+            LanguageCode,
+            _state.ExtraLangs ?? []);
+
+    /// <summary>
+    /// Applying (Review Focus #5 — ALWAYS runs, even when nothing was downloaded): computes the pair
+    /// from the saved answers (<see cref="OcrModelChoices.ExpectedPair"/>) and writes it into settings
+    /// via <see cref="AppSettingsService.Save"/>. No RPC — the pair is pure mirror data.
+    /// Applying (Review Focus #5 — LUÔN chạy, kể cả khi không tải model nào): tính cặp từ câu trả lời
+    /// đã lưu (<see cref="OcrModelChoices.ExpectedPair"/>) và ghi vào settings qua
+    /// <see cref="AppSettingsService.Save"/>. Không RPC — cặp là dữ liệu mirror thuần.
+    /// </summary>
+    private StepOutcome RunApplyingStep()
     {
         for (int attempt = 1; attempt <= MaxRetries + 1; attempt++)
         {
             try
             {
-                JsonNode? recommend = await _bridge
-                    .CallAsync("ocr.models.recommend", new JsonObject { ["src"] = LanguageCode }, ct)
-                    .ConfigureAwait(false);
-                if (TryParsePair(recommend) is not (string det, string rec)) continue;
-
+                (string det, string rec) = OcrModelChoices.ExpectedPair(_state.ActiveTier ?? "small", LanguageCode);
                 AppSettings settings = _settings.Load();
                 _settings.Save(settings with { OcrDet = det, OcrRec = rec });
                 MarkStepDone(SetupStep.Applying);
                 return StepOutcome.Done;
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
                 _logger?.LogWarning(ex, "setup: áp dụng settings lần {Attempt}/{Total} thất bại", attempt, MaxRetries + 1);
@@ -1129,6 +1146,55 @@ public sealed class SetupCoordinator
 
         Error = SetupMessage.Of("setup.fail.applying", (MaxRetries + 1).ToString());
         return StepOutcome.Failed;
+    }
+
+    /// <summary>
+    /// Whether the named model's directory exists under the models cache — a pure file-system check
+    /// that also runs before the sidecar is alive.
+    /// Thư mục của model tên này có nằm trong cache model không — kiểm tra file-system thuần, chạy
+    /// được cả trước khi sidecar sống.
+    /// </summary>
+    private bool ModelInstalled(string modelName) =>
+        _modelDirExists(Path.Combine(SetupPaths.ModelsDir, SetupState.OfficialModelsSubdir, modelName));
+
+    /// <summary>
+    /// Light consistency pass run at the end of Checking and after every saved answer: when a needed
+    /// model is gone from disk the download step must run again, and when the settings pair diverges
+    /// from the stored answers the applying step must run again. A machine where everything matches
+    /// keeps every marker, so a rerun stays a fast pass-through. Persists only when it cleared
+    /// something; a no-op until both answer fields exist.
+    /// Lượt so khớp nhẹ chạy cuối bước Checking và sau mỗi câu trả lời được lưu: model cần mà biến mất
+    /// khỏi đĩa ⇒ bước tải phải chạy lại; cặp trong settings lệch với câu trả lời đã lưu ⇒ bước áp
+    /// dụng phải chạy lại. Máy khớp hết giữ nguyên mọi marker nên rerun đi qua nhanh. Chỉ lưu khi có
+    /// xoá gì; không làm gì khi còn thiếu field trả lời.
+    /// </summary>
+    private void ReconcileMarkers()
+    {
+        if (_state.Tiers is null || _state.ExtraLangs is null) return;
+        if (_state.Steps is null) return;
+
+        var steps = new Dictionary<string, string>(_state.Steps);
+        bool changed = false;
+
+        if (NeededModelsForState().Any(name => !ModelInstalled(name))
+            && steps.Remove(StepKey(SetupStep.DownloadingModels)))
+        {
+            changed = true;
+        }
+
+        (string det, string rec) = OcrModelChoices.ExpectedPair(_state.ActiveTier ?? "small", LanguageCode);
+        AppSettings settings = _settings.Load();
+        if ((settings.OcrDet != det || settings.OcrRec != rec)
+            && steps.Remove(StepKey(SetupStep.Applying)))
+        {
+            changed = true;
+        }
+
+        if (changed)
+        {
+            _state = _state with { Steps = steps };
+            _state.Save();
+        }
     }
 
     // ── state transitions & helpers ────────────────────────────────────────────────────────────────
@@ -1234,17 +1300,6 @@ public sealed class SetupCoordinator
         result[key] = value;
         return result;
     }
-
-    /// <summary>
-    /// The (det, rec) names out of an <c>ocr.models.recommend</c> result; null when malformed.
-    /// Cặp (det, rec) từ kết quả <c>ocr.models.recommend</c>; null khi sai định dạng.
-    /// </summary>
-    private static (string Det, string Rec)? TryParsePair(JsonNode? recommend) =>
-        recommend is JsonObject obj
-            && obj["det"] is JsonValue detValue && detValue.TryGetValue<string>(out string? det) && !string.IsNullOrEmpty(det)
-            && obj["rec"] is JsonValue recValue && recValue.TryGetValue<string>(out string? rec) && !string.IsNullOrEmpty(rec)
-            ? (det, rec)
-            : null;
 
     /// <summary>
     /// Whether the catalog entry for <paramref name="name"/> reports installed; false when the list is

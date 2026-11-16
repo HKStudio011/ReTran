@@ -81,11 +81,13 @@ public class SetupCoordinatorTests : IDisposable
     /// polling runs at 10 ms so download tests finish in milliseconds. The host-reachability seam
     /// answers "reachable" by default; tests may replace it to hold the Checking step open. The
     /// download window (shared by the OCR-model and llm-runtime steps) defaults to 5 s; a test can
-    /// shrink it to keep a never-finishing download cheap.
+    /// shrink it to keep a never-finishing download cheap. The model-dir seam reports every model
+    /// installed by default, so reconcile-driven reruns stay a no-op unless a test opts in.
     /// Dựng coordinator trên các fake chung; state và settings trỏ file temp, poll model chạy 10 ms
     /// để test download kết thúc trong vài mili-giây. Seam probe mạng mặc định trả lời "tới được";
     /// test có thể thay nó để giữ bước Checking mở ra. Cửa sổ tải (dùng chung cho bước tải model OCR
-    /// và runtime LLM) mặc định 5 s; test có thể thu nhỏ để lượt tải không bao giờ xong chạy rẻ.
+    /// và runtime LLM) mặc định 5 s; test có thể thu nhỏ để lượt tải không bao giờ xong chạy rẻ. Seam
+    /// dò thư mục model mặc định báo mọi model đã cài, nên reconcile chỉ hành động khi test tự chỉ định.
     /// </summary>
     private SetupCoordinator NewCoordinator(
         IVideoAdapterSource? adapters = null,
@@ -93,7 +95,8 @@ public class SetupCoordinatorTests : IDisposable
         Func<string, bool>? isHostReachable = null,
         Func<string, bool>? fileExists = null,
         TimeSpan? modelDownloadTimeout = null,
-        Func<string, int>? countModelEntries = null)
+        Func<string, int>? countModelEntries = null,
+        Func<string, bool>? modelDirExists = null)
     {
         var coordinator = new SetupCoordinator(
             adapters ?? Adapters(NvidiaCurrent),
@@ -106,6 +109,7 @@ public class SetupCoordinatorTests : IDisposable
             stateFactory: () => SetupState.Load(_setupJson),
             fileExists: fileExists ?? (_ => true),
             countModelEntries: countModelEntries ?? (_ => 0),
+            modelDirExists: modelDirExists ?? (_ => true),
             modelPollInterval: TimeSpan.FromMilliseconds(10),
             modelDownloadTimeout: modelDownloadTimeout ?? TimeSpan.FromSeconds(5));
         coordinator.Changed += () => Interlocked.Increment(ref _changedCount);
@@ -113,6 +117,17 @@ public class SetupCoordinatorTests : IDisposable
     }
 
     private void WriteSetupJson(string json) => File.WriteAllText(_setupJson, json);
+
+    private void WriteSettingsJson(string json) => File.WriteAllText(_settingsJson, json);
+
+    /// <summary>
+    /// True when a model-dir probe path points AT the named model's directory (the probe receives the
+    /// full combined path, not the bare model name).
+    /// Đúng khi path của seam dò trỏ ĐÚNG thư mục model tên đó (seam nhận full path đã ghép, không
+    /// phải tên model trần).
+    /// </summary>
+    private static bool HasModelDir(string path, string name) =>
+        path.EndsWith(Path.DirectorySeparatorChar + name, StringComparison.Ordinal);
 
     private SetupState ReadSetupJson() => SetupState.Load(_setupJson);
 
@@ -537,6 +552,271 @@ public class SetupCoordinatorTests : IDisposable
         WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small","medium"],"activeTier":"medium","extraLangs":[]}""");
 
         Assert.Equal("medium", NewCoordinator().ActiveTier);
+    }
+
+    // ── Tải theo lựa chọn + Applying + reconcile (2026-11-16, Review Focus #3/#4/#5) ───────────────
+
+    [Fact]
+    public async Task DownloadSet_TiersLegacyMainExtras()
+    {
+        // Tick small+medium, main ko (ngoài phủ v6), extra ru → tải đúng bộ 6 tên, đúng thứ tự.
+        WriteSetupJson("""
+            {
+              "flavor": "cpu",
+              "language": "ko",
+              "tiers": ["small", "medium"],
+              "activeTier": "small",
+              "extraLangs": ["ru"]
+            }
+            """);
+        var coordinator = NewCoordinator(adapters: Adapters()); // máy không NVIDIA → flavor CPU
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Equal(
+            new[]
+            {
+                "PP-OCRv6_small_det", "PP-OCRv6_small_rec",
+                "PP-OCRv6_medium_det", "PP-OCRv6_medium_rec",
+                "korean_PP-OCRv5_mobile_rec",
+                "cyrillic_PP-OCRv5_mobile_rec",
+            },
+            _bridge.Downloaded);
+    }
+
+    [Fact]
+    public async Task DownloadSet_SkipsInstalled()
+    {
+        // Model có cả trên đĩa (seam) lẫn trong catalog (RPC) → không gọi download.
+        WriteSetupJson("""{"flavor":"cpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[]}""");
+        _bridge.Installed.Add(FakeCoreBridge.DetModel);
+        _bridge.Installed.Add(FakeCoreBridge.RecModel);
+        var coordinator = NewCoordinator(
+            adapters: Adapters(),
+            modelDirExists: path => HasModelDir(path, FakeCoreBridge.DetModel) || HasModelDir(path, FakeCoreBridge.RecModel));
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Empty(_bridge.Downloaded);
+    }
+
+    [Fact]
+    public async Task Applying_TierAwarePair()
+    {
+        // auto + activeTier medium → cặp medium/medium; main ngoài phủ (ko) + tiny → tiny_det + korean rec.
+        WriteSetupJson("""{"flavor":"cpu","language":"auto","tiers":["medium"],"activeTier":"medium","extraLangs":[]}""");
+        var coordinator = NewCoordinator(adapters: Adapters());
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        AppSettings settings = _settings.Load();
+        Assert.Equal("PP-OCRv6_medium_det", settings.OcrDet);
+        Assert.Equal("PP-OCRv6_medium_rec", settings.OcrRec);
+
+        WriteSetupJson("""{"flavor":"cpu","language":"ko","tiers":["tiny"],"activeTier":"tiny","extraLangs":[]}""");
+        var second = NewCoordinator(adapters: Adapters());
+
+        await second.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        settings = _settings.Load();
+        Assert.Equal("PP-OCRv6_tiny_det", settings.OcrDet);
+        Assert.Equal("korean_PP-OCRv5_mobile_rec", settings.OcrRec);
+    }
+
+    [Fact]
+    public async Task Reconcile_MissingModel_ClearsDownload()
+    {
+        // Máy đã setup đủ marker; riêng medium_rec biến mất khỏi đĩa → chỉ bước tải chạy lại (tải bù).
+        WriteSetupJson("""
+            {
+              "flavor": "cpu",
+              "language": "vi",
+              "tiers": ["small", "medium"],
+              "activeTier": "medium",
+              "extraLangs": [],
+              "steps": {
+                "checking": "done",
+                "choosingocrtier": "done",
+                "choosinglanguage": "done",
+                "choosingextralanguages": "done",
+                "verifyingfiles": "done",
+                "syncing": "done",
+                "verifyingsidecar": "done",
+                "downloadingllmruntime": "done",
+                "downloadingmodels": "done",
+                "applying": "done"
+              }
+            }
+            """);
+        WriteSettingsJson("""{"provider":"google","src":"auto","dst":"vi","ocrDet":"PP-OCRv6_medium_det","ocrRec":"PP-OCRv6_medium_rec"}""");
+        var coordinator = NewCoordinator(
+            adapters: Adapters(),
+            modelDirExists: path => !HasModelDir(path, "PP-OCRv6_medium_rec"));
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Contains("PP-OCRv6_medium_rec", _bridge.Downloaded);
+        Assert.Empty(_uvFake.SyncCalls);              // các bước khác vẫn skip
+        Assert.Empty(_bridge.LlmRuntimeDownloads);
+        Assert.Equal("done", ReadSetupJson().Steps!["downloadingmodels"]);
+    }
+
+    [Fact]
+    public async Task Reconcile_PairMismatch_ClearsApplying()
+    {
+        // Settings đang trỏ tiny, answers nói medium (model đủ trên đĩa) → chỉ bước áp dụng chạy lại.
+        WriteSetupJson("""
+            {
+              "flavor": "cpu",
+              "language": "vi",
+              "tiers": ["small", "medium"],
+              "activeTier": "medium",
+              "extraLangs": [],
+              "steps": {
+                "checking": "done",
+                "choosingocrtier": "done",
+                "choosinglanguage": "done",
+                "choosingextralanguages": "done",
+                "verifyingfiles": "done",
+                "syncing": "done",
+                "verifyingsidecar": "done",
+                "downloadingllmruntime": "done",
+                "downloadingmodels": "done",
+                "applying": "done"
+              }
+            }
+            """);
+        WriteSettingsJson("""{"provider":"google","src":"auto","dst":"vi","ocrDet":"PP-OCRv6_tiny_det","ocrRec":"PP-OCRv6_tiny_rec"}""");
+        var coordinator = NewCoordinator(adapters: Adapters());
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        AppSettings settings = _settings.Load();
+        Assert.Equal("PP-OCRv6_medium_det", settings.OcrDet);
+        Assert.Equal("PP-OCRv6_medium_rec", settings.OcrRec);
+        Assert.Empty(_bridge.Downloaded); // model đủ (seam mặc định true) → không tải gì
+    }
+
+    [Fact]
+    public async Task Reconcile_AllPresent_NoClears()
+    {
+        // Khớp hết: đủ model + cặp đúng → không clear marker nào; lượt chạy đi thẳng (pass-through).
+        WriteSetupJson("""
+            {
+              "flavor": "cpu",
+              "language": "vi",
+              "tiers": ["small"],
+              "activeTier": "small",
+              "extraLangs": [],
+              "steps": {
+                "checking": "done",
+                "choosingocrtier": "done",
+                "choosinglanguage": "done",
+                "choosingextralanguages": "done",
+                "verifyingfiles": "done",
+                "syncing": "done",
+                "verifyingsidecar": "done",
+                "downloadingllmruntime": "done",
+                "downloadingmodels": "done",
+                "applying": "done"
+              }
+            }
+            """);
+        var coordinator = NewCoordinator(adapters: Adapters());
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        SetupState state = ReadSetupJson();
+        Assert.Equal("done", state.Steps!["downloadingmodels"]);
+        Assert.Equal("done", state.Steps["applying"]);
+        Assert.Empty(_bridge.Calls);
+    }
+
+    [Fact]
+    public async Task ContinueExtra_NewChoices_ClearsMarkers_AndDownloads()
+    {
+        // Máy đã setup, file cũ chưa có extraLangs → user tick thêm ko ở màn B: reconcile sau khi lưu
+        // phải clear downloadingmodels để rec Hàn được tải bù; cặp đang chạy giữ nguyên.
+        WriteSetupJson("""
+            {
+              "flavor": "cpu",
+              "language": "vi",
+              "tiers": ["small"],
+              "activeTier": "small",
+              "steps": {
+                "checking": "done",
+                "choosingocrtier": "done",
+                "choosinglanguage": "done",
+                "verifyingfiles": "done",
+                "syncing": "done",
+                "verifyingsidecar": "done",
+                "downloadingllmruntime": "done",
+                "downloadingmodels": "done",
+                "applying": "done"
+              }
+            }
+            """);
+        _bridge.Installed.Add(FakeCoreBridge.DetModel);
+        _bridge.Installed.Add(FakeCoreBridge.RecModel);
+        var coordinator = NewCoordinator(
+            adapters: Adapters(),
+            modelDirExists: path => !HasModelDir(path, "korean_PP-OCRv5_mobile_rec"));
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.ChoosingExtraLanguages, coordinator.Step);
+
+        await coordinator.ContinueWithExtraLanguagesAsync(["ko"], TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Equal(["korean_PP-OCRv5_mobile_rec"], _bridge.Downloaded); // chỉ tải phần thiếu
+        AppSettings settings = _settings.Load();
+        Assert.Equal(FakeCoreBridge.DetModel, settings.OcrDet);          // cặp không đổi
+        Assert.Equal(FakeCoreBridge.RecModel, settings.OcrRec);
+    }
+
+    [Fact]
+    public async Task ContinueTier_NewChoices_ClearMarkers_AndDownload()
+    {
+        // Biến thể ở màn A: file cũ thiếu tiers (extraLangs đã trả lời), user tick thêm medium →
+        // reconcile sau khi lưu clear cả downloadingmodels lẫn applying để tải bù + áp cặp mới.
+        WriteSetupJson("""
+            {
+              "flavor": "cpu",
+              "language": "vi",
+              "extraLangs": [],
+              "steps": {
+                "checking": "done",
+                "choosinglanguage": "done",
+                "verifyingfiles": "done",
+                "syncing": "done",
+                "verifyingsidecar": "done",
+                "downloadingllmruntime": "done",
+                "downloadingmodels": "done",
+                "applying": "done"
+              }
+            }
+            """);
+        WriteSettingsJson("""{"provider":"google","src":"auto","dst":"vi","ocrDet":"PP-OCRv6_small_det","ocrRec":"PP-OCRv6_small_rec"}""");
+        var coordinator = NewCoordinator(
+            adapters: Adapters(),
+            modelDirExists: path => !path.Contains("PP-OCRv6_medium", StringComparison.Ordinal));
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.ChoosingOcrTier, coordinator.Step);
+
+        await coordinator.ContinueWithOcrTierAsync(["small", "medium"], "medium", TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Contains("PP-OCRv6_medium_det", _bridge.Downloaded);
+        Assert.Contains("PP-OCRv6_medium_rec", _bridge.Downloaded);
+        AppSettings settings = _settings.Load();
+        Assert.Equal("PP-OCRv6_medium_det", settings.OcrDet);
+        Assert.Equal("PP-OCRv6_medium_rec", settings.OcrRec);
     }
 
     // ── Amendment A2: đổi flavor phải được user xác nhận ──────────────────────────────────────────
@@ -1140,6 +1420,17 @@ public class SetupCoordinatorTests : IDisposable
         public const string DetModel = "PP-OCRv6_small_det";
         public const string RecModel = "PP-OCRv6_small_rec";
 
+        /// <summary>All catalog names the fake reports — the real 16-entry catalog shape. Tất cả tên catalog fake báo — đúng hình dạng 16 mục như thật.</summary>
+        private static readonly string[] CatalogNames =
+        [
+            "PP-OCRv6_tiny_det", "PP-OCRv6_small_det", "PP-OCRv6_medium_det",
+            "PP-OCRv6_tiny_rec", "PP-OCRv6_small_rec", "PP-OCRv6_medium_rec",
+            "korean_PP-OCRv5_mobile_rec", "cyrillic_PP-OCRv5_mobile_rec", "arabic_PP-OCRv5_mobile_rec",
+            "th_PP-OCRv5_mobile_rec", "ta_PP-OCRv5_mobile_rec", "te_PP-OCRv5_mobile_rec",
+            "devanagari_PP-OCRv5_mobile_rec", "el_PP-OCRv5_mobile_rec",
+            "eslav_PP-OCRv5_mobile_rec", "chinese_cht_PP-OCRv3_mobile_rec",
+        ];
+
         public List<(string Method, JsonNode? Params)> Calls { get; } = [];
 
         public HashSet<string> Installed { get; } = [];
@@ -1217,7 +1508,7 @@ public class SetupCoordinatorTests : IDisposable
         private JsonNode BuildList()
         {
             var catalog = new JsonArray();
-            foreach (string name in new[] { DetModel, RecModel })
+            foreach (string name in CatalogNames)
             {
                 catalog.Add(new JsonObject
                 {
