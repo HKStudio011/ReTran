@@ -1209,17 +1209,26 @@ public sealed class SetupCoordinator
     /// <see cref="_modelDownloadTimeout"/> window elapses (then a fresh attempt follows). Failure is
     /// soft like DownloadingModels: the failure popup offers retry/skip-for-session and Settings can
     /// download the runtime later.
-    /// DownloadingLlmRuntime (spec 2026-11-14 D13): runtime llama.cpp không bao giờ nằm trong zip
-    /// release, nên wizard cài nó ở đây. Flavor runtime theo máy — flavor wheel GPU (đã qua cổng
-    /// capability ở VerifyingSidecar) ⇒ <c>cuda</c>, còn lại <c>cpu</c>. Runtime đã có trên đĩa thì
-    /// đánh dấu bước xong bằng một lời gọi status ("chạy lại setup" đi thẳng qua); ngược lại gọi
-    /// <c>llm.runtime.download</c> rồi poll <c>llm.runtime.status</c> mỗi
+    /// DownloadingLlmRuntime (spec 2026-11-14 D13 / vòng 2 spec §7): runtime llama.cpp không bao giờ
+    /// nằm trong zip release, nên wizard cài nó ở đây — nhưng chỉ khi bước 4 có chọn model LLM; bước 4
+    /// để trống thì bước này tự đánh dấu done mà không gọi RPC nào. Flavor runtime theo máy — flavor
+    /// wheel GPU (đã qua cổng capability ở VerifyingSidecar) ⇒ <c>cuda</c>, còn lại <c>cpu</c>. Runtime
+    /// đã có trên đĩa: so tag với bản mới nhất Core tra được (<c>llm.runtime.check</c>) — cũ thì
+    /// tải/cập nhật, mới nhất hoặc mất mạng thì đánh dấu xong ("chạy lại setup" đi thẳng qua); chưa có
+    /// thì gọi <c>llm.runtime.download</c> rồi poll <c>llm.runtime.status</c> mỗi
     /// <see cref="_modelPollInterval"/> cho tới khi installed hoặc hết cửa sổ
     /// <see cref="_modelDownloadTimeout"/> (lượt thử mới sẽ chạy). Thất bại là mềm như
     /// DownloadingModels: popup màn lỗi cho retry/bỏ qua phiên, và Settings có thể tải runtime sau.
     /// </summary>
     private async Task<StepOutcome> RunDownloadLlmRuntimeStepAsync(CancellationToken ct)
     {
+        // Bước 4 để trống ⇒ bỏ qua thật: không cần runtime, không gọi RPC nào (spec §7).
+        if (_state.LlmModels is null or { Count: 0 })
+        {
+            MarkStepDone(SetupStep.DownloadingLlmRuntime);
+            return StepOutcome.Done;
+        }
+
         string runtimeFlavor = Flavor == OcrFlavor.Gpu ? "cuda" : "cpu";
         for (int attempt = 1; attempt <= MaxRetries + 1; attempt++)
         {
@@ -1227,8 +1236,14 @@ public sealed class SetupCoordinator
             {
                 if (await IsLlmRuntimeInstalledAsync(ct).ConfigureAwait(false))
                 {
-                    MarkStepDone(SetupStep.DownloadingLlmRuntime);
-                    return StepOutcome.Done;
+                    // Đã cài: chỉ cập nhật khi Core tra được bản mới hơn (mất mạng ⇒ coi bản hiện tại là ok).
+                    (string? current, string? latest) = await CheckLlmRuntimeAsync(ct).ConfigureAwait(false);
+                    if (current is null || latest is null || current == latest)
+                    {
+                        MarkStepDone(SetupStep.DownloadingLlmRuntime);
+                        return StepOutcome.Done;
+                    }
+                    _logger?.LogInformation("setup: runtime llama.cpp tag {Current} cũ hơn {Latest} — cập nhật", current, latest);
                 }
 
                 await _bridge
@@ -1265,6 +1280,30 @@ public sealed class SetupCoordinator
     /// <c>llm.runtime.status</c> có báo runtime đã cài không (binary server tồn tại trên đĩa); field
     /// thiếu hoặc sai định dạng coi như chưa cài.
     /// </summary>
+    /// <summary>
+    /// The (current, latest) llama.cpp tags from <c>llm.runtime.check</c>; (null, null) when the call
+    /// fails (offline) so a network problem never blocks the wizard.
+    /// Cặp tag llama.cpp (current, latest) từ <c>llm.runtime.check</c>; (null, null) khi lời gọi lỗi
+    /// (mất mạng) để sự cố mạng không bao giờ chặn wizard.
+    /// </summary>
+    private async Task<(string? Current, string? Latest)> CheckLlmRuntimeAsync(CancellationToken ct)
+    {
+        try
+        {
+            JsonNode? check = await _bridge.CallAsync("llm.runtime.check", null, ct).ConfigureAwait(false);
+            return (ReadString(check, "current"), ReadString(check, "latest"));
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "setup: llm.runtime.check thất bại (mất mạng?) — coi bản đang cài là ok");
+            return (null, null);
+        }
+    }
+
+    private static string? ReadString(JsonNode? node, string key) =>
+        node is JsonObject obj && obj[key] is JsonValue v && v.TryGetValue<string>(out string? s) ? s : null;
+
     private async Task<bool> IsLlmRuntimeInstalledAsync(CancellationToken ct)
     {
         JsonNode? status = await _bridge.CallAsync("llm.runtime.status", null, ct).ConfigureAwait(false);

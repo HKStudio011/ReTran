@@ -1063,7 +1063,7 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task LlmRuntime_DownloadsCudaFlavor_OnGpuMachine()
     {
-        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":["Hy-MT2-1.8B-UD-Q4_K_XL"]}""");
         var coordinator = NewCoordinator();
 
         await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
@@ -1077,7 +1077,7 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task LlmRuntime_DownloadsCpuFlavor_OnCpuMachine()
     {
-        WriteSetupJson("""{"flavor":"cpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
+        WriteSetupJson("""{"flavor":"cpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":["Hy-MT2-1.8B-UD-Q4_K_XL"]}""");
         _uvFake.Installed = null;
         var coordinator = NewCoordinator(adapters: Adapters()); // no NVIDIA ⇒ CPU flavor
 
@@ -1090,7 +1090,7 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task LlmRuntime_AlreadyInstalled_SkipsDownload()
     {
-        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":["Hy-MT2-1.8B-UD-Q4_K_XL"]}""");
         _bridge.LlmRuntimeInstalled = true;
         var coordinator = NewCoordinator();
 
@@ -1104,7 +1104,7 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task LlmRuntime_NeverInstalls_FailsSoftly_ThenRetrySucceeds()
     {
-        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":["Hy-MT2-1.8B-UD-Q4_K_XL"]}""");
         _bridge.LlmRuntimeDownloadCompletes = false; // "network" that never finishes
         var coordinator = NewCoordinator(modelDownloadTimeout: TimeSpan.FromMilliseconds(150));
 
@@ -1137,7 +1137,7 @@ public class SetupCoordinatorTests : IDisposable
               "tiers": ["small"],
               "activeTier": "small",
               "extraLangs": [],
-              "llmModels": [],
+              "llmModels": ["Hy-MT2-1.8B-UD-Q4_K_XL"],
               "steps": {
                 "checking": "done",
                 "choosinglanguage": "done",
@@ -1158,6 +1158,67 @@ public class SetupCoordinatorTests : IDisposable
         Assert.Empty(_uvFake.SyncCalls);
         Assert.Empty(_bridge.Downloaded);
         Assert.Equal("done", ReadSetupJson().Steps!["downloadingllmruntime"]);
+    }
+
+    [Fact]
+    public async Task Llm_Empty_SkipsRuntimeDownload()
+    {
+        // Bước 4 để trống ⇒ bước 8 tự đánh dấu done, KHÔNG gọi llm.runtime.* nào (spec §7).
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[],"steps":{"checking":"done","verifyingfiles":"done","syncing":"done","verifyingsidecar":"done","downloadingmodels":"done","applying":"done"}}""");
+        var coordinator = NewCoordinator();
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.DoesNotContain(_bridge.Calls, c => c.Method.StartsWith("llm.runtime", StringComparison.Ordinal));
+        Assert.Equal("done", ReadSetupJson().Steps!["downloadingllmruntime"]);
+    }
+
+    [Fact]
+    public async Task LlmRuntime_Outdated_ReDownloads()
+    {
+        // Đã cài nhưng tag cũ hơn bản mới nhất Core tra được ⇒ tải/cập nhật lại.
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":["Hy-MT2-1.8B-UD-Q4_K_XL"],"steps":{"checking":"done","verifyingfiles":"done","syncing":"done","verifyingsidecar":"done","downloadingmodels":"done","applying":"done"}}""");
+        _bridge.LlmRuntimeInstalled = true;
+        _bridge.LlmRuntimeTag = "b7000";
+        _bridge.LlmRuntimeLatestTag = "b7234";
+        var coordinator = NewCoordinator();
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Single(_bridge.LlmRuntimeDownloads); // chạy lại lượt tải để cập nhật
+    }
+
+    [Fact]
+    public async Task LlmRuntime_UpToDate_Skips()
+    {
+        // Tag đang cài == bản mới nhất ⇒ bỏ qua, không tải lại.
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":["Hy-MT2-1.8B-UD-Q4_K_XL"],"steps":{"checking":"done","verifyingfiles":"done","syncing":"done","verifyingsidecar":"done","downloadingmodels":"done","applying":"done"}}""");
+        _bridge.LlmRuntimeInstalled = true;
+        _bridge.LlmRuntimeTag = "b7234";
+        _bridge.LlmRuntimeLatestTag = "b7234";
+        var coordinator = NewCoordinator();
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Empty(_bridge.LlmRuntimeDownloads);
+    }
+
+    [Fact]
+    public async Task LlmRuntime_Offline_SkipsAsOk()
+    {
+        // Mất mạng khi tra bản mới ⇒ coi bản đang cài là ok, không chặn wizard.
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":["Hy-MT2-1.8B-UD-Q4_K_XL"],"steps":{"checking":"done","verifyingfiles":"done","syncing":"done","verifyingsidecar":"done","downloadingmodels":"done","applying":"done"}}""");
+        _bridge.LlmRuntimeInstalled = true;
+        _bridge.LlmRuntimeCheckThrows = true;
+        var coordinator = NewCoordinator();
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Empty(_bridge.LlmRuntimeDownloads);
     }
 
     // ── Checklist tiến độ Checking (2026-11-15) ──────────────────────────────────────────────────
@@ -1595,6 +1656,15 @@ public class SetupCoordinatorTests : IDisposable
         /// <summary>Whether <c>llm.runtime.status</c> reports the runtime installed. <c>llm.runtime.status</c> có báo runtime đã cài không.</summary>
         public bool LlmRuntimeInstalled { get; set; }
 
+        /// <summary>Tag <c>llm.runtime.check</c> reports as currently installed (null = unknown/offline). Tag <c>llm.runtime.check</c> báo đang cài (null = không rõ/mất mạng).</summary>
+        public string? LlmRuntimeTag { get; set; }
+
+        /// <summary>Tag <c>llm.runtime.check</c> reports as latest available (null = offline). Tag <c>llm.runtime.check</c> báo mới nhất (null = mất mạng).</summary>
+        public string? LlmRuntimeLatestTag { get; set; }
+
+        /// <summary>When true, <c>llm.runtime.check</c> throws (dead network). Khi true, <c>llm.runtime.check</c> ném (mạng chết).</summary>
+        public bool LlmRuntimeCheckThrows { get; set; }
+
         /// <summary>When false, a runtime download records the flavor but never completes (dead network). Khi false, lệnh tải runtime ghi flavor nhưng không bao giờ xong (mạng chết).</summary>
         public bool LlmRuntimeDownloadCompletes { get; set; } = true;
 
@@ -1641,6 +1711,7 @@ public class SetupCoordinatorTests : IDisposable
                         : null,
                 }),
                 "llm.runtime.download" => DownloadLlmRuntime(@params),
+                "llm.runtime.check" => CheckLlmRuntime(),
                 "llm.models.list" => Task.FromResult<JsonNode?>(BuildLlmList()),
                 "llm.models.download" => DownloadLlmModel(@params),
                 "llm.models.set" => SetLlmModel(@params),
@@ -1661,6 +1732,16 @@ public class SetupCoordinatorTests : IDisposable
             LlmRuntimeDownloads.Add(@params!["flavor"]!.GetValue<string>());
             if (LlmRuntimeDownloadCompletes) LlmRuntimeInstalled = true; // fast network unless disabled
             return Task.FromResult<JsonNode?>(new JsonObject { ["accepted"] = true });
+        }
+
+        private Task<JsonNode?> CheckLlmRuntime()
+        {
+            if (LlmRuntimeCheckThrows) throw new InvalidOperationException("fake: llm.runtime.check offline");
+            return Task.FromResult<JsonNode?>(new JsonObject
+            {
+                ["current"] = LlmRuntimeTag,
+                ["latest"] = LlmRuntimeLatestTag,
+            });
         }
 
         private Task<JsonNode?> DownloadLlmModel(JsonNode? @params)
