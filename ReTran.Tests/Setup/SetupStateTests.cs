@@ -107,7 +107,12 @@ public class SetupStateNeedsSetupTests : IDisposable
             Assert.Equal(1, doc.RootElement.GetProperty("version").GetInt32());
             // Chốt đủ tập khóa gốc — khóa riêng (BoundPath) không được lọt vào JSON.
             Assert.Equal(
-                new[] { "activeTier", "extraLangs", "flavor", "isComplete", "language", "steps", "tiers", "version" },
+                new[]
+                {
+                    "activeDet", "activeLang", "activeLlm", "activeRec", "activeTier",
+                    "dets", "extraLangs", "flavor", "isComplete",
+                    "langs", "language", "llmModels", "recs", "steps", "tiers", "version",
+                },
                 doc.RootElement.EnumerateObject()
                     .Select(p => p.Name)
                     .OrderBy(n => n, StringComparer.Ordinal)
@@ -211,6 +216,88 @@ public class SetupStateNeedsSetupTests : IDisposable
         state.Save();
 
         Assert.Empty(SetupState.Load(json).ExtraLangs!);
+    }
+
+    [Fact]
+    public void V2Fields_RoundTrip()
+    {
+        string json = Temp("setup-v2.json");
+        SetupState state = SetupState.Load(json) with
+        {
+            Dets = ["PP-OCRv6_small_det"],
+            ActiveDet = "PP-OCRv6_small_det",
+            Recs = ["PP-OCRv6_small_rec", "PP-OCRv6_medium_rec"],
+            ActiveRec = "PP-OCRv6_small_rec",
+            Langs = ["korean_PP-OCRv5_mobile_rec"],
+            ActiveLang = "korean_PP-OCRv5_mobile_rec",
+            LlmModels = ["Hy-MT2-1.8B-UD-Q4_K_XL"],
+            ActiveLlm = "Hy-MT2-1.8B-UD-Q4_K_XL",
+        };
+        state.Save();
+
+        SetupState back = SetupState.Load(json);
+
+        Assert.Equal(new[] { "PP-OCRv6_small_det" }, back.Dets);
+        Assert.Equal("PP-OCRv6_small_det", back.ActiveDet);
+        Assert.Equal(new[] { "PP-OCRv6_small_rec", "PP-OCRv6_medium_rec" }, back.Recs);
+        Assert.Equal("PP-OCRv6_small_rec", back.ActiveRec);
+        Assert.Equal(new[] { "korean_PP-OCRv5_mobile_rec" }, back.Langs);
+        Assert.Equal("korean_PP-OCRv5_mobile_rec", back.ActiveLang);
+        Assert.Equal(new[] { "Hy-MT2-1.8B-UD-Q4_K_XL" }, back.LlmModels);
+        Assert.Equal("Hy-MT2-1.8B-UD-Q4_K_XL", back.ActiveLlm);
+    }
+
+    [Fact]
+    public void Migration_OldFile_MapsNamesAndActiveLang()
+    {
+        // File 16-11: tiers = token cỡ, extraLangs = mã ngôn ngữ, language = ngôn ngữ chính.
+        // Migration (một lần, in-memory) → tên model + ActiveLang giữ đúng cặp đang chạy cũ.
+        string json = Temp("setup-old-v1.json");
+        File.WriteAllText(json, """
+            {"flavor":"gpu","language":"ko","tiers":["small","medium"],"activeTier":"small","extraLangs":["ru"]}
+            """);
+
+        SetupState state = SetupState.Load(json);
+
+        Assert.Equal(new[] { "PP-OCRv6_small_det", "PP-OCRv6_medium_det" }, state.Dets);
+        Assert.Equal(new[] { "PP-OCRv6_small_rec", "PP-OCRv6_medium_rec" }, state.Recs);
+        Assert.Equal("PP-OCRv6_small_det", state.ActiveDet);
+        Assert.Equal("PP-OCRv6_small_rec", state.ActiveRec);
+        // extraLangs cũ là mã ngôn ngữ → map sang tên rec; language legacy (ko) thêm vào + thành ActiveLang.
+        Assert.Equal(new[] { "cyrillic_PP-OCRv5_mobile_rec", "korean_PP-OCRv5_mobile_rec" }, state.Langs);
+        Assert.Equal("korean_PP-OCRv5_mobile_rec", state.ActiveLang);
+        Assert.Null(state.LlmModels); // chưa hỏi bước 4 — wizard sẽ hỏi một lượt
+    }
+
+    [Fact]
+    public void Migration_OldFile_AutoOrV6Language_ActiveLangNull()
+    {
+        string json = Temp("setup-old-v2.json");
+        File.WriteAllText(json, """{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[]}""");
+
+        SetupState state = SetupState.Load(json);
+
+        Assert.Equal(new[] { "PP-OCRv6_small_det" }, state.Dets);
+        Assert.Empty(state.Langs!); // đã hỏi "không chọn"; language "vi" phủ v6 → không thêm, không ActiveLang
+        Assert.Null(state.ActiveLang);
+    }
+
+    [Fact]
+    public void LegacyJson_NewFieldsNull()
+    {
+        string json = Temp("setup-old-v3.json");
+        File.WriteAllText(json, """{"flavor":"gpu","language":"vi","isComplete":true}""");
+
+        SetupState state = SetupState.Load(json);
+
+        Assert.Null(state.Dets);
+        Assert.Null(state.ActiveDet);
+        Assert.Null(state.Recs);
+        Assert.Null(state.ActiveRec);
+        Assert.Null(state.Langs);
+        Assert.Null(state.ActiveLang);
+        Assert.Null(state.LlmModels);
+        Assert.Null(state.ActiveLlm);
     }
 
     /// <summary>

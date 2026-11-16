@@ -3,14 +3,16 @@ using System.Text.Json;
 namespace ReTran_App.Services.Setup;
 
 /// <summary>
-/// First-run wizard progress persisted in <c>setup.json</c>: the OCR flavor chosen, the language the
-/// user picked, the OCR-tier and extra-language answers, which steps already finished, and the schema
-/// version of the file — enough to resume the wizard where it stopped.
+/// First-run wizard progress persisted in <c>setup.json</c>: the OCR flavor chosen, the model answers
+/// (det + rec names, legacy language recs, LLM models) with their active picks, which steps already
+/// finished, and the schema version of the file — enough to resume the wizard where it stopped.
 /// A missing or malformed file means "start over": every real artifact is re-checked on disk.
-/// Trạng thái wizard chạy lần đầu lưu trong <c>setup.json</c>: flavor OCR đã chọn, ngôn ngữ user đã
-/// chọn, các câu trả lời tier model OCR + ngôn ngữ bổ sung, những bước đã xong, và phiên bản schema
-/// của file — đủ để wizard chạy tiếp đúng chỗ nó dừng.
+/// A 16-11 file (tier tokens + language codes) is migrated in memory on load.
+/// Trạng thái wizard chạy lần đầu lưu trong <c>setup.json</c>: flavor OCR đã chọn, các câu trả lời
+/// model (tên det + rec, rec ngôn ngữ legacy, model LLM) kèm lựa chọn "chạy chính", những bước đã
+/// xong, và phiên bản schema của file — đủ để wizard chạy tiếp đúng chỗ nó dừng.
 /// File thiếu hoặc hỏng nghĩa là "làm lại từ đầu": mọi thứ thật đều được kiểm tra lại trên đĩa.
+/// File từ 16-11 (token cỡ + mã ngôn ngữ) được migration trong bộ nhớ khi đọc.
 /// </summary>
 /// <param name="Flavor">OCR flavor as written by the wizard (<c>gpu</c>/<c>cpu</c>); <see langword="null"/> before the check step decides. Flavor OCR wizard ghi (<c>gpu</c>/<c>cpu</c>); <see langword="null"/> trước khi bước check quyết định.</param>
 /// <param name="Language">Language code chosen in the wizard; <see langword="null"/> until the user answers. Mã ngôn ngữ user chọn trong wizard; <see langword="null"/> cho tới khi user trả lời.</param>
@@ -18,13 +20,29 @@ namespace ReTran_App.Services.Setup;
 /// <param name="Tiers">OCR model tiers ticked on the "Chọn model OCR" screen (<c>tiny</c>/<c>small</c>/<c>medium</c>, in that order); <see langword="null"/> until the user answers. Các tier model OCR đã tick ở màn "Chọn model OCR" (theo thứ tự đó); <see langword="null"/> cho tới khi user trả lời.</param>
 /// <param name="ActiveTier">Tier chosen as "Dùng chính" — the pair the wizard runs; <see langword="null"/> until the user answers. Tier được chọn "Dùng chính" — cặp model wizard sẽ chạy; <see langword="null"/> cho tới khi user trả lời.</param>
 /// <param name="ExtraLangs">Extra language codes ticked on the "Ngôn ngữ bổ sung" screen; <see langword="null"/> = not asked yet, empty list = asked and none chosen. Mã ngôn ngữ bổ sung đã tick ở màn "Ngôn ngữ bổ sung"; <see langword="null"/> = chưa hỏi, list rỗng = đã hỏi và không chọn.</param>
+/// <param name="Dets">Det model names ticked in step 2 (e.g. <c>PP-OCRv6_small_det</c>); <see langword="null"/> until answered. Tên model det đã tick ở bước 2; <see langword="null"/> cho tới khi trả lời.</param>
+/// <param name="ActiveDet">Det model marked "Dùng chính" (spec §4); <see langword="null"/> until answered. Model det được chấm "Dùng chính"; <see langword="null"/> cho tới khi trả lời.</param>
+/// <param name="Recs">Rec model names ticked in step 2; <see langword="null"/> until answered. Tên model rec đã tick ở bước 2; <see langword="null"/> cho tới khi trả lời.</param>
+/// <param name="ActiveRec">Rec model marked "Dùng chính"; overridden by <paramref name="ActiveLang"/> when set. Model rec được chấm "Dùng chính"; bị <paramref name="ActiveLang"/> thay thế khi có.</param>
+/// <param name="Langs">Legacy rec model names ticked in step 3; empty list = asked and none chosen. Tên rec legacy đã tick ở bước 3; list rỗng = đã hỏi và không chọn.</param>
+/// <param name="ActiveLang">Legacy rec marked "Đọc chính" — the running rec, or <see langword="null"/> when none. Rec legacy được chấm "Đọc chính" — rec đang chạy, hoặc <see langword="null"/> khi không chấm.</param>
+/// <param name="LlmModels">LLM catalog names ticked in step 4; <see langword="null"/> until asked, empty list = asked and none chosen. Tên LLM đã tick ở bước 4; <see langword="null"/> = chưa hỏi, list rỗng = đã hỏi và không chọn.</param>
+/// <param name="ActiveLlm">LLM model marked "Dùng chính", or <see langword="null"/>. Model LLM được chấm "Dùng chính", hoặc <see langword="null"/>.</param>
 public sealed record SetupState(
     string? Flavor = null,
     string? Language = null,
     Dictionary<string, string>? Steps = null,
     List<string>? Tiers = null,
     string? ActiveTier = null,
-    List<string>? ExtraLangs = null)
+    List<string>? ExtraLangs = null,
+    List<string>? Dets = null,
+    string? ActiveDet = null,
+    List<string>? Recs = null,
+    string? ActiveRec = null,
+    List<string>? Langs = null,
+    string? ActiveLang = null,
+    List<string>? LlmModels = null,
+    string? ActiveLlm = null)
 {
     // internal để SystemCheck (checklist Checking) đếm model có sẵn theo cùng định nghĩa với NeedsSetup.
     // internal so SystemCheck (Checking checklist) counts installed models by the same definition as NeedsSetup.
@@ -78,12 +96,48 @@ public sealed record SetupState(
             if (!File.Exists(target)) return new SetupState { BoundPath = target };
             SetupState? state =
                 JsonSerializer.Deserialize<SetupState>(File.ReadAllText(target), SerializerOptions);
-            return (state ?? new SetupState()) with { BoundPath = target };
+            return Migrate((state ?? new SetupState()) with { BoundPath = target });
         }
         catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
         {
             return new SetupState { BoundPath = target };
         }
+    }
+
+    /// <summary>
+    /// One-time in-memory mapping of a 16-11 wizard file (tier tokens + language codes + the main
+    /// language) onto the v2 fields (model names); the file on disk is rewritten on the next Save.
+    /// Migration MỘT LẦN trong bộ nhớ cho file wizard 16-11 (token cỡ + mã ngôn ngữ + ngôn ngữ
+    /// chính) sang field v2 (tên model); file trên đĩa được ghi lại ở lần Save kế tiếp.
+    /// </summary>
+    private static SetupState Migrate(SetupState state)
+    {
+        if (state.Dets is not null || state.Tiers is null) return state;
+
+        string? legacyRec = state.Language is { } lang
+            && !OcrModelChoices.IsV6Covered(lang)
+            ? OcrModelChoices.LegacyRecFor(lang)
+            : null;
+
+        var langs = new List<string>();
+        foreach (string code in state.ExtraLangs ?? [])
+        {
+            if (OcrModelChoices.LegacyRecFor(code) is { } mapped && !langs.Contains(mapped)) langs.Add(mapped);
+        }
+        if (legacyRec is not null && !langs.Contains(legacyRec)) langs.Add(legacyRec);
+
+        string? det = state.ActiveTier is { } tier ? $"PP-OCRv6_{tier}_det" : null;
+        string? rec = state.ActiveTier is { } tier2 ? $"PP-OCRv6_{tier2}_rec" : null;
+
+        return state with
+        {
+            Dets = [.. state.Tiers.Select(t => $"PP-OCRv6_{t}_det")],
+            Recs = [.. state.Tiers.Select(t => $"PP-OCRv6_{t}_rec")],
+            ActiveDet = det,
+            ActiveRec = rec,
+            Langs = langs,
+            ActiveLang = legacyRec,
+        };
     }
 
     /// <summary>
