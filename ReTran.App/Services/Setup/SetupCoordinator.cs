@@ -19,6 +19,12 @@ public enum SetupStep
     /// <summary>Waiting for the user to pick a language. Chờ user chọn ngôn ngữ.</summary>
     ChoosingLanguage,
 
+    /// <summary>Waiting for the user to tick the OCR model tiers (at least one) and pick "Dùng chính". Chờ user tick các tier model OCR (ít nhất 1) và chọn "Dùng chính".</summary>
+    ChoosingOcrTier,
+
+    /// <summary>Waiting for the user to answer the extra-language question (tick any or none). Chờ user trả lời màn ngôn ngữ bổ sung (tick nhiều hoặc không).</summary>
+    ChoosingExtraLanguages,
+
     /// <summary>Re-verifying the bundled uv.exe on disk (the AV-quarantine window). Kiểm tra lại uv.exe đi kèm trên đĩa (cửa sổ cách ly AV).</summary>
     VerifyingFiles,
 
@@ -86,7 +92,8 @@ public sealed record FlavorSwitchInfo(OcrFlavor Installed, OcrFlavor Target);
 
 /// <summary>
 /// First-run Setup wizard orchestration as a testable state machine (spec §3, §4): hard gates first,
-/// language once, then the pipeline VerifyingFiles → Syncing → VerifyingSidecar →
+/// the OCR-tier / language / extra-language answers once, then the pipeline VerifyingFiles → Syncing →
+/// VerifyingSidecar →
 /// DownloadingLlmRuntime → DownloadingModels → Applying → Done. Soft steps retry up to
 /// <see cref="MaxRetries"/> times before failing; the hard
 /// ones (Checking, VerifyingFiles) fail immediately. Progress persists in <c>setup.json</c> after each
@@ -98,7 +105,8 @@ public sealed record FlavorSwitchInfo(OcrFlavor Installed, OcrFlavor Target);
 /// <c>uv sync</c> may leave no venv at all, so every retry is a full re-sync and the error screen
 /// quotes <see cref="UvSyncRunner.LastOutputTail"/>.
 /// Điều phối wizard Setup chạy lần đầu dưới dạng máy trạng thái test được (spec §3, §4): cổng cứng
-/// trước, hỏi ngôn ngữ một lần, rồi pipeline VerifyingFiles → Syncing → VerifyingSidecar →
+/// trước, ba câu trả lời wizard (tier OCR / ngôn ngữ / ngôn ngữ bổ sung) hỏi một lần, rồi pipeline
+/// VerifyingFiles → Syncing → VerifyingSidecar →
 /// DownloadingLlmRuntime → DownloadingModels → Applying → Done. Các bước mềm retry tới <see cref="MaxRetries"/> lần trước
 /// khi fail; các bước cứng (Checking, VerifyingFiles) fail ngay. Tiến độ lưu vào <c>setup.json</c> sau
 /// mỗi bước thành công, nên khởi động lại sẽ chạy tiếp đúng chỗ dừng và không hỏi lại ngôn ngữ. Theo
@@ -124,8 +132,10 @@ public sealed class SetupCoordinator
     private static readonly TimeSpan DefaultModelPollInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DefaultModelDownloadTimeout = TimeSpan.FromMinutes(60);
 
-    // Pipeline steps in order; Checking/ChoosingLanguage run before it, Done after it.
-    // Các bước pipeline theo thứ tự; Checking/ChoosingLanguage chạy trước, Done chạy sau.
+    // Pipeline steps in order; Checking and the pre-pipeline answers (OCR tiers, language, extra
+    // languages) run before it, Done after it.
+    // Các bước pipeline theo thứ tự; Checking và các câu hỏi pre-pipeline (tier OCR, ngôn ngữ, ngôn
+    // ngữ bổ sung) chạy trước, Done chạy sau.
     private static readonly SetupStep[] PipelineSteps =
     [
         SetupStep.VerifyingFiles,
@@ -269,18 +279,28 @@ public sealed class SetupCoordinator
     public OcrFlavor Flavor { get; private set; }
 
     /// <summary>
+    /// Tier chosen as "Dùng chính" on the OCR-model screen (<c>tiny</c>/<c>small</c>/<c>medium</c>);
+    /// <see langword="null"/> until the user answers. The language screen uses it to display the pair
+    /// the wizard will run. Tier được chọn "Dùng chính" ở màn chọn model OCR; <see langword="null"/>
+    /// khi chưa trả lời. Màn ngôn ngữ dùng nó để hiển thị cặp model wizard sẽ chạy.
+    /// </summary>
+    public string? ActiveTier => _state.ActiveTier;
+
+    /// <summary>
     /// True once the wizard reached <see cref="SetupStep.Done"/>. Đúng khi wizard đã tới <see cref="SetupStep.Done"/>.
     /// </summary>
     public bool IsComplete => Step == SetupStep.Done;
 
     /// <summary>
-    /// True while any coordinator operation (<see cref="StartAsync"/>, <see cref="ContinueWithLanguageAsync"/>,
+    /// True while any coordinator operation (<see cref="StartAsync"/>, <see cref="ContinueWithOcrTierAsync"/>,
+    /// <see cref="ContinueWithLanguageAsync"/>, <see cref="ContinueWithExtraLanguagesAsync"/>,
     /// <see cref="RetryAsync"/>, <see cref="ConfirmFlavorSwitchAsync"/>, <see cref="SwitchToCpuFlavorAsync"/>) is
     /// in flight; false once the run finishes, pauses for user input (language, flavor switch), or fails.
     /// Exposed so callers can tell "complete but re-running" apart from "complete and idle": during a forced
     /// re-run <see cref="Step"/> still holds <see cref="SetupStep.Done"/> until the first publish, so
     /// <see cref="IsComplete"/> alone cannot close that window.
-    /// Đúng khi một thao tác của coordinator (<see cref="StartAsync"/>, <see cref="ContinueWithLanguageAsync"/>,
+    /// Đúng khi một thao tác của coordinator (<see cref="StartAsync"/>, <see cref="ContinueWithOcrTierAsync"/>,
+    /// <see cref="ContinueWithLanguageAsync"/>, <see cref="ContinueWithExtraLanguagesAsync"/>,
     /// <see cref="RetryAsync"/>, <see cref="ConfirmFlavorSwitchAsync"/>, <see cref="SwitchToCpuFlavorAsync"/>)
     /// đang chạy; false khi lượt chạy kết thúc, dừng chờ user nhập liệu (ngôn ngữ, đổi flavor), hoặc fail.
     /// Mở ra để caller phân biệt "xong nhưng đang chạy lại" với "xong và rảnh": trong lúc "chạy lại setup",
@@ -321,16 +341,16 @@ public sealed class SetupCoordinator
 
     /// <summary>
     /// Starts the wizard: re-runs the system check (it is pure and cheap, and the flavor must follow
-    /// the CURRENT hardware), pauses at <see cref="SetupStep.ChoosingLanguage"/> when no language was
-    /// ever answered, then runs the pipeline from the first not-done step. A completed state short-
-    /// circuits straight to <see cref="SetupStep.Done"/> unless <paramref name="force"/> is set (the
-    /// "re-run setup" path — done steps are still skipped, so an unchanged machine passes through in
-    /// seconds).
+    /// the CURRENT hardware), pauses at the first unanswered pre-pipeline question (OCR tiers →
+    /// language → extra languages), then runs the pipeline from the first not-done step. A completed
+    /// state short-circuits straight to <see cref="SetupStep.Done"/> unless <paramref name="force"/> is
+    /// set (the "re-run setup" path — done steps are still skipped, so an unchanged machine passes
+    /// through in seconds).
     /// Khởi động wizard: chạy lại check system (thuần và rẻ, flavor phải theo phần cứng HIỆN TẠI), dừng
-    /// ở <see cref="SetupStep.ChoosingLanguage"/> khi chưa có ngôn ngữ nào được trả lời, rồi chạy
-    /// pipeline từ bước chưa done đầu tiên. State đã xong thì nhảy thẳng tới <see cref="SetupStep.Done"/>
-    /// trừ khi đặt <paramref name="force"/> (đường "chạy lại setup" — bước đã done vẫn được skip, nên
-    /// máy không đổi gì sẽ đi qua trong vài giây).
+    /// ở câu hỏi pre-pipeline đầu tiên chưa được trả lời (tier OCR → ngôn ngữ → ngôn ngữ bổ sung), rồi
+    /// chạy pipeline từ bước chưa done đầu tiên. State đã xong thì nhảy thẳng tới
+    /// <see cref="SetupStep.Done"/> trừ khi đặt <paramref name="force"/> (đường "chạy lại setup" — bước
+    /// đã done vẫn được skip, nên máy không đổi gì sẽ đi qua trong vài giây).
     /// </summary>
     /// <param name="force">Bypasses the <c>IsComplete</c> short-circuit. Bỏ qua nhánh tắt <c>IsComplete</c>.</param>
     /// <param name="ct">Cancellation token; cancelling aborts the run (state is left where it was). Token hủy; hủy sẽ dừng lượt chạy (state giữ nguyên ở chỗ nó đang ở).</param>
@@ -366,14 +386,14 @@ public sealed class SetupCoordinator
                 return;
             }
 
-            if (_state.Language is null)
+            if (_state.Tiers is null)
             {
-                Step = SetupStep.ChoosingLanguage;
+                Step = SetupStep.ChoosingOcrTier;
                 Publish();
                 return;
             }
 
-            await RunPipelineAsync(SetupStep.VerifyingFiles, ct).ConfigureAwait(false);
+            await ContinueAfterAnswersAsync(ct);
         }
         finally
         {
@@ -383,9 +403,11 @@ public sealed class SetupCoordinator
 
     /// <summary>
     /// Continues after the user answered the language question: persists the code, marks the step done,
-    /// and runs the remaining pipeline. A no-op when not in <see cref="SetupStep.ChoosingLanguage"/>.
-    /// Tiếp tục sau khi user trả lời câu hỏi ngôn ngữ: lưu mã, đánh dấu bước xong, chạy phần pipeline còn
-    /// lại. Không làm gì nếu không ở <see cref="SetupStep.ChoosingLanguage"/>.
+    /// and resumes — the extra-language question when unanswered, otherwise the remaining pipeline. A
+    /// no-op when not in <see cref="SetupStep.ChoosingLanguage"/>.
+    /// Tiếp tục sau khi user trả lời câu hỏi ngôn ngữ: lưu mã, đánh dấu bước xong, rồi chạy tiếp — màn
+    /// ngôn ngữ bổ sung nếu chưa hỏi, còn lại là phần pipeline. Không làm gì nếu không ở
+    /// <see cref="SetupStep.ChoosingLanguage"/>.
     /// </summary>
     /// <param name="langCode">Non-empty language code the user picked (e.g. <c>vi</c>). Mã ngôn ngữ user chọn, khác rỗng (vd <c>vi</c>).</param>
     /// <param name="ct">Cancellation token. Token hủy.</param>
@@ -402,6 +424,98 @@ public sealed class SetupCoordinator
             {
                 Language = langCode,
                 Steps = WithStep(_state.Steps, StepKey(SetupStep.ChoosingLanguage), "done"),
+            };
+            _state.Save();
+
+            await ContinueAfterAnswersAsync(ct);
+        }
+        finally
+        {
+            EndRun();
+        }
+    }
+
+    /// <summary>
+    /// Continues after the user answered the OCR-model screen: validates the ticked tiers and the
+    /// "Dùng chính" choice, persists them, marks the step done, and resumes at the next unanswered
+    /// question (language, then extra languages) or the pipeline. A no-op when not in
+    /// <see cref="SetupStep.ChoosingOcrTier"/>.
+    /// Tiếp tục sau khi user trả lời màn chọn model OCR: kiểm tra các tier đã tick và lựa chọn "Dùng
+    /// chính", lưu lại, đánh dấu bước xong, rồi chạy tiếp ở câu hỏi chưa trả lời kế (ngôn ngữ, rồi
+    /// ngôn ngữ bổ sung) hoặc pipeline. Không làm gì nếu không ở <see cref="SetupStep.ChoosingOcrTier"/>.
+    /// </summary>
+    /// <param name="tiers">Ticked tier names — at least one of <c>tiny</c>/<c>small</c>/<c>medium</c>. Tên các tier đã tick — ít nhất một trong <c>tiny</c>/<c>small</c>/<c>medium</c>.</param>
+    /// <param name="activeTier">The "Dùng chính" tier; must be one of <paramref name="tiers"/>. Tier "Dùng chính"; phải nằm trong <paramref name="tiers"/>.</param>
+    /// <param name="ct">Cancellation token. Token hủy.</param>
+    /// <exception cref="ArgumentException">The tier list is empty, holds an unknown tier, or <paramref name="activeTier"/> is not ticked. Danh sách tier rỗng, chứa tier lạ, hoặc <paramref name="activeTier"/> không nằm trong các tier đã tick.</exception>
+    public async Task ContinueWithOcrTierAsync(IReadOnlyList<string> tiers, string activeTier, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(tiers);
+        ArgumentException.ThrowIfNullOrEmpty(activeTier);
+        if (tiers.Count == 0)
+            throw new ArgumentException("Cần tick ít nhất một tier model OCR.", nameof(tiers));
+        foreach (string tier in tiers)
+        {
+            if (!OcrModelChoices.Tiers.Contains(tier, StringComparer.Ordinal))
+                throw new ArgumentException($"Tier model OCR không hợp lệ: '{tier}'.", nameof(tiers));
+        }
+        if (!tiers.Contains(activeTier, StringComparer.Ordinal))
+            throw new ArgumentException("Tier \"Dùng chính\" phải nằm trong các tier đã tick.", nameof(activeTier));
+
+        if (!TryBeginRun()) return;
+        try
+        {
+            if (Step != SetupStep.ChoosingOcrTier) return;
+
+            _state = _state with
+            {
+                Tiers = [.. tiers],
+                ActiveTier = activeTier,
+                Steps = WithStep(_state.Steps, StepKey(SetupStep.ChoosingOcrTier), "done"),
+            };
+            _state.Save();
+
+            await ContinueAfterAnswersAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            EndRun();
+        }
+    }
+
+    /// <summary>
+    /// Continues after the user answered the extra-language screen: validates the codes (normalized to
+    /// lowercase, deduplicated), persists them, marks the step done, and runs the remaining pipeline.
+    /// An empty list is a valid answer ("none"). A no-op when not in
+    /// <see cref="SetupStep.ChoosingExtraLanguages"/>.
+    /// Tiếp tục sau khi user trả lời màn ngôn ngữ bổ sung: kiểm tra mã (chuẩn hoá chữ thường, bỏ trùng),
+    /// lưu lại, đánh dấu bước xong, rồi chạy phần pipeline còn lại. List rỗng là câu trả lời hợp lệ
+    /// ("không chọn"). Không làm gì nếu không ở <see cref="SetupStep.ChoosingExtraLanguages"/>.
+    /// </summary>
+    /// <param name="extraLangs">Ticked extra-language codes (any subset of <see cref="OcrModelChoices.LegacyLanguageCodes"/>), possibly empty. Mã ngôn ngữ bổ sung đã tick (tập con bất kỳ của <see cref="OcrModelChoices.LegacyLanguageCodes"/>), có thể rỗng.</param>
+    /// <param name="ct">Cancellation token. Token hủy.</param>
+    /// <exception cref="ArgumentException">A code is not one of the legacy-only languages. Một mã không thuộc nhóm ngôn ngữ chỉ có rec legacy.</exception>
+    public async Task ContinueWithExtraLanguagesAsync(IReadOnlyList<string> extraLangs, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(extraLangs);
+        var picks = new List<string>();
+        foreach (string lang in extraLangs)
+        {
+            string code = lang?.Trim().ToLowerInvariant() ?? string.Empty;
+            if (!OcrModelChoices.LegacyLanguageCodes.Contains(code, StringComparer.Ordinal))
+                throw new ArgumentException($"Ngôn ngữ bổ sung không hợp lệ: '{lang}'.", nameof(extraLangs));
+            if (!picks.Contains(code, StringComparer.Ordinal)) picks.Add(code);
+        }
+
+        if (!TryBeginRun()) return;
+        try
+        {
+            if (Step != SetupStep.ChoosingExtraLanguages) return;
+
+            _state = _state with
+            {
+                ExtraLangs = picks,
+                Steps = WithStep(_state.Steps, StepKey(SetupStep.ChoosingExtraLanguages), "done"),
             };
             _state.Save();
 
@@ -529,14 +643,14 @@ public sealed class SetupCoordinator
                     return;
                 }
 
-                if (_state.Language is null)
+                if (_state.Tiers is null)
                 {
-                    Step = SetupStep.ChoosingLanguage;
+                    Step = SetupStep.ChoosingOcrTier;
                     Publish();
                     return;
                 }
 
-                await RunPipelineAsync(SetupStep.VerifyingFiles, ct).ConfigureAwait(false);
+                await ContinueAfterAnswersAsync(ct).ConfigureAwait(false);
                 return;
             }
 
@@ -595,6 +709,32 @@ public sealed class SetupCoordinator
         }
 
         EnterDone();
+    }
+
+    /// <summary>
+    /// Resumes after a pre-pipeline answer was saved: pauses at the next unanswered question
+    /// (language, then extra languages), or runs the pipeline from its first step when everything is
+    /// answered.
+    /// Chạy tiếp sau khi một câu trả lời pre-pipeline được lưu: dừng ở câu hỏi chưa trả lời kế
+    /// (ngôn ngữ, rồi ngôn ngữ bổ sung), hoặc chạy pipeline từ bước đầu khi đã trả lời hết.
+    /// </summary>
+    private async Task ContinueAfterAnswersAsync(CancellationToken ct)
+    {
+        if (_state.Language is null)
+        {
+            Step = SetupStep.ChoosingLanguage;
+            Publish();
+            return;
+        }
+
+        if (_state.ExtraLangs is null)
+        {
+            Step = SetupStep.ChoosingExtraLanguages;
+            Publish();
+            return;
+        }
+
+        await RunPipelineAsync(SetupStep.VerifyingFiles, ct).ConfigureAwait(false);
     }
 
     private async Task<StepOutcome> RunStepAsync(SetupStep step, CancellationToken ct)

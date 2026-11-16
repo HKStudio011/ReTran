@@ -107,7 +107,7 @@ public class SetupStateNeedsSetupTests : IDisposable
             Assert.Equal(1, doc.RootElement.GetProperty("version").GetInt32());
             // Chốt đủ tập khóa gốc — khóa riêng (BoundPath) không được lọt vào JSON.
             Assert.Equal(
-                new[] { "flavor", "isComplete", "language", "steps", "version" },
+                new[] { "activeTier", "extraLangs", "flavor", "isComplete", "language", "steps", "tiers", "version" },
                 doc.RootElement.EnumerateObject()
                     .Select(p => p.Name)
                     .OrderBy(n => n, StringComparer.Ordinal)
@@ -164,6 +164,53 @@ public class SetupStateNeedsSetupTests : IDisposable
         using JsonDocument doc = JsonDocument.Parse(File.ReadAllText(json));
         Assert.False(doc.RootElement.TryGetProperty("bogusStep", out _));
         Assert.Equal(1, doc.RootElement.GetProperty("version").GetInt32());
+    }
+
+    [Fact]
+    public void TiersActiveExtra_RoundTrip()
+    {
+        // Ba câu trả lời wizard 2026-11-16 sống qua Save → Load nguyên vẹn.
+        string json = Temp("setup-answers.json");
+        SetupState state = SetupState.Load(json) with
+        {
+            Tiers = ["small", "medium"],
+            ActiveTier = "medium",
+            ExtraLangs = ["ko", "ru"],
+        };
+        state.Save();
+
+        SetupState back = SetupState.Load(json);
+        Assert.Equal(new[] { "small", "medium" }, back.Tiers);
+        Assert.Equal("medium", back.ActiveTier);
+        Assert.Equal(new[] { "ko", "ru" }, back.ExtraLangs);
+    }
+
+    [Fact]
+    public void LegacyJson_NullNewFields()
+    {
+        // setup.json của bản cũ (chưa có 3 khóa mới) → đọc ra null; wizard hỏi A/B một lượt (spec §8).
+        string json = Temp("setup-old.json");
+        File.WriteAllText(json, """{"flavor":"gpu","language":"vi","isComplete":true}""");
+
+        SetupState state = SetupState.Load(json);
+
+        Assert.Null(state.Tiers);
+        Assert.Null(state.ActiveTier);
+        Assert.Null(state.ExtraLangs);
+    }
+
+    [Fact]
+    public void ExtraLangs_EmptyList_DistinctFromNull()
+    {
+        // null = "chưa hỏi màn B"; [] = "đã hỏi, chọn không" — hai nghĩa khác nhau, không được lẫn.
+        string json = Temp("setup-extra.json");
+        SetupState state = SetupState.Load(json);
+        Assert.Null(state.ExtraLangs);
+
+        state = state with { ExtraLangs = [] };
+        state.Save();
+
+        Assert.Empty(SetupState.Load(json).ExtraLangs!);
     }
 
     /// <summary>

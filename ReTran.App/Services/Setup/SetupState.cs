@@ -4,17 +4,27 @@ namespace ReTran_App.Services.Setup;
 
 /// <summary>
 /// First-run wizard progress persisted in <c>setup.json</c>: the OCR flavor chosen, the language the
-/// user picked, which steps already finished, and the schema version of the file — enough to resume
-/// the wizard where it stopped.
+/// user picked, the OCR-tier and extra-language answers, which steps already finished, and the schema
+/// version of the file — enough to resume the wizard where it stopped.
 /// A missing or malformed file means "start over": every real artifact is re-checked on disk.
 /// Trạng thái wizard chạy lần đầu lưu trong <c>setup.json</c>: flavor OCR đã chọn, ngôn ngữ user đã
-/// chọn, những bước đã xong, và phiên bản schema của file — đủ để wizard chạy tiếp đúng chỗ nó dừng.
+/// chọn, các câu trả lời tier model OCR + ngôn ngữ bổ sung, những bước đã xong, và phiên bản schema
+/// của file — đủ để wizard chạy tiếp đúng chỗ nó dừng.
 /// File thiếu hoặc hỏng nghĩa là "làm lại từ đầu": mọi thứ thật đều được kiểm tra lại trên đĩa.
 /// </summary>
 /// <param name="Flavor">OCR flavor as written by the wizard (<c>gpu</c>/<c>cpu</c>); <see langword="null"/> before the check step decides. Flavor OCR wizard ghi (<c>gpu</c>/<c>cpu</c>); <see langword="null"/> trước khi bước check quyết định.</param>
 /// <param name="Language">Language code chosen in the wizard; <see langword="null"/> until the user answers. Mã ngôn ngữ user chọn trong wizard; <see langword="null"/> cho tới khi user trả lời.</param>
 /// <param name="Steps">Completed/failed steps keyed by step name (<c>done</c>/<c>failed</c>); <see langword="null"/> for a fresh state. Các bước đã xong/thất bại, khóa theo tên bước (<c>done</c>/<c>failed</c>); <see langword="null"/> với state mới.</param>
-public sealed record SetupState(string? Flavor = null, string? Language = null, Dictionary<string, string>? Steps = null)
+/// <param name="Tiers">OCR model tiers ticked on the "Chọn model OCR" screen (<c>tiny</c>/<c>small</c>/<c>medium</c>, in that order); <see langword="null"/> until the user answers. Các tier model OCR đã tick ở màn "Chọn model OCR" (theo thứ tự đó); <see langword="null"/> cho tới khi user trả lời.</param>
+/// <param name="ActiveTier">Tier chosen as "Dùng chính" — the pair the wizard runs; <see langword="null"/> until the user answers. Tier được chọn "Dùng chính" — cặp model wizard sẽ chạy; <see langword="null"/> cho tới khi user trả lời.</param>
+/// <param name="ExtraLangs">Extra language codes ticked on the "Ngôn ngữ bổ sung" screen; <see langword="null"/> = not asked yet, empty list = asked and none chosen. Mã ngôn ngữ bổ sung đã tick ở màn "Ngôn ngữ bổ sung"; <see langword="null"/> = chưa hỏi, list rỗng = đã hỏi và không chọn.</param>
+public sealed record SetupState(
+    string? Flavor = null,
+    string? Language = null,
+    Dictionary<string, string>? Steps = null,
+    List<string>? Tiers = null,
+    string? ActiveTier = null,
+    List<string>? ExtraLangs = null)
 {
     // internal để SystemCheck (checklist Checking) đếm model có sẵn theo cùng định nghĩa với NeedsSetup.
     // internal so SystemCheck (Checking checklist) counts installed models by the same definition as NeedsSetup.
