@@ -117,25 +117,32 @@
                 </tr>
             </thead>
             <tbody>
-                @foreach (OcrModelInfo m in _ocrModels)
+                @* Nhóm bảng theo vai trò (spec 17-11 §11): họ OCR v6, rec legacy (Ngôn ngữ), còn lại Khác. *@
+                @foreach ((string groupKey, List<OcrModelInfo> group) in OcrTableGroups())
                 {
-                    <tr style="border-top: 1px solid var(--rt-line);">
-                        <td style="padding: 6px 8px 6px 0; vertical-align: top;">
-                            <div class="rt-mono">@m.Name</div>
-                            <div class="rt-hint">@OcrMetaText(m)</div>
-                        </td>
-                        <td style="padding: 6px 8px; vertical-align: top;">
-                            <span class="rt-hint" style="@(m.Installed ? "" : "color: var(--rt-danger)")">@(m.Installed ? L["deck.ocr.installed"] : L["deck.ocr.notInstalled"])</span>
-                            @if (m.InUse)
-                            {
-                                <span class="rt-hint" style="color: var(--rt-tally)">· @(L["deck.ocr.inUse"])</span>
-                            }
-                        </td>
-                        <td style="padding: 6px 0; text-align: right; vertical-align: top; white-space: nowrap;">
-                            <button type="button" class="rt-btn rt-mini" disabled="@(m.Installed || _ocrBusy)" @onclick="() => DownloadOcrModelAsync(m)">@(L["deck.ocr.download"])</button>
-                            <button type="button" class="rt-btn rt-mini" disabled="@(m.InUse || !m.Installed || _ocrBusy)" @onclick="() => DeleteOcrModelAsync(m)">@(L["deck.ocr.delete"])</button>
-                        </td>
+                    <tr>
+                        <td colspan="3" style="padding: 8px 0 2px; color: var(--rt-dim); font-size: 11px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase;">@(L[groupKey])</td>
                     </tr>
+                    @foreach (OcrModelInfo m in group)
+                    {
+                        <tr style="border-top: 1px solid var(--rt-line);">
+                            <td style="padding: 6px 8px 6px 0; vertical-align: top;">
+                                <div class="rt-mono">@m.Name</div>
+                                <div class="rt-hint">@OcrMetaText(m)</div>
+                            </td>
+                            <td style="padding: 6px 8px; vertical-align: top;">
+                                <span class="rt-hint" style="@(m.Installed ? "" : "color: var(--rt-danger)")">@(m.Installed ? L["deck.ocr.installed"] : L["deck.ocr.notInstalled"])</span>
+                                @if (m.InUse)
+                                {
+                                    <span class="rt-hint" style="color: var(--rt-tally)">· @(L["deck.ocr.inUse"])</span>
+                                }
+                            </td>
+                            <td style="padding: 6px 0; text-align: right; vertical-align: top; white-space: nowrap;">
+                                <button type="button" class="rt-btn rt-mini" disabled="@(m.Installed || _ocrBusy)" @onclick="() => DownloadOcrModelAsync(m)">@(L["deck.ocr.download"])</button>
+                                <button type="button" class="rt-btn rt-mini" disabled="@(m.InUse || !m.Installed || _ocrBusy)" @onclick="() => DeleteOcrModelAsync(m)">@(L["deck.ocr.delete"])</button>
+                            </td>
+                        </tr>
+                    }
                 }
             </tbody>
         </table>
@@ -320,33 +327,40 @@
                     </tr>
                 </thead>
                 <tbody>
-                    @foreach (LlmModelInfo m in _llmModels)
+                    @* Nhóm động theo lớp kích thước đọc từ catalog (spec 17-11 §11 — đồng bộ màn bước 4). *@
+                    @foreach (IGrouping<string, LlmModelInfo> group in _llmModels.GroupBy(m => m.SizeClass))
                     {
-                        <tr style="border-top: 1px solid var(--rt-line);">
-                            <td style="padding: 6px 8px 6px 0; vertical-align: top;">
-                                <div class="rt-mono">@m.Name</div>
-                                <div class="rt-hint">@LlmMetaText(m)</div>
-                            </td>
-                            <td style="padding: 6px 8px; vertical-align: top;">
-                                @if (m.Downloading)
-                                {
-                                    <span class="rt-hint">@(L["deck.llm.downloading"])</span>
-                                }
-                                else
-                                {
-                                    <span class="rt-hint" style="@(m.Installed ? "" : "color: var(--rt-danger)")">@(m.Installed ? L["deck.llm.installed"] : L["deck.llm.notInstalled"])</span>
-                                }
-                                @if (m.InUse)
-                                {
-                                    <span class="rt-hint" style="color: var(--rt-tally)">· @(L["deck.llm.inUse"])</span>
-                                }
-                            </td>
-                            <td style="padding: 6px 0; text-align: right; vertical-align: top; white-space: nowrap;">
-                                <button type="button" class="rt-btn rt-mini" disabled="@(m.Installed || m.Downloading || _llmModelsBusy)" @onclick="() => DownloadLlmModelAsync(m)">@(L["deck.llm.download"])</button>
-                                <button type="button" class="rt-btn rt-mini" disabled="@(m.InUse || m.Downloading || !m.Installed || _llmModelsBusy)" @onclick="() => DeleteLlmModelAsync(m)">@(L["deck.llm.delete"])</button>
-                                <button type="button" class="rt-btn rt-mini" disabled="@(m.InUse || m.Downloading || !m.Installed || _llmModelsBusy)" @onclick="() => UseLlmModelAsync(m)">@(L["deck.llm.use"])</button>
-                            </td>
+                        <tr>
+                            <td colspan="3" style="padding: 8px 0 2px; color: var(--rt-dim); font-size: 11px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase;">@(L.Fmt("deck.llm.group", group.Key))</td>
                         </tr>
+                        @foreach (LlmModelInfo m in group)
+                        {
+                            <tr style="border-top: 1px solid var(--rt-line);">
+                                <td style="padding: 6px 8px 6px 0; vertical-align: top;">
+                                    <div class="rt-mono">@m.Name</div>
+                                    <div class="rt-hint">@LlmMetaText(m)</div>
+                                </td>
+                                <td style="padding: 6px 8px; vertical-align: top;">
+                                    @if (m.Downloading)
+                                    {
+                                        <span class="rt-hint">@(L["deck.llm.downloading"])</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="rt-hint" style="@(m.Installed ? "" : "color: var(--rt-danger)")">@(m.Installed ? L["deck.llm.installed"] : L["deck.llm.notInstalled"])</span>
+                                    }
+                                    @if (m.InUse)
+                                    {
+                                        <span class="rt-hint" style="color: var(--rt-tally)">· @(L["deck.llm.inUse"])</span>
+                                    }
+                                </td>
+                                <td style="padding: 6px 0; text-align: right; vertical-align: top; white-space: nowrap;">
+                                    <button type="button" class="rt-btn rt-mini" disabled="@(m.Installed || m.Downloading || _llmModelsBusy)" @onclick="() => DownloadLlmModelAsync(m)">@(L["deck.llm.download"])</button>
+                                    <button type="button" class="rt-btn rt-mini" disabled="@(m.InUse || m.Downloading || !m.Installed || _llmModelsBusy)" @onclick="() => DeleteLlmModelAsync(m)">@(L["deck.llm.delete"])</button>
+                                    <button type="button" class="rt-btn rt-mini" disabled="@(m.InUse || m.Downloading || !m.Installed || _llmModelsBusy)" @onclick="() => UseLlmModelAsync(m)">@(L["deck.llm.use"])</button>
+                                </td>
+                            </tr>
+                        }
                     }
                 </tbody>
             </table>
@@ -667,6 +681,19 @@
 
     private string OcrMetaText(OcrModelInfo m) =>
         $"{m.Kind} · {L.Fmt("deck.ocr.langsCount", m.Langs.Count)} · {CompactLangs(m)} · {m.SizeMb:0.#} MB";
+
+    // Nhóm bảng model OCR (spec 17-11 §11): họ OCR v6 trước, rồi rec legacy (nhóm "Ngôn ngữ"),
+    // phần còn lại (det ngoài họ v6…) vào "Khác". Thứ tự catalog giữ nguyên trong từng nhóm.
+    private IEnumerable<(string GroupKey, List<OcrModelInfo> Models)> OcrTableGroups()
+    {
+        List<OcrModelInfo> all = _ocrModels?.ToList() ?? [];
+        var v6 = all.Where(m => m.Name.StartsWith("PP-OCRv6", StringComparison.Ordinal)).ToList();
+        var langs = all.Where(m => m.Kind == "rec" && !m.Name.StartsWith("PP-OCRv6", StringComparison.Ordinal)).ToList();
+        var other = all.Where(m => !m.Name.StartsWith("PP-OCRv6", StringComparison.Ordinal) && m.Kind != "rec").ToList();
+        if (v6.Count > 0) yield return ("deck.ocr.group.v6", v6);
+        if (langs.Count > 0) yield return ("deck.ocr.group.langs", langs);
+        if (other.Count > 0) yield return ("deck.ocr.group.other", other);
+    }
 
     // Danh sách ngôn ngữ nén để vừa một dòng hint: tối đa 6 mã, phần còn lại gộp "+N".
     private static string CompactLangs(OcrModelInfo m)
