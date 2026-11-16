@@ -498,12 +498,6 @@ public sealed class PipelineController : IPipelineControl
             || ex.Message.Contains("llm-runtime-missing", StringComparison.Ordinal));
 
     /// <summary>
-    /// Lists the GGUF catalog with per-model state via Core's <c>llm.models.list</c>.
-    /// Liệt kê catalog GGUF kèm trạng thái từng model qua <c>llm.models.list</c> của Core.
-    /// </summary>
-    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
-    /// <returns>The catalog in declaration order. Catalog theo thứ tự khai báo.</returns>
-    /// <summary>
     /// The optional <c>progress</c> object of one catalog entry (<c>receivedBytes</c>/<c>totalBytes</c>/
     /// <c>bytesPerSec</c>); <see langword="null"/> when the entry carries none.
     /// Object <c>progress</c> tuỳ chọn của một entry catalog; <see langword="null"/> khi entry không có.
@@ -514,6 +508,12 @@ public sealed class PipelineController : IPipelineControl
                 ReadLong(p, "receivedBytes"), ReadLong(p, "totalBytes"), ReadDouble(p, "bytesPerSec"))
             : null;
 
+    /// <summary>
+    /// Lists the GGUF catalog with per-model state via Core's <c>llm.models.list</c>.
+    /// Liệt kê catalog GGUF kèm trạng thái từng model qua <c>llm.models.list</c> của Core.
+    /// </summary>
+    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <returns>The catalog in declaration order. Catalog theo thứ tự khai báo.</returns>
     public async Task<IReadOnlyList<LlmModelInfo>> ListLlmModelsAsync(CancellationToken ct)
     {
         await EnsureCoreStartedAsync(ct).ConfigureAwait(false);

@@ -192,11 +192,14 @@ public static class OcrModelChoices
     }
 
     /// <summary>
-    /// The variant shown for a language row: the installed one when any, otherwise the first.
-    /// Bản hiển thị cho một dòng ngôn ngữ: bản đã cài nếu có, ngược lại bản đầu.
+    /// The variant shown for a language row: the installed one when any, otherwise the first; an
+    /// empty string when the choice carries no variants (defensive — catalog-derived rows always
+    /// have at least one).
+    /// Bản hiển thị cho một dòng ngôn ngữ: bản đã cài nếu có, ngược lại bản đầu; chuỗi rỗng khi
+    /// choice không có bản nào (phòng thủ — dòng suy từ catalog luôn có ít nhất một).
     /// </summary>
     public static string DefaultVariant(LanguageChoice choice, IReadOnlyCollection<string> installed) =>
-        choice.Variants.FirstOrDefault(installed.Contains) ?? choice.Variants[0];
+        choice.Variants.FirstOrDefault(installed.Contains) ?? choice.Variants.FirstOrDefault() ?? string.Empty;
 
     /// <summary>
     /// Preselection for one OCR block (det or rec): installed candidates are ticked and locked, a

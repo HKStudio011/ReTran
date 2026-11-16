@@ -228,6 +228,15 @@ public class OcrModelChoicesTests
     }
 
     [Fact]
+    public void DefaultVariant_EmptyVariants_ReturnsEmpty()
+    {
+        // Phòng thủ: choice không bản nào (catalog thật không tạo ra) → chuỗi rỗng, không ném.
+        var choice = new LanguageChoice("ko", []);
+
+        Assert.Equal(string.Empty, OcrModelChoices.DefaultVariant(choice, []));
+    }
+
+    [Fact]
     public void NeededModels_Union_NoDup()
     {
         var needed = OcrModelChoices.NeededModels(

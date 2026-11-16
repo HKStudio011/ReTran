@@ -443,9 +443,10 @@
 
     private static string FormatMb(double mb) => $"{mb:0.#} MB";
 
-    // Kích thước model LLM: catalog ghi theo byte thập phân — hiện GB khi đủ lớn, còn lại MB.
+    // Kích thước model LLM: catalog ghi theo byte thập phân — hiện GB khi đủ lớn, còn lại MB (cùng
+    // hệ đơn vị thập phân với Settings để hai chỗ hiển thị khớp nhau).
     private static string FormatSize(long bytes) =>
-        bytes >= 1_000_000_000 ? $"{bytes / 1_000_000_000.0:0.#} GB" : FormatMb(bytes / 1_048_576.0);
+        bytes >= 1_000_000_000 ? $"{bytes / 1_000_000_000.0:0.#} GB" : FormatMb(bytes / 1_000_000.0);
 
     private static string FlavorLabel(OcrFlavor flavor) => flavor == OcrFlavor.Gpu ? "GPU" : "CPU";
 
@@ -669,7 +670,7 @@
     private double LlmTotalMb() => _llmTicks
         .Select(name => _llmModelsList.FirstOrDefault(m => m.Name == name))
         .Where(m => m is { Installed: false, Downloading: false })
-        .Sum(m => m!.SizeBytes) / (1024.0 * 1024.0);
+        .Sum(m => m!.SizeBytes) / 1_000_000.0;
 
     private async Task ConfirmLlmModelsAsync()
     {

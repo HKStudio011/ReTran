@@ -1130,12 +1130,6 @@ public sealed class SetupCoordinator
     }
 
     /// <summary>
-    /// Whether <c>llm.runtime.status</c> reports an installed runtime (the server binary exists on
-    /// disk); a malformed or missing field counts as not installed.
-    /// <c>llm.runtime.status</c> có báo runtime đã cài không (binary server tồn tại trên đĩa); field
-    /// thiếu hoặc sai định dạng coi như chưa cài.
-    /// </summary>
-    /// <summary>
     /// The (current, latest) llama.cpp tags from <c>llm.runtime.check</c>; (null, null) when the call
     /// fails (offline) so a network problem never blocks the wizard.
     /// Cặp tag llama.cpp (current, latest) từ <c>llm.runtime.check</c>; (null, null) khi lời gọi lỗi
@@ -1159,6 +1153,12 @@ public sealed class SetupCoordinator
     private static string? ReadString(JsonNode? node, string key) =>
         node is JsonObject obj && obj[key] is JsonValue v && v.TryGetValue<string>(out string? s) ? s : null;
 
+    /// <summary>
+    /// Whether <c>llm.runtime.status</c> reports an installed runtime (the server binary exists on
+    /// disk); a malformed or missing field counts as not installed.
+    /// <c>llm.runtime.status</c> có báo runtime đã cài không (binary server tồn tại trên đĩa); field
+    /// thiếu hoặc sai định dạng coi như chưa cài.
+    /// </summary>
     private async Task<bool> IsLlmRuntimeInstalledAsync(CancellationToken ct)
     {
         JsonNode? status = await _bridge.CallAsync("llm.runtime.status", null, ct).ConfigureAwait(false);
