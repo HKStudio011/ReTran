@@ -63,4 +63,11 @@ public class I18nServiceTests
     {
         Assert.Contains(Create().Lang, new[] { "vi", "en" });
     }
+
+    [Fact]
+    public void LanguageNames_HaveNativeTamilTelugu()
+    {
+        Assert.Equal("தமிழ்", I18nStrings.LanguageName("ta"));
+        Assert.Equal("తెలుగు", I18nStrings.LanguageName("te"));
+    }
 }

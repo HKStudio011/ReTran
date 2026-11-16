@@ -999,6 +999,8 @@ public static class I18nStrings
         ["th"] = "ไทย",
         ["el"] = "Ελληνικά",
         ["hi"] = "हिन्दी",
+        ["ta"] = "தமிழ்",
+        ["te"] = "తెలుగు",
     };
 
     /// <summary>
