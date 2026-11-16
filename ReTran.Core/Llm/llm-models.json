@@ -1,0 +1,14 @@
+[
+  { "name": "Hy-MT2-1.8B-UD-Q4_K_XL", "repo": "unsloth/Hy-MT2-1.8B-GGUF", "file": "Hy-MT2-1.8B-UD-Q4_K_XL.gguf", "sizeBytes": 1170000000, "quant": "UD-Q4_K_XL", "sizeClass": "1.8B" },
+  { "name": "Hy-MT2-1.8B-UD-Q3_K_XL", "repo": "unsloth/Hy-MT2-1.8B-GGUF", "file": "Hy-MT2-1.8B-UD-Q3_K_XL.gguf", "sizeBytes": 990000000, "quant": "UD-Q3_K_XL", "sizeClass": "1.8B" },
+  { "name": "Hy-MT2-1.8B-Q4_K_M", "repo": "unsloth/Hy-MT2-1.8B-GGUF", "file": "Hy-MT2-1.8B-Q4_K_M.gguf", "sizeBytes": 1130000000, "quant": "Q4_K_M", "sizeClass": "1.8B" },
+  { "name": "Hy-MT2-1.8B-Q5_K_M", "repo": "unsloth/Hy-MT2-1.8B-GGUF", "file": "Hy-MT2-1.8B-Q5_K_M.gguf", "sizeBytes": 1300000000, "quant": "Q5_K_M", "sizeClass": "1.8B" },
+  { "name": "Hy-MT2-1.8B-Q6_K", "repo": "unsloth/Hy-MT2-1.8B-GGUF", "file": "Hy-MT2-1.8B-Q6_K.gguf", "sizeBytes": 1470000000, "quant": "Q6_K", "sizeClass": "1.8B" },
+  { "name": "Hy-MT2-1.8B-Q8_0", "repo": "unsloth/Hy-MT2-1.8B-GGUF", "file": "Hy-MT2-1.8B-Q8_0.gguf", "sizeBytes": 1910000000, "quant": "Q8_0", "sizeClass": "1.8B" },
+  { "name": "Hy-MT2-7B-UD-Q4_K_XL", "repo": "unsloth/Hy-MT2-7B-GGUF", "file": "Hy-MT2-7B-UD-Q4_K_XL.gguf", "sizeBytes": 4780000000, "quant": "UD-Q4_K_XL", "sizeClass": "7B" },
+  { "name": "Hy-MT2-7B-UD-Q3_K_XL", "repo": "unsloth/Hy-MT2-7B-GGUF", "file": "Hy-MT2-7B-UD-Q3_K_XL.gguf", "sizeBytes": 3960000000, "quant": "UD-Q3_K_XL", "sizeClass": "7B" },
+  { "name": "Hy-MT2-7B-Q4_K_M", "repo": "unsloth/Hy-MT2-7B-GGUF", "file": "Hy-MT2-7B-Q4_K_M.gguf", "sizeBytes": 4620000000, "quant": "Q4_K_M", "sizeClass": "7B" },
+  { "name": "Hy-MT2-7B-Q5_K_M", "repo": "unsloth/Hy-MT2-7B-GGUF", "file": "Hy-MT2-7B-Q5_K_M.gguf", "sizeBytes": 5370000000, "quant": "Q5_K_M", "sizeClass": "7B" },
+  { "name": "Hy-MT2-7B-Q6_K", "repo": "unsloth/Hy-MT2-7B-GGUF", "file": "Hy-MT2-7B-Q6_K.gguf", "sizeBytes": 6160000000, "quant": "Q6_K", "sizeClass": "7B" },
+  { "name": "Hy-MT2-7B-Q8_0", "repo": "unsloth/Hy-MT2-7B-GGUF", "file": "Hy-MT2-7B-Q8_0.gguf", "sizeBytes": 7980000000, "quant": "Q8_0", "sizeClass": "7B" }
+]

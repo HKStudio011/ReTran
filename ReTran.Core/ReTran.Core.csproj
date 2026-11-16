@@ -16,4 +16,8 @@
     <!-- BoxAnnotationStyle is internal (rendering detail); tests exercise the fitter directly. -->
     <InternalsVisibleTo Include="ReTran.Tests" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Curated GGUF catalog as data — adding a quant/size is a data edit, not a code change. -->
+    <Content Include="Llm\llm-models.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

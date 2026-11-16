@@ -17,7 +17,23 @@ namespace ReTran.Core.Llm;
 /// <param name="Downloading">A download thread is running. Có thread tải đang chạy.</param>
 public sealed record LlmModelInfo(
     string Name, string Quant, string SizeClass, long SizeBytes,
-    bool Installed, bool InUse, bool Downloading);
+    bool Installed, bool InUse, bool Downloading)
+{
+    /// <summary>
+    /// In-flight download progress; <see langword="null"/> unless a download is running and
+    /// reporting. Tiến độ tải đang chạy; <see langword="null"/> trừ khi có lượt tải đang báo tiến độ.
+    /// </summary>
+    public LlmDownloadProgress? Progress { get; init; }
+}
+
+/// <summary>
+/// Byte-level progress of one in-flight download (wizard vòng 2 §9 — % + ETA).
+/// Tiến độ theo byte của một lượt tải đang chạy (wizard vòng 2 §9 — % + ETA).
+/// </summary>
+/// <param name="ReceivedBytes">Bytes written so far. Số byte đã ghi.</param>
+/// <param name="TotalBytes">Total bytes from content-length, or 0 when unknown. Tổng byte theo content-length, hoặc 0 khi chưa biết.</param>
+/// <param name="BytesPerSec">Average speed so far in bytes/second, or <see langword="null"/>. Tốc độ trung bình tới giờ (byte/giây), hoặc <see langword="null"/>.</param>
+public sealed record LlmDownloadProgress(long ReceivedBytes, long TotalBytes, double? BytesPerSec);
 
 /// <summary>
 /// Core-side manager for the curated GGUF catalog: filesystem-derived installed state (a
@@ -41,9 +57,12 @@ public sealed class LlmModelManager(
 
     private readonly string _modelsDir = modelsDir ?? throw new ArgumentNullException(nameof(modelsDir));
     private readonly string _stateFile = stateFile ?? throw new ArgumentNullException(nameof(stateFile));
-    private readonly Func<LlmModelSpec, string, CancellationToken, Task> _downloader = downloader ?? DefaultDownloadAsync;
+    // Bound lazily at use: the default downloader reports progress, so it must be an instance method.
+    // Gắn muộn lúc dùng: downloader mặc định báo tiến độ nên phải là instance method.
+    private readonly Func<LlmModelSpec, string, CancellationToken, Task>? _downloader = downloader;
     private readonly object _lock = new();
     private readonly Dictionary<string, Thread> _downloads = new();
+    private readonly Dictionary<string, LlmDownloadProgress> _progress = new();
     private string? _active = ReadActive(stateFile);
 
     /// <summary>Absolute path of one model's GGUF file. Đường dẫn tuyệt đối file GGUF của một model.</summary>
@@ -84,7 +103,10 @@ public sealed class LlmModelManager(
             return LlmModelCatalog.All
                 .Select(spec => new LlmModelInfo(
                     spec.Name, spec.Quant, spec.SizeClass, spec.SizeBytes,
-                    IsInstalled(spec), _active == spec.Name, _downloads.ContainsKey(spec.Name)))
+                    IsInstalled(spec), _active == spec.Name, _downloads.ContainsKey(spec.Name))
+                {
+                    Progress = _progress.TryGetValue(spec.Name, out LlmDownloadProgress? p) ? p : null,
+                })
                 .ToList();
         }
     }
@@ -167,7 +189,8 @@ public sealed class LlmModelManager(
         try
         {
             Directory.CreateDirectory(_modelsDir);
-            _downloader(spec, partial, CancellationToken.None).GetAwaiter().GetResult();
+            Func<LlmModelSpec, string, CancellationToken, Task> download = _downloader ?? DefaultDownloadAsync;
+            download(spec, partial, CancellationToken.None).GetAwaiter().GetResult();
             File.Move(partial, path, overwrite: true);
         }
         catch (Exception)
@@ -181,6 +204,7 @@ public sealed class LlmModelManager(
             lock (_lock)
             {
                 _downloads.Remove(spec.Name);
+                _progress.Remove(spec.Name);
             }
         }
     }
@@ -214,14 +238,46 @@ public sealed class LlmModelManager(
         }
     }
 
-    private static async Task DefaultDownloadAsync(LlmModelSpec spec, string target, CancellationToken ct)
+    /// <summary>
+    /// Reports byte-level progress of an in-flight download (called by the downloader; tests call it
+    /// directly on a blocked fake). Báo tiến độ theo byte của một lượt tải (do downloader gọi; test
+    /// gọi trực tiếp trên fake đang chặn).
+    /// </summary>
+    /// <param name="name">Catalog name. Tên catalog.</param>
+    /// <param name="receivedBytes">Bytes written so far. Số byte đã ghi.</param>
+    /// <param name="totalBytes">Total bytes, or 0 when unknown. Tổng byte, hoặc 0 khi chưa biết.</param>
+    /// <param name="bytesPerSec">Average speed, or <see langword="null"/>. Tốc độ trung bình, hoặc <see langword="null"/>.</param>
+    internal void ReportDownloadProgress(string name, long receivedBytes, long totalBytes, double? bytesPerSec)
+    {
+        lock (_lock)
+        {
+            _progress[name] = new LlmDownloadProgress(receivedBytes, totalBytes, bytesPerSec);
+        }
+    }
+
+    private async Task DefaultDownloadAsync(LlmModelSpec spec, string target, CancellationToken ct)
     {
         string url = $"https://huggingface.co/{spec.Repo}/resolve/main/{spec.File}";
         using HttpResponseMessage response =
             await SharedClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
+        long total = response.Content.Headers.ContentLength ?? 0;
         await using Stream source = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         await using FileStream destination = File.Create(target);
-        await source.CopyToAsync(destination, ct).ConfigureAwait(false);
+
+        // Read in chunks so progress can be reported (wizard vòng 2 §9: % + ETA needs received/total/speed).
+        // Đọc theo chunk để báo được tiến độ (wizard vòng 2 §9: % + ETA cần received/total/speed).
+        byte[] buffer = new byte[81920];
+        long received = 0;
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        ReportDownloadProgress(spec.Name, 0, total, null);
+        int read;
+        while ((read = await source.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+        {
+            await destination.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+            received += read;
+            double seconds = stopwatch.Elapsed.TotalSeconds;
+            ReportDownloadProgress(spec.Name, received, total, seconds > 0.5 ? received / seconds : null);
+        }
     }
 }

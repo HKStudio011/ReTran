@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace ReTran.Core.Llm;
 
 /// <summary>
@@ -14,32 +16,56 @@ public sealed record LlmModelSpec(
     string Name, string Repo, string File, long SizeBytes, string Quant, string SizeClass);
 
 /// <summary>
-/// Curated GGUF catalog: Hy-MT2 1.8B and 7B from the unsloth repos, six quantizations each.
-/// <c>UD-Q4_K_XL</c> is the default the model card's llama.cpp examples use. Sizes are from the
-/// Hugging Face file listings (verified 2026-11-12), rounded to the decimal-GB figures shown there.
-/// Catalog GGUF tuyển chọn: Hy-MT2 1.8B và 7B từ repo unsloth, mỗi bên sáu mức lượng tử hoá.
-/// <c>UD-Q4_K_XL</c> là mặc định mà ví dụ llama.cpp của model card dùng. Kích thước lấy từ listing
-/// file trên Hugging Face (kiểm chứng 2026-11-12), làm tròn theo số GB thập phân hiển thị ở đó.
+/// Curated GGUF catalog loaded from <c>Llm/llm-models.json</c> next to the assembly (wizard vòng 2
+/// §8): adding a quantization or a size class is a data edit — no code change. <c>UD-Q4_K_XL</c> is
+/// the default the model card's llama.cpp examples use. A missing or malformed file yields an empty
+/// catalog and one stderr line — never a throw.
+/// Catalog GGUF tuyển chọn nạp từ <c>Llm/llm-models.json</c> cạnh assembly (wizard vòng 2 §8): thêm
+/// một mức lượng tử hoá hay lớp kích thước là sửa dữ liệu — không sửa code. <c>UD-Q4_K_XL</c> là mặc
+/// định mà ví dụ llama.cpp của model card dùng. File thiếu hoặc hỏng cho catalog rỗng kèm một dòng
+/// stderr — không bao giờ ném.
 /// </summary>
 public static class LlmModelCatalog
 {
-    /// <summary>All selectable models. Toàn bộ model chọn được.</summary>
-    public static IReadOnlyList<LlmModelSpec> All { get; } =
-    [
-        // 1.8B — unsloth/Hy-MT2-1.8B-GGUF
-        new("Hy-MT2-1.8B-UD-Q4_K_XL", "unsloth/Hy-MT2-1.8B-GGUF", "Hy-MT2-1.8B-UD-Q4_K_XL.gguf", 1_170_000_000, "UD-Q4_K_XL", "1.8B"),
-        new("Hy-MT2-1.8B-UD-Q3_K_XL", "unsloth/Hy-MT2-1.8B-GGUF", "Hy-MT2-1.8B-UD-Q3_K_XL.gguf", 990_000_000, "UD-Q3_K_XL", "1.8B"),
-        new("Hy-MT2-1.8B-Q4_K_M", "unsloth/Hy-MT2-1.8B-GGUF", "Hy-MT2-1.8B-Q4_K_M.gguf", 1_130_000_000, "Q4_K_M", "1.8B"),
-        new("Hy-MT2-1.8B-Q5_K_M", "unsloth/Hy-MT2-1.8B-GGUF", "Hy-MT2-1.8B-Q5_K_M.gguf", 1_300_000_000, "Q5_K_M", "1.8B"),
-        new("Hy-MT2-1.8B-Q6_K", "unsloth/Hy-MT2-1.8B-GGUF", "Hy-MT2-1.8B-Q6_K.gguf", 1_470_000_000, "Q6_K", "1.8B"),
-        new("Hy-MT2-1.8B-Q8_0", "unsloth/Hy-MT2-1.8B-GGUF", "Hy-MT2-1.8B-Q8_0.gguf", 1_910_000_000, "Q8_0", "1.8B"),
+    private static readonly JsonSerializerOptions SerializerOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true,
+    };
 
-        // 7B — unsloth/Hy-MT2-7B-GGUF
-        new("Hy-MT2-7B-UD-Q4_K_XL", "unsloth/Hy-MT2-7B-GGUF", "Hy-MT2-7B-UD-Q4_K_XL.gguf", 4_780_000_000, "UD-Q4_K_XL", "7B"),
-        new("Hy-MT2-7B-UD-Q3_K_XL", "unsloth/Hy-MT2-7B-GGUF", "Hy-MT2-7B-UD-Q3_K_XL.gguf", 3_960_000_000, "UD-Q3_K_XL", "7B"),
-        new("Hy-MT2-7B-Q4_K_M", "unsloth/Hy-MT2-7B-GGUF", "Hy-MT2-7B-Q4_K_M.gguf", 4_620_000_000, "Q4_K_M", "7B"),
-        new("Hy-MT2-7B-Q5_K_M", "unsloth/Hy-MT2-7B-GGUF", "Hy-MT2-7B-Q5_K_M.gguf", 5_370_000_000, "Q5_K_M", "7B"),
-        new("Hy-MT2-7B-Q6_K", "unsloth/Hy-MT2-7B-GGUF", "Hy-MT2-7B-Q6_K.gguf", 6_160_000_000, "Q6_K", "7B"),
-        new("Hy-MT2-7B-Q8_0", "unsloth/Hy-MT2-7B-GGUF", "Hy-MT2-7B-Q8_0.gguf", 7_980_000_000, "Q8_0", "7B"),
-    ];
+    private static readonly Lazy<IReadOnlyList<LlmModelSpec>> LazyAll = new(() => Load());
+
+    /// <summary>All selectable models, in file order. Toàn bộ model chọn được, theo thứ tự trong file.</summary>
+    public static IReadOnlyList<LlmModelSpec> All => LazyAll.Value;
+
+    /// <summary>
+    /// Loads the catalog from a JSON array file; the default path is <c>Llm/llm-models.json</c> next
+    /// to the assembly. Missing, malformed or unreadable input returns an empty catalog after one
+    /// stderr line.
+    /// Nạp catalog từ file mảng JSON; đường dẫn mặc định là <c>Llm/llm-models.json</c> cạnh assembly.
+    /// File thiếu, hỏng hoặc không đọc được trả catalog rỗng kèm một dòng stderr.
+    /// </summary>
+    /// <param name="path">Override path (tests), or <see langword="null"/> for the default. Đường dẫn ghi đè (test), hoặc <see langword="null"/> để dùng mặc định.</param>
+    /// <returns>The specs in file order, or an empty list. Các spec theo thứ tự file, hoặc danh sách rỗng.</returns>
+    internal static IReadOnlyList<LlmModelSpec> Load(string? path = null)
+    {
+        string target = path ?? Path.Combine(AppContext.BaseDirectory, "Llm", "llm-models.json");
+        try
+        {
+            if (!File.Exists(target))
+            {
+                Console.Error.WriteLine($"llm.catalog: missing {target}");
+                return [];
+            }
+
+            List<LlmModelSpec>? specs =
+                JsonSerializer.Deserialize<List<LlmModelSpec>>(File.ReadAllText(target), SerializerOptions);
+            return specs ?? [];
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"llm.catalog: unreadable {target}: {ex.Message}");
+            return [];
+        }
+    }
 }

@@ -151,6 +151,31 @@ public class LlmModelManagerTests : IDisposable
         Assert.Throws<RpcMethodException>(() => manager.Delete("nope"));
     }
 
+    [Fact]
+    public async Task Progress_AppearsDuringDownload_AndClears()
+    {
+        // Tiến độ byte chỉ có khi lượt tải đang chạy và có báo (spec vòng 2 §9); xong thì biến mất.
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        LlmModelManager manager = Create(async (spec, path, ct) =>
+        {
+            await gate.Task.WaitAsync(ct);
+            await WriteBytesAsync(spec, path, ct);
+        });
+
+        Assert.True(manager.StartDownload("Hy-MT2-1.8B-Q6_K"));
+        manager.ReportDownloadProgress("Hy-MT2-1.8B-Q6_K", 100, 400, 50.0);
+
+        LlmModelInfo info = manager.List().Single(i => i.Name == "Hy-MT2-1.8B-Q6_K");
+        Assert.NotNull(info.Progress);
+        Assert.Equal(100, info.Progress!.ReceivedBytes);
+        Assert.Equal(400, info.Progress.TotalBytes);
+        Assert.Equal(50.0, info.Progress.BytesPerSec);
+
+        gate.SetResult();
+        Assert.True(await WaitUntilInstalledAsync(manager, "Hy-MT2-1.8B-Q6_K"));
+        Assert.Null(manager.List().Single(i => i.Name == "Hy-MT2-1.8B-Q6_K").Progress);
+    }
+
     private static async Task<bool> WaitUntilInstalledAsync(LlmModelManager manager, string name)
     {
         var sw = Stopwatch.StartNew();
