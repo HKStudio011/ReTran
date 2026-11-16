@@ -43,7 +43,14 @@ public sealed record WindowInfo(string Hwnd, string Title, string Process);
 /// <param name="Installed">Whether the model files are present in the cache. File model có sẵn trong cache hay không.</param>
 /// <param name="InUse">Whether the model is part of the sidecar's active pair. Model có nằm trong cặp đang dùng của sidecar hay không.</param>
 public sealed record OcrModelInfo(
-    string Name, string Kind, IReadOnlyList<string> Langs, double SizeMb, bool Installed, bool InUse);
+    string Name, string Kind, IReadOnlyList<string> Langs, double SizeMb, bool Installed, bool InUse)
+{
+    /// <summary>
+    /// In-flight download progress; <see langword="null"/> unless a download is running and
+    /// reporting. Tiến độ tải đang chạy; <see langword="null"/> trừ khi có lượt tải đang báo tiến độ.
+    /// </summary>
+    public ReTran_App.Services.Setup.DownloadProgress? Progress { get; init; }
+}
 
 /// <summary>
 /// One OCR engine parameter from the sidecar schema (<c>ocr.config.schema</c>): its key, UI
@@ -93,7 +100,14 @@ public sealed record OcrConfigSetResult(
 /// <param name="InUse">The active model for local mode. Model đang dùng cho chế độ local.</param>
 /// <param name="Downloading">A background download is running. Có lượt tải nền đang chạy.</param>
 public sealed record LlmModelInfo(
-    string Name, string Quant, string SizeClass, long SizeBytes, bool Installed, bool InUse, bool Downloading);
+    string Name, string Quant, string SizeClass, long SizeBytes, bool Installed, bool InUse, bool Downloading)
+{
+    /// <summary>
+    /// In-flight download progress; <see langword="null"/> unless a download is running and
+    /// reporting. Tiến độ tải đang chạy; <see langword="null"/> trừ khi có lượt tải đang báo tiến độ.
+    /// </summary>
+    public ReTran_App.Services.Setup.DownloadProgress? Progress { get; init; }
+}
 
 /// <summary>
 /// Installed state of the llama.cpp runtime (<c>llm.runtime.status</c>).
@@ -461,7 +475,10 @@ public sealed class PipelineController : IPipelineControl
                     langs,
                     ReadDouble(model, "sizeMb"),
                     ReadBool(model, "installed"),
-                    ReadBool(model, "inUse")));
+                    ReadBool(model, "inUse"))
+                {
+                    Progress = ReadProgress(model),
+                });
             }
         }
         return models;
@@ -486,6 +503,17 @@ public sealed class PipelineController : IPipelineControl
     /// </summary>
     /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
     /// <returns>The catalog in declaration order. Catalog theo thứ tự khai báo.</returns>
+    /// <summary>
+    /// The optional <c>progress</c> object of one catalog entry (<c>receivedBytes</c>/<c>totalBytes</c>/
+    /// <c>bytesPerSec</c>); <see langword="null"/> when the entry carries none.
+    /// Object <c>progress</c> tuỳ chọn của một entry catalog; <see langword="null"/> khi entry không có.
+    /// </summary>
+    private static ReTran_App.Services.Setup.DownloadProgress? ReadProgress(JsonObject model) =>
+        model["progress"] is JsonObject p
+            ? new ReTran_App.Services.Setup.DownloadProgress(
+                ReadLong(p, "receivedBytes"), ReadLong(p, "totalBytes"), ReadDouble(p, "bytesPerSec"))
+            : null;
+
     public async Task<IReadOnlyList<LlmModelInfo>> ListLlmModelsAsync(CancellationToken ct)
     {
         await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
@@ -505,7 +533,10 @@ public sealed class PipelineController : IPipelineControl
                     ReadLong(model, "sizeBytes"),
                     ReadBool(model, "installed"),
                     ReadBool(model, "inUse"),
-                    ReadBool(model, "downloading")));
+                    ReadBool(model, "downloading"))
+                {
+                    Progress = ReadProgress(model),
+                });
             }
         }
         return models;
