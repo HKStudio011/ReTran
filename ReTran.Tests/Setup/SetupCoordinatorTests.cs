@@ -528,6 +528,8 @@ public class SetupCoordinatorTests : IDisposable
         Assert.Equal(SetupStep.Done, coordinator.Step);
         // Bước 8 chạy lại (tải runtime) thay vì skip theo marker cũ.
         Assert.Equal(["cpu"], _bridge.LlmRuntimeDownloads);
+        // Bước 9 chạy lại: tải OCR còn thiếu + GGUF đã chọn.
+        Assert.Equal(["Hy-MT2-1.8B-UD-Q4_K_XL"], _bridge.LlmDownloaded);
     }
 
     [Fact]
@@ -641,17 +643,21 @@ public class SetupCoordinatorTests : IDisposable
     // ── Tải theo lựa chọn + Applying + reconcile (2026-11-16, Review Focus #3/#4/#5) ───────────────
 
     [Fact]
-    public async Task DownloadSet_TiersLegacyMainExtras()
+    public async Task DownloadSet_V2_TiersLegacyLlm()
     {
-        // Tick small+medium, main ko (ngoài phủ v6), extra ru → tải đúng bộ 6 tên, đúng thứ tự.
+        // Tick det/rec small, tick tiếng Hàn ở bước 3, chọn 1 LLM ⇒ tải đủ 3 model OCR + 1 GGUF.
         WriteSetupJson("""
             {
               "flavor": "cpu",
-              "language": "ko",
-              "tiers": ["small", "medium"],
-              "activeTier": "small",
-              "extraLangs": ["ru"],
-              "llmModels": []
+              "language": "vi",
+              "dets": ["PP-OCRv6_small_det"],
+              "activeDet": "PP-OCRv6_small_det",
+              "recs": ["PP-OCRv6_small_rec"],
+              "activeRec": "PP-OCRv6_small_rec",
+              "langs": ["korean_PP-OCRv5_mobile_rec"],
+              "activeLang": null,
+              "llmModels": ["Hy-MT2-1.8B-UD-Q4_K_XL"],
+              "activeLlm": "Hy-MT2-1.8B-UD-Q4_K_XL"
             }
             """);
         var coordinator = NewCoordinator(adapters: Adapters()); // máy không NVIDIA → flavor CPU
@@ -660,14 +666,9 @@ public class SetupCoordinatorTests : IDisposable
 
         Assert.Equal(SetupStep.Done, coordinator.Step);
         Assert.Equal(
-            new[]
-            {
-                "PP-OCRv6_small_det", "PP-OCRv6_small_rec",
-                "PP-OCRv6_medium_det", "PP-OCRv6_medium_rec",
-                "korean_PP-OCRv5_mobile_rec",
-                "cyrillic_PP-OCRv5_mobile_rec",
-            },
+            new[] { "PP-OCRv6_small_det", "PP-OCRv6_small_rec", "korean_PP-OCRv5_mobile_rec" },
             _bridge.Downloaded);
+        Assert.Equal(["Hy-MT2-1.8B-UD-Q4_K_XL"], _bridge.LlmDownloaded);
     }
 
     [Fact]
@@ -823,6 +824,137 @@ public class SetupCoordinatorTests : IDisposable
         Assert.Equal("done", state.Steps!["downloadingmodels"]);
         Assert.Equal("done", state.Steps["applying"]);
         Assert.Empty(_bridge.Calls);
+    }
+
+    [Fact]
+    public async Task Applying_V2_PairAndLlmActive()
+    {
+        // activeLang (korean) thắng rec v6 khi Applying; activeLlm ghi settings + gọi llm.models.set.
+        WriteSetupJson("""
+            {
+              "flavor": "cpu",
+              "language": "vi",
+              "dets": ["PP-OCRv6_medium_det"],
+              "activeDet": "PP-OCRv6_medium_det",
+              "recs": ["PP-OCRv6_medium_rec"],
+              "activeRec": "PP-OCRv6_medium_rec",
+              "langs": ["korean_PP-OCRv5_mobile_rec"],
+              "activeLang": "korean_PP-OCRv5_mobile_rec",
+              "llmModels": ["Hy-MT2-7B-Q5_K_M"],
+              "activeLlm": "Hy-MT2-7B-Q5_K_M"
+            }
+            """);
+        var coordinator = NewCoordinator(adapters: Adapters());
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        AppSettings settings = _settings.Load();
+        Assert.Equal("PP-OCRv6_medium_det", settings.OcrDet);
+        Assert.Equal("korean_PP-OCRv5_mobile_rec", settings.OcrRec);
+        Assert.Equal("Hy-MT2-7B-Q5_K_M", settings.LlmActiveModel);
+        Assert.Equal(["Hy-MT2-7B-Q5_K_M"], _bridge.LlmSetCalls);
+    }
+
+    [Fact]
+    public async Task Applying_LlmSetFails_StillWritesSettings()
+    {
+        // llm.models.set từ chối (Core coi model chưa cài) ⇒ best-effort: settings vẫn ghi, không Failed.
+        WriteSetupJson("""
+            {
+              "flavor": "cpu",
+              "language": "vi",
+              "dets": ["PP-OCRv6_small_det"],
+              "activeDet": "PP-OCRv6_small_det",
+              "recs": ["PP-OCRv6_small_rec"],
+              "activeRec": "PP-OCRv6_small_rec",
+              "langs": [],
+              "llmModels": ["Hy-MT2-1.8B-UD-Q4_K_XL"],
+              "activeLlm": "Hy-MT2-1.8B-UD-Q4_K_XL"
+            }
+            """);
+        _bridge.LlmSetThrows = true;
+        var coordinator = NewCoordinator(adapters: Adapters());
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Equal("Hy-MT2-1.8B-UD-Q4_K_XL", _settings.Load().LlmActiveModel);
+        Assert.Empty(_bridge.LlmSetCalls); // RPC bị từ chối — không ghi nhận
+    }
+
+    [Fact]
+    public async Task Reconcile_LlmActiveMismatch_ClearsApplying()
+    {
+        // Settings đang trỏ LLM khác activeLlm ⇒ chỉ bước Applying chạy lại (ghi lại + set lại model).
+        WriteSetupJson("""
+            {
+              "flavor": "cpu",
+              "language": "vi",
+              "dets": ["PP-OCRv6_small_det"],
+              "activeDet": "PP-OCRv6_small_det",
+              "recs": ["PP-OCRv6_small_rec"],
+              "activeRec": "PP-OCRv6_small_rec",
+              "langs": [],
+              "llmModels": ["Hy-MT2-1.8B-UD-Q4_K_XL"],
+              "activeLlm": "Hy-MT2-1.8B-UD-Q4_K_XL",
+              "steps": {
+                "checking": "done",
+                "verifyingfiles": "done",
+                "syncing": "done",
+                "verifyingsidecar": "done",
+                "downloadingllmruntime": "done",
+                "downloadingmodels": "done",
+                "applying": "done"
+              }
+            }
+            """);
+        WriteSettingsJson("""{"provider":"google","src":"auto","dst":"vi","ocrDet":"PP-OCRv6_small_det","ocrRec":"PP-OCRv6_small_rec","llmActiveModel":"Hy-MT2-7B-Q5_K_M"}""");
+        var coordinator = NewCoordinator(adapters: Adapters());
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Equal("Hy-MT2-1.8B-UD-Q4_K_XL", _settings.Load().LlmActiveModel);
+        Assert.Equal(["Hy-MT2-1.8B-UD-Q4_K_XL"], _bridge.LlmSetCalls);
+        Assert.Empty(_bridge.Downloaded); // models đủ (seam mặc định true) → không tải gì
+    }
+
+    [Fact]
+    public async Task Reconcile_OcrRuns_BeforeLlmAnswered()
+    {
+        // Bước 4 chưa trả lời vẫn phải reconcile phần OCR: medium_rec mất khỏi đĩa ⇒ clear marker
+        // tải NGAY khi Checking xong, dù wizard đang dừng ở màn LLM.
+        WriteSetupJson("""
+            {
+              "flavor": "cpu",
+              "language": "vi",
+              "tiers": ["small", "medium"],
+              "activeTier": "medium",
+              "extraLangs": [],
+              "steps": {
+                "checking": "done",
+                "verifyingfiles": "done",
+                "syncing": "done",
+                "verifyingsidecar": "done",
+                "downloadingllmruntime": "done",
+                "downloadingmodels": "done",
+                "applying": "done"
+              }
+            }
+            """);
+        var coordinator = NewCoordinator(
+            adapters: Adapters(),
+            modelDirExists: path => !HasModelDir(path, "PP-OCRv6_medium_rec"));
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.ChoosingLlmModels, coordinator.Step);
+        Assert.DoesNotContain("downloadingmodels", ReadSetupJson().Steps!.Keys);
+
+        await coordinator.ContinueWithLlmModelsAsync([], null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Contains("PP-OCRv6_medium_rec", _bridge.Downloaded); // tải bù đúng model thiếu
     }
 
     // ── Amendment A2: đổi flavor phải được user xác nhận ──────────────────────────────────────────
@@ -1445,6 +1577,21 @@ public class SetupCoordinatorTests : IDisposable
 
         public List<string> Downloaded { get; } = [];
 
+        /// <summary>GGUF names the fake reports installed. Tên GGUF fake báo đã cài.</summary>
+        public HashSet<string> LlmInstalled { get; } = [];
+
+        /// <summary>GGUF names accepted via <c>llm.models.download</c>, in order. Tên GGUF nhận qua <c>llm.models.download</c>, theo thứ tự.</summary>
+        public List<string> LlmDownloaded { get; } = [];
+
+        /// <summary>Names accepted via <c>llm.models.set</c>, in order. Tên nhận qua <c>llm.models.set</c>, theo thứ tự.</summary>
+        public List<string> LlmSetCalls { get; } = [];
+
+        /// <summary>When true, <c>llm.models.set</c> throws (model not installed on Core). Khi true, <c>llm.models.set</c> ném (Core báo model chưa cài).</summary>
+        public bool LlmSetThrows { get; set; }
+
+        /// <summary>Catalog names the fake lists via <c>llm.models.list</c>. Tên catalog fake liệt kê qua <c>llm.models.list</c>.</summary>
+        public static readonly string[] LlmCatalogNames = ["Hy-MT2-1.8B-UD-Q4_K_XL", "Hy-MT2-7B-Q5_K_M"];
+
         /// <summary>Whether <c>llm.runtime.status</c> reports the runtime installed. <c>llm.runtime.status</c> có báo runtime đã cài không.</summary>
         public bool LlmRuntimeInstalled { get; set; }
 
@@ -1494,6 +1641,9 @@ public class SetupCoordinatorTests : IDisposable
                         : null,
                 }),
                 "llm.runtime.download" => DownloadLlmRuntime(@params),
+                "llm.models.list" => Task.FromResult<JsonNode?>(BuildLlmList()),
+                "llm.models.download" => DownloadLlmModel(@params),
+                "llm.models.set" => SetLlmModel(@params),
                 _ => Task.FromResult<JsonNode?>(null),
             };
         }
@@ -1511,6 +1661,36 @@ public class SetupCoordinatorTests : IDisposable
             LlmRuntimeDownloads.Add(@params!["flavor"]!.GetValue<string>());
             if (LlmRuntimeDownloadCompletes) LlmRuntimeInstalled = true; // fast network unless disabled
             return Task.FromResult<JsonNode?>(new JsonObject { ["accepted"] = true });
+        }
+
+        private Task<JsonNode?> DownloadLlmModel(JsonNode? @params)
+        {
+            string name = @params!["name"]!.GetValue<string>();
+            LlmDownloaded.Add(name);
+            LlmInstalled.Add(name); // fake "download" completes immediately
+            return Task.FromResult<JsonNode?>(new JsonObject { ["accepted"] = true });
+        }
+
+        private Task<JsonNode?> SetLlmModel(JsonNode? @params)
+        {
+            if (LlmSetThrows) throw new InvalidOperationException("fake: model not installed");
+            LlmSetCalls.Add(@params!["name"]!.GetValue<string>());
+            return Task.FromResult<JsonNode?>(new JsonObject { ["active"] = @params!["name"]!.GetValue<string>() });
+        }
+
+        private JsonNode BuildLlmList()
+        {
+            // Hình dạng thật: array entry phẳng (JsonSerializer của List<LlmModelInfo>).
+            var models = new JsonArray();
+            foreach (string name in LlmCatalogNames)
+            {
+                models.Add(new JsonObject
+                {
+                    ["name"] = name,
+                    ["installed"] = LlmInstalled.Contains(name),
+                });
+            }
+            return models;
         }
 
         private JsonNode BuildList()

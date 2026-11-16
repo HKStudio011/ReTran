@@ -100,6 +100,18 @@ public interface ISetupCoreBridge
 public sealed record FlavorSwitchInfo(OcrFlavor Installed, OcrFlavor Target);
 
 /// <summary>
+/// One in-flight download shown on the running download steps: model name, bytes received/total and
+/// the current speed (<see langword="null"/> when unknown).
+/// Một lượt tải đang chạy hiển thị ở bước tải: tên model, số byte đã nhận/tổng và tốc độ hiện tại
+/// (<see langword="null"/> khi chưa biết).
+/// </summary>
+/// <param name="Name">Model name. Tên model.</param>
+/// <param name="ReceivedBytes">Bytes received so far. Số byte đã nhận.</param>
+/// <param name="TotalBytes">Total bytes, or 0 when unknown. Tổng số byte, hoặc 0 khi chưa biết.</param>
+/// <param name="BytesPerSec">Current speed in bytes/second, or <see langword="null"/>. Tốc độ hiện tại (byte/giây), hoặc <see langword="null"/>.</param>
+public sealed record SetupDownloadInfo(string Name, long ReceivedBytes, long TotalBytes, double? BytesPerSec);
+
+/// <summary>
 /// First-run Setup wizard orchestration as a testable state machine (spec §3, §4): hard gates first,
 /// the det/rec, language and LLM answers once, then the pipeline VerifyingFiles → Syncing →
 /// VerifyingSidecar →
@@ -173,6 +185,7 @@ public sealed class SetupCoordinator
     private SetupState _state;
     private int _running; // 0 idle / 1 a run is in progress (Interlocked) — guards against double starts
     private SetupCheckItem[] _checks = []; // snapshot checklist Checking — thay nguyên khối mỗi event
+    private SetupDownloadInfo[] _downloads = []; // snapshot tiến độ tải — thay nguyên khối mỗi poll
 
     /// <summary>
     /// Creates the coordinator. Every dependency is injectable so the whole machine runs on fakes in
@@ -284,6 +297,14 @@ public sealed class SetupCoordinator
     /// bao giờ thấy danh sách bị xé; reset ở đầu mỗi <c>RunCheckingStep</c>.
     /// </summary>
     public IReadOnlyList<SetupCheckItem> Checks => _checks;
+
+    /// <summary>
+    /// Snapshot of the in-flight downloads of the running download steps (8 and 9); empty outside
+    /// them. Swapped wholesale like <see cref="Checks"/>, so a UI read never tears.
+    /// Snapshot các lượt tải đang chạy của bước tải (8 và 9); rỗng ngoài các bước đó. Thay nguyên
+    /// khối như <see cref="Checks"/> nên lượt đọc của UI không bao giờ bị xé.
+    /// </summary>
+    public IReadOnlyList<SetupDownloadInfo> Downloads => _downloads;
 
     /// <summary>
     /// Wheel flavor the wizard is installing (decided by Checking, or switched to CPU via
@@ -625,6 +646,7 @@ public sealed class SetupCoordinator
                 Steps = WithStep(_state.Steps, StepKey(SetupStep.ChoosingOcrModels), "done"),
             };
             _state.Save();
+            ReconcileMarkers();
 
             await ContinueAfterAnswersAsync(ct).ConfigureAwait(false);
         }
@@ -675,6 +697,7 @@ public sealed class SetupCoordinator
                 Steps = WithStep(_state.Steps, StepKey(SetupStep.ChoosingLanguages), "done"),
             };
             _state.Save();
+            ReconcileMarkers();
 
             await ContinueAfterAnswersAsync(ct).ConfigureAwait(false);
         }
@@ -726,6 +749,7 @@ public sealed class SetupCoordinator
             }
             _state = _state with { LlmModels = picks, ActiveLlm = activeLlm, Steps = steps };
             _state.Save();
+            ReconcileMarkers();
 
             await ContinueAfterAnswersAsync(ct).ConfigureAwait(false);
         }
@@ -958,7 +982,7 @@ public sealed class SetupCoordinator
             SetupStep.VerifyingSidecar => await RunVerifySidecarStepAsync(ct).ConfigureAwait(false),
             SetupStep.DownloadingLlmRuntime => await RunDownloadLlmRuntimeStepAsync(ct).ConfigureAwait(false),
             SetupStep.DownloadingModels => await RunDownloadModelsStepAsync(ct).ConfigureAwait(false),
-            SetupStep.Applying => RunApplyingStep(),
+            SetupStep.Applying => await RunApplyingStepAsync(ct).ConfigureAwait(false),
             _ => throw new InvalidOperationException($"Không phải bước pipeline: {step}"),
         };
 
@@ -1272,6 +1296,7 @@ public sealed class SetupCoordinator
             try
             {
                 IReadOnlyList<string> needed = NeededModelsForState();
+                IReadOnlyList<string> llmNeeded = _state.LlmModels ?? [];
 
                 JsonNode? list = await _bridge.CallAsync("ocr.models.list", null, ct).ConfigureAwait(false);
                 foreach (string name in needed)
@@ -1282,15 +1307,40 @@ public sealed class SetupCoordinator
                             .ConfigureAwait(false);
                 }
 
+                if (llmNeeded.Count > 0)
+                {
+                    JsonNode? llmList = await _bridge.CallAsync("llm.models.list", null, ct).ConfigureAwait(false);
+                    foreach (string name in llmNeeded)
+                    {
+                        if (!IsInstalledInLlmCatalog(llmList, name))
+                            await _bridge
+                                .CallAsync("llm.models.download", new JsonObject { ["name"] = name }, ct)
+                                .ConfigureAwait(false);
+                    }
+                }
+
                 using var window = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 window.CancelAfter(_modelDownloadTimeout);
                 while (true)
                 {
                     list = await _bridge.CallAsync("ocr.models.list", null, ct).ConfigureAwait(false);
-                    if (needed.All(name => IsInstalledInCatalog(list, name))) break;
+                    bool ocrDone = needed.All(name => IsInstalledInCatalog(list, name));
+                    var downloads = new List<SetupDownloadInfo>(ParseDownloads(list, "catalog"));
+
+                    bool llmDone = true;
+                    if (llmNeeded.Count > 0)
+                    {
+                        JsonNode? llmList = await _bridge.CallAsync("llm.models.list", null, ct).ConfigureAwait(false);
+                        llmDone = llmNeeded.All(name => IsInstalledInLlmCatalog(llmList, name));
+                        downloads.AddRange(ParseDownloads(llmList, null));
+                    }
+
+                    _downloads = [.. downloads];
+                    if (ocrDone && llmDone) break;
                     await Task.Delay(_modelPollInterval, window.Token).ConfigureAwait(false);
                 }
 
+                _downloads = [];
                 MarkStepDone(SetupStep.DownloadingModels);
                 return StepOutcome.Done;
             }
@@ -1302,44 +1352,124 @@ public sealed class SetupCoordinator
             }
         }
 
+        _downloads = [];
         Error = SetupMessage.Of("setup.fail.models",
             (MaxRetries + 1).ToString(), _modelDownloadTimeout.TotalMinutes.ToString("0"));
         return StepOutcome.Failed;
     }
 
     /// <summary>
+    /// Whether the LLM catalog entry for <paramref name="name"/> reports installed; false when the
+    /// list is malformed or the entry is missing (the catalog is a flat JSON array).
+    /// Entry catalog LLM của <paramref name="name"/> có báo installed không; false khi list sai định
+    /// dạng hoặc thiếu entry (catalog là mảng JSON phẳng).
+    /// </summary>
+    private static bool IsInstalledInLlmCatalog(JsonNode? list, string name)
+    {
+        if (list is not JsonArray array) return false;
+
+        foreach (JsonNode? entry in array)
+        {
+            if (entry is not JsonObject e) continue;
+            if (e["name"] is not JsonValue nameValue || !nameValue.TryGetValue<string>(out string? entryName)) continue;
+            if (entryName != name) continue;
+            return e["installed"] is JsonValue installedValue && installedValue.TryGetValue<bool>(out bool installed) && installed;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The in-flight download entries carrying progress out of a list node: OCR lists keep their
+    /// entries under <paramref name="arrayKey"/> (<c>catalog</c>); LLM lists are flat (null key).
+    /// Các entry tải đang chạy có tiến độ trong một node list: list OCR để entry dưới
+    /// <paramref name="arrayKey"/> (<c>catalog</c>); list LLM phẳng (key null).
+    /// </summary>
+    private static List<SetupDownloadInfo> ParseDownloads(JsonNode? list, string? arrayKey)
+    {
+        var downloads = new List<SetupDownloadInfo>();
+        JsonArray? entries = arrayKey is null
+            ? list as JsonArray
+            : (list as JsonObject)?[arrayKey] as JsonArray;
+        if (entries is null) return downloads;
+
+        foreach (JsonNode? entry in entries)
+        {
+            if (entry is not JsonObject e) continue;
+            if (e["name"] is not JsonValue nameValue || !nameValue.TryGetValue<string>(out string? name)) continue;
+            if (e["progress"] is not JsonObject p) continue;
+            downloads.Add(new SetupDownloadInfo(
+                name, ReadLong(p, "receivedBytes"), ReadLong(p, "totalBytes"), ReadDouble(p, "bytesPerSec")));
+        }
+
+        return downloads;
+    }
+
+    private static long ReadLong(JsonObject obj, string key) =>
+        obj[key] is JsonValue v && v.TryGetValue<long>(out long value) ? value : 0;
+
+    private static double? ReadDouble(JsonObject obj, string key) =>
+        obj[key] is JsonValue v && v.TryGetValue<double>(out double value) ? value : null;
+
+    /// <summary>
     /// The models the download step must ensure for the saved answers, with the coordinator's
-    /// defensive fallback (small tier, no extras) when a field is missing.
+    /// defensive fallback (small det/rec, no legacy recs) when a field is missing.
     /// Các model bước tải phải đảm bảo theo câu trả lời đã lưu, kèm fallback phòng thủ của
-    /// coordinator (tier small, không extra) khi thiếu field.
+    /// coordinator (det/rec small, không rec legacy) khi thiếu field.
     /// </summary>
     private IReadOnlyList<string> NeededModelsForState() =>
         OcrModelChoices.NeededModels(
-            _state.Tiers ?? ["small"],
-            _state.ActiveTier ?? "small",
-            LanguageCode,
-            _state.ExtraLangs ?? []);
+            _state.Dets ?? ["PP-OCRv6_small_det"],
+            _state.Recs ?? ["PP-OCRv6_small_rec"],
+            _state.Langs ?? []);
 
     /// <summary>
     /// Applying (Review Focus #5 — ALWAYS runs, even when nothing was downloaded): computes the pair
-    /// from the saved answers (<see cref="OcrModelChoices.ExpectedPair"/>) and writes it into settings
-    /// via <see cref="AppSettingsService.Save"/>. No RPC — the pair is pure mirror data.
+    /// from the saved answers (<see cref="OcrModelChoices.ExpectedPair"/> — the active legacy rec wins
+    /// over the v6 rec) and writes it plus <c>LlmActiveModel</c> into settings via
+    /// <see cref="AppSettingsService.Save"/>. When an active LLM is chosen it also calls
+    /// <c>llm.models.set</c> best-effort (a refusal only logs — settings are already written, spec §6).
     /// Applying (Review Focus #5 — LUÔN chạy, kể cả khi không tải model nào): tính cặp từ câu trả lời
-    /// đã lưu (<see cref="OcrModelChoices.ExpectedPair"/>) và ghi vào settings qua
-    /// <see cref="AppSettingsService.Save"/>. Không RPC — cặp là dữ liệu mirror thuần.
+    /// đã lưu (<see cref="OcrModelChoices.ExpectedPair"/> — rec legacy đang chấm thắng rec v6) và ghi
+    /// cặp đó cùng <c>LlmActiveModel</c> vào settings qua <see cref="AppSettingsService.Save"/>. Khi có
+    /// LLM "Dùng chính", gọi thêm <c>llm.models.set</c> kiểu best-effort (bị từ chối chỉ log — settings
+    /// đã ghi, spec §6).
     /// </summary>
-    private StepOutcome RunApplyingStep()
+    private async Task<StepOutcome> RunApplyingStepAsync(CancellationToken ct)
     {
         for (int attempt = 1; attempt <= MaxRetries + 1; attempt++)
         {
             try
             {
-                (string det, string rec) = OcrModelChoices.ExpectedPair(_state.ActiveTier ?? "small", LanguageCode);
+                (string det, string rec) = OcrModelChoices.ExpectedPair(
+                    _state.ActiveDet ?? "PP-OCRv6_small_det", _state.ActiveLang, _state.ActiveRec ?? "PP-OCRv6_small_rec");
                 AppSettings settings = _settings.Load();
-                _settings.Save(settings with { OcrDet = det, OcrRec = rec });
+                _settings.Save(settings with
+                {
+                    OcrDet = det,
+                    OcrRec = rec,
+                    LlmActiveModel = _state.ActiveLlm ?? settings.LlmActiveModel,
+                });
+
+                if (_state.ActiveLlm is { } llm)
+                {
+                    try
+                    {
+                        await _bridge
+                            .CallAsync("llm.models.set", new JsonObject { ["name"] = llm }, ct)
+                            .ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogWarning(ex, "setup: llm.models.set thất bại cho {Model} (bỏ qua — settings vẫn ghi)", llm);
+                    }
+                }
+
                 MarkStepDone(SetupStep.Applying);
                 return StepOutcome.Done;
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
                 _logger?.LogWarning(ex, "setup: áp dụng settings lần {Attempt}/{Total} thất bại", attempt, MaxRetries + 1);
@@ -1361,35 +1491,42 @@ public sealed class SetupCoordinator
 
     /// <summary>
     /// Light consistency pass run at the end of Checking and after every saved answer: when a needed
-    /// model is gone from disk the download step must run again, and when the settings pair diverges
-    /// from the stored answers the applying step must run again. A machine where everything matches
-    /// keeps every marker, so a rerun stays a fast pass-through. Persists only when it cleared
-    /// something; a no-op until both answer fields exist.
+    /// model is gone from disk the download step must run again, and when the settings pair (or the
+    /// active LLM) diverges from the stored answers the applying step must run again. The OCR half
+    /// needs the det/rec and language answers; the pair half needs the det/rec answers, so an old
+    /// machine still mid-questions is repaired part by part. A machine where everything matches keeps
+    /// every marker, so a rerun stays a fast pass-through. Persists only when it cleared something.
     /// Lượt so khớp nhẹ chạy cuối bước Checking và sau mỗi câu trả lời được lưu: model cần mà biến mất
-    /// khỏi đĩa ⇒ bước tải phải chạy lại; cặp trong settings lệch với câu trả lời đã lưu ⇒ bước áp
-    /// dụng phải chạy lại. Máy khớp hết giữ nguyên mọi marker nên rerun đi qua nhanh. Chỉ lưu khi có
-    /// xoá gì; không làm gì khi còn thiếu field trả lời.
+    /// khỏi đĩa ⇒ bước tải phải chạy lại; cặp trong settings (hoặc LLM đang chạy) lệch với câu trả lời
+    /// đã lưu ⇒ bước áp dụng phải chạy lại. Phần OCR cần câu trả lời det/rec + ngôn ngữ; phần cặp cần
+    /// det/rec — máy cũ đang trả lời dở vẫn được chữa từng phần. Máy khớp hết giữ nguyên mọi marker nên
+    /// rerun đi qua nhanh. Chỉ lưu khi có xoá gì.
     /// </summary>
     private void ReconcileMarkers()
     {
-        if (_state.Tiers is null || _state.ExtraLangs is null) return;
         if (_state.Steps is null) return;
 
         var steps = new Dictionary<string, string>(_state.Steps);
         bool changed = false;
 
-        if (NeededModelsForState().Any(name => !ModelInstalled(name))
+        if (_state.Dets is not null && _state.Langs is not null
+            && NeededModelsForState().Any(name => !ModelInstalled(name))
             && steps.Remove(StepKey(SetupStep.DownloadingModels)))
         {
             changed = true;
         }
 
-        (string det, string rec) = OcrModelChoices.ExpectedPair(_state.ActiveTier ?? "small", LanguageCode);
-        AppSettings settings = _settings.Load();
-        if ((settings.OcrDet != det || settings.OcrRec != rec)
-            && steps.Remove(StepKey(SetupStep.Applying)))
+        if (_state.Dets is not null)
         {
-            changed = true;
+            (string det, string rec) = OcrModelChoices.ExpectedPair(
+                _state.ActiveDet ?? "PP-OCRv6_small_det", _state.ActiveLang, _state.ActiveRec ?? "PP-OCRv6_small_rec");
+            AppSettings settings = _settings.Load();
+            bool pairMismatch = settings.OcrDet != det || settings.OcrRec != rec
+                || (_state.ActiveLlm is not null && settings.LlmActiveModel != _state.ActiveLlm);
+            if (pairMismatch && steps.Remove(StepKey(SetupStep.Applying)))
+            {
+                changed = true;
+            }
         }
 
         if (changed)
