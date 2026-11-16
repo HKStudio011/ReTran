@@ -593,53 +593,6 @@ public class SetupCoordinatorTests : IDisposable
         Assert.Empty(_bridge.Calls);
     }
 
-    [Fact]
-    public async Task ContinueTier_ZeroTiers_Throws()
-    {
-        var coordinator = NewCoordinator();
-
-        await Assert.ThrowsAsync<ArgumentException>(
-            () => coordinator.ContinueWithOcrTierAsync([], "small", TestContext.Current.CancellationToken));
-
-        // Validate trước khi chạy → không ghi state nào.
-        Assert.False(File.Exists(_setupJson));
-    }
-
-    [Fact]
-    public async Task ContinueTier_UnknownTier_Throws()
-    {
-        var coordinator = NewCoordinator();
-
-        await Assert.ThrowsAsync<ArgumentException>(
-            () => coordinator.ContinueWithOcrTierAsync(["large"], "large", TestContext.Current.CancellationToken));
-    }
-
-    [Fact]
-    public async Task ContinueTier_BadActiveTier_Throws()
-    {
-        var coordinator = NewCoordinator();
-
-        await Assert.ThrowsAsync<ArgumentException>(
-            () => coordinator.ContinueWithOcrTierAsync(["small"], "medium", TestContext.Current.CancellationToken));
-    }
-
-    [Fact]
-    public async Task ContinueExtra_UnknownLang_Throws()
-    {
-        var coordinator = NewCoordinator();
-
-        await Assert.ThrowsAsync<ArgumentException>(
-            () => coordinator.ContinueWithExtraLanguagesAsync(["xx"], TestContext.Current.CancellationToken));
-    }
-
-    [Fact]
-    public void ActiveTier_Exposed()
-    {
-        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small","medium"],"activeTier":"medium","extraLangs":[],"llmModels":[]}""");
-
-        Assert.Equal("medium", NewCoordinator().ActiveTier);
-    }
-
     // ── Tải theo lựa chọn + Applying + reconcile (2026-11-16, Review Focus #3/#4/#5) ───────────────
 
     [Fact]
@@ -1517,7 +1470,7 @@ public class SetupCoordinatorTests : IDisposable
         coordinator.SkipForSession();
         Assert.True(coordinator.SkippedForSession);
 
-        // State trống → lượt chạy dừng ở ChoosingLanguage; chỉ cần chứng minh cờ bị thu hồi khi lượt chạy bắt đầu.
+        // State trống → lượt chạy dừng ở ChoosingOcrModels; chỉ cần chứng minh cờ bị thu hồi khi lượt chạy bắt đầu.
         await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
 
         Assert.False(coordinator.SkippedForSession);

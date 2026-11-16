@@ -1,34 +1,15 @@
 using ReTran_App.Services.Setup;
 
 /// <summary>
-/// Tests for <see cref="OcrModelChoices"/>: tier model-name composition, the legacy-rec routing
-/// mirror, v6 coverage, preselection from the installed-model set, the needed-download set, and
-/// the pair the wizard will apply — the pure rules behind the "Chọn model OCR" and
-/// "Ngôn ngữ bổ sung" wizard screens.
-/// Test cho <see cref="OcrModelChoices"/>: ghép tên model theo tier, mirror routing rec legacy,
-/// phủ v6, preselect theo model đã cài, tập cần tải, và cặp sẽ áp dụng — các luật thuần sau 2 màn
-/// "Chọn model OCR" và "Ngôn ngữ bổ sung".
+/// Tests for <see cref="OcrModelChoices"/>: catalog-derived det/rec and language lists, the legacy-rec
+/// routing mirror, v6 coverage, preselection from the installed-model set, the needed-download set,
+/// and the pair the wizard will apply — the pure rules behind the wizard's model screens.
+/// Test cho <see cref="OcrModelChoices"/>: danh sách det/rec và ngôn ngữ suy từ catalog, mirror
+/// routing rec legacy, phủ v6, preselect theo model đã cài, tập cần tải, và cặp sẽ áp dụng — các luật
+/// thuần sau các màn model của wizard.
 /// </summary>
 public class OcrModelChoicesTests
 {
-    [Fact]
-    public void TierModelNames_ComposeCorrectly()
-    {
-        Assert.Equal(new[] { "tiny", "small", "medium" }, OcrModelChoices.Tiers);
-
-        foreach (string tier in new[] { "tiny", "small", "medium" })
-        {
-            Assert.Equal($"PP-OCRv6_{tier}_det", OcrModelChoices.TierDet(tier));
-            Assert.Equal($"PP-OCRv6_{tier}_rec", OcrModelChoices.TierRec(tier));
-            Assert.Equal(tier, OcrModelChoices.TierOfDet($"PP-OCRv6_{tier}_det"));
-        }
-
-        Assert.Null(OcrModelChoices.TierOfDet("PP-OCRv6_small_rec")); // rec không phải det
-        Assert.Null(OcrModelChoices.TierOfDet("korean_PP-OCRv5_mobile_rec"));
-        Assert.Null(OcrModelChoices.TierOfDet("garbage"));
-        Assert.Null(OcrModelChoices.TierOfDet(null));
-    }
-
     [Fact]
     public void LegacyRecFor_MapsTheEightLanguages()
     {
@@ -64,131 +45,6 @@ public class OcrModelChoicesTests
         Assert.False(OcrModelChoices.IsV6Covered("ta"));
         Assert.False(OcrModelChoices.IsV6Covered("te"));
         Assert.False(OcrModelChoices.IsV6Covered("xx"));
-    }
-
-    [Fact]
-    public void PreselectTiers_Full_TicksAndLocks()
-    {
-        string[] installed = ["PP-OCRv6_small_det", "PP-OCRv6_small_rec"];
-
-        var p = OcrModelChoices.PreselectTiers(installed, "PP-OCRv6_small_det");
-
-        Assert.Equal(new[] { "small" }, p.Ticked);
-        Assert.Equal(new[] { "small" }, p.Locked); // đủ det+rec → tick + khoá
-        Assert.Equal("small", p.ActiveTier);
-    }
-
-    [Fact]
-    public void PreselectTiers_Partial_TicksUnlocked()
-    {
-        string[] installed = ["PP-OCRv6_small_det"]; // thiếu rec
-
-        var p = OcrModelChoices.PreselectTiers(installed, null);
-
-        Assert.Equal(new[] { "small" }, p.Ticked); // bán phần → tick nhưng tự do
-        Assert.Empty(p.Locked);
-        Assert.Equal("small", p.ActiveTier);
-    }
-
-    [Fact]
-    public void PreselectTiers_Clean_DefaultsSmallFree()
-    {
-        var p = OcrModelChoices.PreselectTiers([], null);
-
-        Assert.Equal(new[] { "small" }, p.Ticked);
-        Assert.Empty(p.Locked);
-        Assert.Equal("small", p.ActiveTier);
-    }
-
-    [Fact]
-    public void PreselectTiers_ActiveFromLegacyPair()
-    {
-        // Settings: cặp det=tiny + rec legacy korean (rec không mang tier) → active theo det = tiny.
-        string[] installed = ["PP-OCRv6_tiny_det", "PP-OCRv6_tiny_rec", "PP-OCRv6_small_det", "PP-OCRv6_small_rec"];
-
-        var p = OcrModelChoices.PreselectTiers(installed, "PP-OCRv6_tiny_det");
-
-        Assert.Equal(new[] { "tiny", "small" }, p.Ticked);
-        Assert.Equal(new[] { "tiny", "small" }, p.Locked);
-        Assert.Equal("tiny", p.ActiveTier);
-    }
-
-    [Fact]
-    public void PreselectTiers_ActiveFallsToFirstTicked()
-    {
-        // Settings trỏ small nhưng small không còn trên đĩa → không tick → active = dòng tick đầu.
-        string[] installed = ["PP-OCRv6_medium_det", "PP-OCRv6_medium_rec"];
-
-        var p = OcrModelChoices.PreselectTiers(installed, "PP-OCRv6_small_det");
-
-        Assert.Equal(new[] { "medium" }, p.Ticked);
-        Assert.Equal("medium", p.ActiveTier);
-    }
-
-    [Fact]
-    public void PreselectLegacyLanguages_InstalledOnly()
-    {
-        // Thứ tự hiển thị màn B = thứ tự LegacyLanguageCodes.
-        Assert.Equal(
-            new[] { "ko", "ru", "ar", "th", "ta", "te", "hi", "el" },
-            OcrModelChoices.LegacyLanguageCodes);
-
-        string[] installed = ["korean_PP-OCRv5_mobile_rec", "el_PP-OCRv5_mobile_rec", "PP-OCRv6_small_rec"];
-
-        Assert.Equal(new[] { "ko", "el" }, OcrModelChoices.PreselectLegacyLanguages(installed));
-    }
-
-    [Fact]
-    public void NeededModels_TiersPlusLegacyPlusExtras()
-    {
-        var needed = OcrModelChoices.NeededModels(["small", "medium"], "small", "ko", ["ru"]);
-
-        Assert.Equal(
-            new[]
-            {
-                "PP-OCRv6_small_det", "PP-OCRv6_small_rec",
-                "PP-OCRv6_medium_det", "PP-OCRv6_medium_rec",
-                "korean_PP-OCRv5_mobile_rec",
-                "cyrillic_PP-OCRv5_mobile_rec",
-            },
-            needed);
-    }
-
-    [Fact]
-    public void NeededModels_AutoNoExtras_TierModelsOnly()
-    {
-        var needed = OcrModelChoices.NeededModels(["small"], "small", "auto", []);
-
-        Assert.Equal(new[] { "PP-OCRv6_small_det", "PP-OCRv6_small_rec" }, needed);
-    }
-
-    [Fact]
-    public void NeededModels_IncludesActiveTierModels_WhenTierListLacksIt()
-    {
-        // Phòng thủ: cặp đang chạy phải luôn được tải đủ dù answers lệch — active thêm vào cuối.
-        var needed = OcrModelChoices.NeededModels(["small"], "medium", "auto", []);
-
-        Assert.Equal(
-            new[] { "PP-OCRv6_small_det", "PP-OCRv6_small_rec", "PP-OCRv6_medium_det", "PP-OCRv6_medium_rec" },
-            needed);
-    }
-
-    [Fact]
-    public void ExpectedPair_Auto_V6Pair()
-    {
-        var (det, rec) = OcrModelChoices.ExpectedPair("medium", "auto");
-
-        Assert.Equal("PP-OCRv6_medium_det", det);
-        Assert.Equal("PP-OCRv6_medium_rec", rec);
-    }
-
-    [Fact]
-    public void ExpectedPair_Korean_TierDetPlusKorRec()
-    {
-        var (det, rec) = OcrModelChoices.ExpectedPair("tiny", "ko");
-
-        Assert.Equal("PP-OCRv6_tiny_det", det);
-        Assert.Equal("korean_PP-OCRv5_mobile_rec", rec);
     }
 
     [Fact]

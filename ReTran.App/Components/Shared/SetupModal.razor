@@ -2,12 +2,14 @@
    trong OnInitialized khi state chưa xong hoặc artifact đã mất; render rỗng khi wizard hoàn tất hoặc
    user đã "bỏ qua thiết lập" cho phiên này (spec 2026-11-13).
    Mọi hành động đi qua SetupCoordinator — modal KHÔNG gọi uv/python/sidecar trực tiếp (spec §5.11). *@
+@using ReTran_App.Core
 @using ReTran_App.Services
 @using ReTran_App.Services.Setup
 @implements IDisposable
 @inject SetupCoordinator Coordinator
 @inject I18nService L
 @inject AppSettingsService SettingsStore
+@inject PipelineController Pipeline
 
 @if (_wizardActive && !Coordinator.IsComplete && !Coordinator.SkippedForSession)
 {
@@ -53,6 +55,13 @@
         .rt-setup-modal .setup-hintline { margin: 8px 0 0; color: var(--rt-dim); font-size: 11px; line-height: 1.6; }
         .rt-setup-modal .setup-total { margin: 10px 0 0; color: var(--rt-dim); font-size: 11.5px; }
         .rt-setup-modal .setup-warn { margin: 8px 0 0; color: var(--rt-danger); font-size: 11.5px; }
+
+        @* Khối det/rec (bước 2) + tiến độ tải (bước 8/9) — vòng 2, mockup detrec-langs-llm đã duyệt. *@
+        .rt-setup-modal .setup-sect { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--rt-line); }
+        .rt-setup-modal .setup-sect .sect-lbl { display: block; font-size: 11px; font-weight: 600; letter-spacing: .03em; color: var(--rt-dim); text-transform: uppercase; }
+        .rt-setup-modal .setup-downloads { list-style: none; margin: 10px 0 0; padding: 0 4px 0 0; display: grid; gap: 6px; }
+        .rt-setup-modal .setup-downloads .det { color: var(--rt-dim); font-size: 11px; overflow-wrap: anywhere; }
+        .rt-setup-modal .setup-downloads .mono { font-family: var(--rt-mono); }
     </style>
 
     @* z-index 60 inline (lớn hơn z-50 của .rt-sheet): settings sheet đứng sau trong DOM nên với cùng
@@ -98,97 +107,187 @@
                     }
                     break;
 
-                case SetupStep.ChoosingOcrTier:
-                    @* Màn A (spec 2026-11-16 §4): tick nhiều tier (ít nhất 1); dòng đã cài tick sẵn + KHOÁ;
-                       radio "Dùng chính" chỉ trên dòng tick; tổng tải = phần còn thiếu. *@
-                    <p class="text-sm text-surface mb-1">@(L["setup.tier.title"]) <span class="rt-hint">@(L["setup.tier.hint"])</span></p>
-                    <ul class="setup-choices">
-                        @foreach (string tier in OcrModelChoices.Tiers)
-                        {
-                            bool locked = _tierLocked.Contains(tier);
-                            float missing = TierRowMissingMb(tier);
-                            <li>
-                                <input type="checkbox" checked="@_tierTicks.Contains(tier)" disabled="@locked" @onchange='() => ToggleTier(tier)' />
-                                <span class="body">
-                                    <span class="lbl">
-                                        @(L[$"setup.tier.name.{tier}"]) — @(L[$"setup.tier.desc.{tier}"])
-                                        @if (locked)
+                case SetupStep.ChoosingOcrModels:
+                    @* Bước 2 (spec 17-11 §4): 2 khối det/rec, tick nhiều + ≥ 1 mỗi khối; dòng đã cài tick
+                       sẵn + KHOÁ; chấm "Dùng chính" mỗi khối; tổng tải = phần còn thiếu. *@
+                    <p class="text-sm text-surface">@(L["setup.models.title"]) <span class="rt-hint">@(L["setup.models.hint"])</span></p>
+                    <div class="setup-sect">
+                        <span class="sect-lbl">@(L["setup.models.det.sect"])</span>
+                        <ul class="setup-choices">
+                            @foreach (string name in OcrModelChoices.DetModels())
+                            {
+                                bool locked = _detLocked.Contains(name);
+                                float missing = ModelRowMissingMb(name);
+                                <li>
+                                    <input type="checkbox" checked="@_detTicks.Contains(name)" disabled="@locked" @onchange='() => ToggleDet(name)' />
+                                    <span class="body">
+                                        <span class="lbl">
+                                            @RowLabel(name)
+                                            @if (locked)
+                                            {
+                                                <span class="tag-installed">@(L["setup.models.installed"])</span>
+                                            }
+                                        </span>
+                                        <span class="det">@ModelMeta(name)</span>
+                                        @if (missing > 0)
                                         {
-                                            <span class="tag-installed">@(L["setup.tier.installed"])</span>
+                                            <span class="det">@(L.Fmt("setup.models.willDownload", FormatMb(missing)))</span>
                                         }
                                     </span>
-                                    <span class="det">@TierMeta(tier)</span>
-                                    @if (missing > 0)
+                                    @if (_detTicks.Contains(name))
                                     {
-                                        <span class="det">@(L.Fmt("setup.tier.willDownload", FormatMb(missing)))</span>
+                                        <label class="@(_activeDetPick == name ? "use on" : "use")">
+                                            <input type="radio" name="setup-det" checked="@(_activeDetPick == name)" @onchange='() => PickActiveDet(name)' />
+                                            @(L["setup.models.use"])
+                                        </label>
+                                    }
+                                </li>
+                            }
+                        </ul>
+                    </div>
+                    <div class="setup-sect">
+                        <span class="sect-lbl">@(L["setup.models.rec.sect"])</span>
+                        <ul class="setup-choices">
+                            @foreach (string name in OcrModelChoices.RecModels())
+                            {
+                                bool locked = _recLocked.Contains(name);
+                                float missing = ModelRowMissingMb(name);
+                                <li>
+                                    <input type="checkbox" checked="@_recTicks.Contains(name)" disabled="@locked" @onchange='() => ToggleRec(name)' />
+                                    <span class="body">
+                                        <span class="lbl">
+                                            @RowLabel(name)
+                                            @if (locked)
+                                            {
+                                                <span class="tag-installed">@(L["setup.models.installed"])</span>
+                                            }
+                                        </span>
+                                        <span class="det">@ModelMeta(name)</span>
+                                        @if (missing > 0)
+                                        {
+                                            <span class="det">@(L.Fmt("setup.models.willDownload", FormatMb(missing)))</span>
+                                        }
+                                    </span>
+                                    @if (_recTicks.Contains(name))
+                                    {
+                                        <label class="@(_activeRecPick == name ? "use on" : "use")">
+                                            <input type="radio" name="setup-rec" checked="@(_activeRecPick == name)" @onchange='() => PickActiveRec(name)' />
+                                            @(L["setup.models.use"])
+                                        </label>
+                                    }
+                                </li>
+                            }
+                        </ul>
+                    </div>
+                    <p class="setup-total">@(L.Fmt("setup.models.total", FormatMb(_detTicks.Sum(ModelRowMissingMb) + _recTicks.Sum(ModelRowMissingMb))))</p>
+                    @if (_detTicks.Count == 0 || _recTicks.Count == 0)
+                    {
+                        <p class="setup-warn">@(L["setup.models.minOne"])</p>
+                    }
+                    <button type="button" class="rt-btn rt-btn-primary" disabled="@(_busy || _detTicks.Count == 0 || _recTicks.Count == 0)" @onclick="ConfirmOcrModelsAsync">@(L["setup.next"])</button>
+                    break;
+
+                case SetupStep.ChoosingLanguages:
+                    @* Bước 3 (spec 17-11 §5): ngôn ngữ ngoài phủ v6 — tick nhiều hoặc để trống; rec đã cài
+                       tick sẵn + KHOÁ; chấm "Đọc chính" đổi rec đang chạy (trống ⇒ không chấm). *@
+                    <p class="text-sm text-surface">@(L["setup.langs.title"]) <span class="rt-hint">@(L["setup.langs.hint"])</span></p>
+                    <p class="setup-hintline">@(L["setup.langs.note"])</p>
+                    <ul class="setup-choices">
+                        @foreach (LanguageChoice choice in OcrModelChoices.LanguageChoices())
+                        {
+                            string rec = _langVariantPick[choice.PrimaryLang];
+                            bool locked = _langLocked.Contains(rec);
+                            float missing = ModelRowMissingMb(rec);
+                            <li>
+                                <input type="checkbox" checked="@_langTicks.Contains(rec)" disabled="@locked" @onchange='() => ToggleLang(choice)' />
+                                <span class="body">
+                                    <span class="lbl">
+                                        @I18nStrings.LanguageName(choice.PrimaryLang)
+                                        @if (locked)
+                                        {
+                                            <span class="tag-installed">@(L["setup.models.installed"])</span>
+                                        }
+                                    </span>
+                                    <span class="det">@rec · @FormatMb(OcrModelChoices.SizeMbOf(rec))</span>
+                                    @if (choice.Variants.Count > 1)
+                                    {
+                                        <span class="det">
+                                            @(L["setup.langs.variant"])
+                                            <select value="@rec" @onchange='e => PickLangVariant(choice, e.Value?.ToString() ?? rec)'>
+                                                @foreach (string variant in choice.Variants)
+                                                {
+                                                    <option value="@variant">@variant</option>
+                                                }
+                                            </select>
+                                        </span>
                                     }
                                 </span>
-                                @if (_tierTicks.Contains(tier))
+                                @if (_langTicks.Contains(rec))
                                 {
-                                    <label class="@(_activeTierPick == tier ? "use on" : "use")">
-                                        <input type="radio" name="setup-tier" checked="@(_activeTierPick == tier)" @onchange='() => PickActiveTier(tier)' />
-                                        @(L["setup.tier.use"])
+                                    <label class="@(_activeLangPick == rec ? "use on" : "use")">
+                                        <input type="radio" name="setup-langs" checked="@(_activeLangPick == rec)" @onchange='() => PickActiveLang(rec)' />
+                                        @(L["setup.langs.read"])
                                     </label>
                                 }
                             </li>
                         }
                     </ul>
-                    <p class="setup-total">@(L.Fmt("setup.tier.total", FormatMb(_tierTicks.Sum(TierRowMissingMb))))</p>
-                    @if (_tierTicks.Count == 0)
+                    <p class="setup-total">@(L.Fmt("setup.langs.total", FormatMb(_langTicks.Sum(ModelRowMissingMb))))</p>
+                    <button type="button" class="rt-btn rt-btn-primary" disabled="@_busy" @onclick="ConfirmLanguagesAsync">@(L["setup.next"])</button>
+                    break;
+
+                case SetupStep.ChoosingLlmModels:
+                    @* Bước 4 (spec 17-11 §6): model LLM — tick nhiều hoặc để trống; nhóm theo SizeClass
+                       động; chấm "Dùng chính" = bản chạy; trống ⇒ bỏ qua bước tải runtime llama.cpp. *@
+                    <p class="text-sm text-surface">@(L["setup.llm.title"]) <span class="rt-hint">@(L["setup.llm.hint"])</span></p>
+                    <p class="setup-hintline">@(L["setup.llm.note"])</p>
+                    @if (_llmLoadFailed)
                     {
-                        <p class="setup-warn">@(L["setup.tier.minOne"])</p>
+                        <p class="setup-warn">@(L["setup.llm.loadFailed"])</p>
+                        <button type="button" class="rt-btn" @onclick="ReloadLlmAsync">@(L["setup.error.retry"])</button>
                     }
-                    <button type="button" class="rt-btn rt-btn-primary" disabled="@(_busy || _tierTicks.Count == 0)" @onclick="ConfirmOcrTierAsync">@(L["setup.next"])</button>
-                    break;
-
-                case SetupStep.ChoosingLanguage:
-                    <p class="text-sm text-surface mb-1">@(L["setup.chooseLang"])</p>
-                    <div class="flex flex-col gap-2">
-                        <label class="rt-setup-opt" style="@OptionStyle(_selected == "auto")">
-                            <input type="radio" name="setup-lang" checked="@(_selected == "auto")" @onchange='() => SelectLanguage("auto")' />
-                            <span class="text-sm text-surface">@(L["setup.auto"])</span>
-                            <span class="rt-hint">@OptionMeta(PairFor("auto"))</span>
-                        </label>
-                        @foreach (LangOption option in _options)
-                        {
-                            <label class="rt-setup-opt" style="@OptionStyle(_selected == option.Code)">
-                                <input type="radio" name="setup-lang" checked="@(_selected == option.Code)" @onchange='() => SelectLanguage(option.Code)' />
-                                <span class="text-sm text-surface">@option.Name</span>
-                                <span class="rt-hint">@OptionMeta(option.Pair)</span>
-                            </label>
-                        }
-                    </div>
-                    <p class="rt-hint mb-3">@(L.Fmt("setup.totalSize", FormatMb(SelectedTotalMb)))</p>
-                    <button type="button" class="rt-btn rt-btn-primary" disabled="@_busy" @onclick="ConfirmLanguageAsync">@(L["setup.confirm"])</button>
-                    break;
-
-                case SetupStep.ChoosingExtraLanguages:
-                    @* Màn B (spec 2026-11-16 §5): ngôn ngữ ngoài phủ v6 — tick nhiều hoặc để trống; rec đã
-                       cài tick sẵn + KHOÁ; chỉ tải sẵn, cặp chạy vẫn theo ngôn ngữ chính. *@
-                    <p class="text-sm text-surface mb-1">@(L["setup.extra.title"]) <span class="rt-hint">@(L["setup.extra.hint"])</span></p>
-                    <p class="setup-hintline">@(L["setup.extra.note"])</p>
-                    <ul class="setup-choices">
-                        @foreach (string lang in OcrModelChoices.LegacyLanguageCodes)
-                        {
-                            string? rec = OcrModelChoices.LegacyRecFor(lang);
-                            bool locked = rec is not null && _installedModels.Contains(rec);
-                            <li>
-                                <input type="checkbox" checked="@_extraTicks.Contains(lang)" disabled="@locked" @onchange='() => ToggleExtra(lang)' />
-                                <span class="body">
-                                    <span class="lbl">
-                                        @I18nStrings.LanguageName(lang)
-                                        @if (locked)
+                    else if (_llmModelsList.Count == 0)
+                    {
+                        <p class="setup-hintline">@(L["setup.llm.loading"])</p>
+                    }
+                    @foreach (IGrouping<string, LlmModelInfo> group in _llmModelsList.GroupBy(m => m.SizeClass))
+                    {
+                        <div class="setup-sect">
+                            <span class="sect-lbl">@(L.Fmt("setup.llm.group", group.Key))</span>
+                            <ul class="setup-choices">
+                                @foreach (LlmModelInfo model in group)
+                                {
+                                    bool locked = _llmLocked.Contains(model.Name);
+                                    <li>
+                                        <input type="checkbox" checked="@_llmTicks.Contains(model.Name)" disabled="@locked" @onchange='() => ToggleLlm(model.Name)' />
+                                        <span class="body">
+                                            <span class="lbl">
+                                                @model.Name
+                                                @if (locked)
+                                                {
+                                                    <span class="tag-installed">@(L["setup.models.installed"])</span>
+                                                }
+                                            </span>
+                                            <span class="det">@model.Quant · @FormatSize(model.SizeBytes)</span>
+                                            @if (!model.Installed && !model.Downloading)
+                                            {
+                                                <span class="det">@(L.Fmt("setup.models.willDownload", FormatSize(model.SizeBytes)))</span>
+                                            }
+                                        </span>
+                                        @if (_llmTicks.Contains(model.Name))
                                         {
-                                            <span class="tag-installed">@(L["setup.tier.installed"])</span>
+                                            <label class="@(_activeLlmPick == model.Name ? "use on" : "use")">
+                                                <input type="radio" name="setup-llm" checked="@(_activeLlmPick == model.Name)" @onchange='() => PickActiveLlm(model.Name)' />
+                                                @(L["setup.llm.use"])
+                                            </label>
                                         }
-                                    </span>
-                                    <span class="det">@rec · @FormatMb(OcrModelChoices.SizeMbOf(rec ?? string.Empty))</span>
-                                </span>
-                            </li>
-                        }
-                    </ul>
-                    <p class="setup-total">@(L.Fmt("setup.extra.total", FormatMb(_extraTicks.Sum(ExtraRowMissingMb))))</p>
-                    <button type="button" class="rt-btn rt-btn-primary" disabled="@_busy" @onclick="ConfirmExtraLanguagesAsync">@(L["setup.next"])</button>
+                                    </li>
+                                }
+                            </ul>
+                        </div>
+                    }
+                    <p class="setup-total">@(L.Fmt("setup.models.total", FormatMb(LlmTotalMb())))</p>
+                    <button type="button" class="rt-btn rt-btn-primary" disabled="@_busy" @onclick="ConfirmLlmModelsAsync">@(L["setup.next"])</button>
                     break;
 
                 case SetupStep.ConfirmingFlavorSwitch:
@@ -222,10 +321,34 @@
                     break;
 
                 default:
-                    @* Các bước chạy (VerifyingFiles…Applying): tên bước + bar indeterminate
-                       (spec cho phép fallback indeterminate). *@
+                    @* Các bước chạy (VerifyingFiles…Applying): tên bước + bar indeterminate (spec cho phép
+                       fallback indeterminate); khi bước tải có tiến độ đo được → danh sách % + ETA (spec
+                       17-11 §9). *@
                     <p class="text-sm text-surface">@(L[StepLabelKey(Coordinator.Step)])</p>
                     <div class="rt-setup-track" aria-hidden="true"><div class="rt-setup-bar"></div></div>
+                    @if (Coordinator.Downloads.Count > 0)
+                    {
+                        <ul class="setup-downloads">
+                            @foreach (SetupDownloadInfo download in Coordinator.Downloads)
+                            {
+                                (int? percent, TimeSpan? eta) = DownloadProgressText.Format(download.ReceivedBytes, download.TotalBytes, download.BytesPerSec);
+                                <li>
+                                    <span class="det mono">@download.Name</span>
+                                    <span class="det">
+                                        @(percent is { } p ? $"{p}%" : "…")
+                                        @if (eta is { } t)
+                                        {
+                                            <text> · @(L.Fmt("setup.progress.eta", FormatEta(t)))</text>
+                                        }
+                                        @if (download.BytesPerSec == 0d)
+                                        {
+                                            <text> · @(L["setup.progress.retry"])</text>
+                                        }
+                                    </span>
+                                </li>
+                            }
+                        </ul>
+                    }
                     break;
             }
         </div>
@@ -251,39 +374,44 @@
 }
 
 @code {
-    // Ngôn ngữ phổ biến trên màn hình hỏi (spec §13) — tất cả đều có trong catalog. Nhóm "khác" theo
-    // catalog là open item của spec (mục 10, dòng cuối) — chưa render ở bản này.
-    private static readonly string[] CommonLangCodes = ["vi", "en", "zh", "ja", "ko", "ru", "ar", "th", "el", "hi"];
-
     private bool _wizardActive;   // Wizard đã được start (hoặc đang chạy do rerun) — phân biệt với đường rẻ "đã xong".
     private bool _busy;           // Chặn bấm chồng các nút xác nhận/thử lại.
     private bool _showSkipConfirm; // Popup [Thoát ReTran]/[Bỏ qua thiết lập]/[Quay lại] đang mở (spec 2026-11-13).
-    private string _selected = "auto";
-    private readonly List<LangOption> _options = [];
 
-    // Màn A/B (2026-11-16): state nhập liệu, khởi tạo 1 lần mỗi lần VÀO màn từ preselect thực tế
-    // (filesystem + settings); rời màn reset để lượt rerun sau lấy lại đúng thực tế.
-    private bool _tierInit;
-    private bool _extraInit;
-    private List<string> _tierTicks = [];
-    private HashSet<string> _tierLocked = [];
-    private string _activeTierPick = "small";
-    private List<string> _extraTicks = [];
+    // Ba màn hỏi vòng 2 (spec 17-11): state nhập liệu, khởi tạo 1 lần mỗi lần VÀO màn từ preselect
+    // thực tế (filesystem + settings); rời màn reset để lượt rerun sau lấy lại đúng thực tế.
     private HashSet<string> _installedModels = [];
+    private bool _modelsInit;
+    private List<string> _detTicks = [];
+    private HashSet<string> _detLocked = [];
+    private string _activeDetPick = "";
+    private List<string> _recTicks = [];
+    private HashSet<string> _recLocked = [];
+    private string _activeRecPick = "";
+    private bool _langsInit;
+    private List<string> _langTicks = [];
+    private HashSet<string> _langLocked = [];
+    private string? _activeLangPick;
+    private readonly Dictionary<string, string> _langVariantPick = new(StringComparer.Ordinal);
+    private bool _llmInit;
+    private IReadOnlyList<LlmModelInfo> _llmModelsList = [];
+    private bool _llmLoadFailed;
+    private List<string> _llmTicks = [];
+    private HashSet<string> _llmLocked = [];
+    private string? _activeLlmPick;
 
     private string ModalTitle => L["setup.title"];
 
     protected override void OnInitialized()
     {
         Coordinator.Changed += OnChanged;
-        BuildOptions();
-        // Modal được mount lại (điều hướng qua lại) trong khi wizard đang đứng sẵn ở màn A/B →
+        // Modal được mount lại (điều hướng qua lại) trong khi wizard đang đứng sẵn ở một màn hỏi →
         // khởi tạo state nhập liệu ngay; Changed có thể không bắn thêm khi đang pause.
-        if (Coordinator.Step == SetupStep.ChoosingOcrTier) EnsureTierState();
-        if (Coordinator.Step == SetupStep.ChoosingExtraLanguages) EnsureExtraState();
+        if (Coordinator.Step == SetupStep.ChoosingOcrModels) EnsureModelsState();
+        if (Coordinator.Step == SetupStep.ChoosingLanguages) EnsureLangsState();
+        if (Coordinator.Step == SetupStep.ChoosingLlmModels) _ = EnsureLlmStateAsync();
         if (!_wizardActive)
         {
-            _selected = PreselectLanguage();
             SetupState state = SetupState.Load();
             // Đường rẻ (spec §5.9): chỉ kiểm tra file/thư mục — không probe Python.
             if (SetupState.NeedsSetup(state, SetupPaths.VenvPythonExe, SetupPaths.ModelsDir))
@@ -302,54 +430,22 @@
     private void OnChanged() => _ = InvokeAsync(() =>
     {
         if (!Coordinator.IsComplete) _wizardActive = true;
-        // Cặp hiển thị màn ngôn ngữ phụ thuộc tier "Dùng chính" — dựng lại mỗi lần vào màn.
-        if (Coordinator.Step == SetupStep.ChoosingLanguage) BuildOptions();
-        if (Coordinator.Step == SetupStep.ChoosingOcrTier) EnsureTierState();
-        else _tierInit = false;
-        if (Coordinator.Step == SetupStep.ChoosingExtraLanguages) EnsureExtraState();
-        else _extraInit = false;
+        if (Coordinator.Step == SetupStep.ChoosingOcrModels) EnsureModelsState();
+        else _modelsInit = false;
+        if (Coordinator.Step == SetupStep.ChoosingLanguages) EnsureLangsState();
+        else _langsInit = false;
+        if (Coordinator.Step == SetupStep.ChoosingLlmModels) _ = EnsureLlmStateAsync();
+        else _llmInit = false;
         StateHasChanged();
     });
 
     public void Dispose() => Coordinator.Changed -= OnChanged;
 
-    /// <summary>One selectable language row: code, display name, and the model pair it would use.</summary>
-    private sealed record LangOption(string Code, string Name, (string Det, string Rec) Pair);
-
-    private void BuildOptions()
-    {
-        _options.Clear(); // vào lại màn (hoặc ActiveTier đổi) phải dựng lại theo tier hiện tại
-        foreach (string code in CommonLangCodes)
-            _options.Add(new LangOption(code, I18nStrings.LanguageName(code), PairFor(code)));
-    }
-
-    // Preselect theo brief: ngôn ngữ nguồn đã set trong settings nếu là mã hợp lệ, không thì "Tự động".
-    private string PreselectLanguage()
-    {
-        string src = SettingsStore.Load().Src.Trim().ToLowerInvariant();
-        return _options.Any(o => o.Code == src) ? src : "auto";
-    }
-
-    // Cặp model chỉ-để-hiển-thị cho màn ngôn ngữ: det của tier "Dùng chính" + rec của tier đó nếu v6
-    // phủ mã chọn, ngược lại rec legacy — cùng luật với bước Applying (OcrModelChoices).
-    private (string Det, string Rec) PairFor(string code) =>
-        OcrModelChoices.ExpectedPair(Coordinator.ActiveTier ?? "small", code);
-
-    private static double TotalMb((string Det, string Rec) pair) =>
-        OcrModelChoices.SizeMbOf(pair.Det) + OcrModelChoices.SizeMbOf(pair.Rec);
-
     private static string FormatMb(double mb) => $"{mb:0.#} MB";
 
-    private string OptionMeta((string Det, string Rec) pair) => $"{pair.Det} · {pair.Rec} · {FormatMb(TotalMb(pair))}";
-
-    private double SelectedTotalMb => _selected == "auto"
-        ? TotalMb(PairFor("auto"))
-        : _options.FirstOrDefault(o => o.Code == _selected) is { } option ? TotalMb(option.Pair) : 0.0;
-
-    // Highlight dòng đang chọn — không có class riêng trong CSS build sẵn nên dùng inline.
-    private static string OptionStyle(bool selected) => selected
-        ? "border: 1px solid var(--rt-tally); border-radius: 6px; padding: 8px;"
-        : "border: 1px solid var(--rt-line); border-radius: 6px; padding: 8px;";
+    // Kích thước model LLM: catalog ghi theo byte thập phân — hiện GB khi đủ lớn, còn lại MB.
+    private static string FormatSize(long bytes) =>
+        bytes >= 1_000_000_000 ? $"{bytes / 1_000_000_000.0:0.#} GB" : FormatMb(bytes / 1_048_576.0);
 
     private static string FlavorLabel(OcrFlavor flavor) => flavor == OcrFlavor.Gpu ? "GPU" : "CPU";
 
@@ -385,51 +481,71 @@
         _ => "setup.checking",
     };
 
-    // ── Màn A "Chọn model OCR" (2026-11-16) ───────────────────────────────────────────────────────
+    // ── Bước 2 "Chọn model OCR" (det + rec, spec 17-11 §4) ────────────────────────────────────────
 
-    // Preselect từ thực tế: tier đủ det+rec đã cài → tick + khoá; máy sạch → Small tự do; activeTier
-    // theo cặp det trong settings khi tier đó được tick.
-    private void EnsureTierState()
+    // Preselect từ thực tế: model đã cài → tick + khoá; máy sạch → Small tự do; chấm "Dùng chính"
+    // theo cặp trong settings khi model đó được tick (OcrModelChoices lo toàn bộ luật).
+    private void EnsureModelsState()
     {
-        if (_tierInit) return;
-        _tierInit = true;
+        if (_modelsInit) return;
+        _modelsInit = true;
         _installedModels = OcrModelChoices.ScanInstalledModels(SetupPaths.ModelsDir);
-        TierPreselect preselect = OcrModelChoices.PreselectTiers(_installedModels, SettingsStore.Load().OcrDet);
-        _tierTicks = [.. preselect.Ticked];
-        _tierLocked = [.. preselect.Locked];
-        _activeTierPick = preselect.ActiveTier;
+        AppSettings settings = SettingsStore.Load();
+        ModelPreselect dets = OcrModelChoices.PreselectModels(_installedModels, settings.OcrDet, OcrModelChoices.DetModels());
+        ModelPreselect recs = OcrModelChoices.PreselectModels(_installedModels, settings.OcrRec, OcrModelChoices.RecModels());
+        _detTicks = [.. dets.Ticked];
+        _detLocked = [.. dets.Locked];
+        _activeDetPick = dets.Active;
+        _recTicks = [.. recs.Ticked];
+        _recLocked = [.. recs.Locked];
+        _activeRecPick = recs.Active;
     }
 
-    private static string TierMeta(string tier) =>
-        $"{OcrModelChoices.TierDet(tier)} · {OcrModelChoices.TierRec(tier)} · " +
-        FormatMb(OcrModelChoices.SizeMbOf(OcrModelChoices.TierDet(tier)) + OcrModelChoices.SizeMbOf(OcrModelChoices.TierRec(tier)));
-
-    private float TierRowMissingMb(string tier)
+    // Nhãn dòng cỡ: tên + mô tả từ i18n; cỡ lạ (chưa có key) → hiện token trần (fallback, không vỡ UI).
+    private string RowLabel(string modelName)
     {
-        float missing = 0;
-        if (!_installedModels.Contains(OcrModelChoices.TierDet(tier))) missing += OcrModelChoices.SizeMbOf(OcrModelChoices.TierDet(tier));
-        if (!_installedModels.Contains(OcrModelChoices.TierRec(tier))) missing += OcrModelChoices.SizeMbOf(OcrModelChoices.TierRec(tier));
-        return missing;
+        string token = OcrModelChoices.SizeToken(modelName);
+        string nameKey = $"setup.tier.name.{token}";
+        string name = L[nameKey];
+        if (name == nameKey) return token;
+        string descKey = $"setup.tier.desc.{token}";
+        string desc = L[descKey];
+        return desc == descKey ? name : $"{name} — {desc}";
     }
 
-    private void ToggleTier(string tier)
+    private static string ModelMeta(string modelName) =>
+        $"{modelName} · {FormatMb(OcrModelChoices.SizeMbOf(modelName))}";
+
+    private float ModelRowMissingMb(string modelName) =>
+        _installedModels.Contains(modelName) ? 0 : OcrModelChoices.SizeMbOf(modelName);
+
+    private void ToggleDet(string modelName)
     {
-        if (_tierLocked.Contains(tier)) return; // đã cài → checkbox disabled; nhánh này chỉ là chốt an toàn
-        if (!_tierTicks.Remove(tier)) _tierTicks.Add(tier);
-        // Bỏ tick dòng đang giữ "Dùng chính" → dời sang dòng tick đầu theo thứ tự tiny → small → medium.
-        if (_tierTicks.Count > 0 && !_tierTicks.Contains(_activeTierPick))
-            _activeTierPick = OcrModelChoices.Tiers.First(_tierTicks.Contains);
+        if (_detLocked.Contains(modelName)) return; // đã cài → checkbox disabled; nhánh này là chốt an toàn
+        if (!_detTicks.Remove(modelName)) _detTicks.Add(modelName);
+        if (_detTicks.Count > 0 && !_detTicks.Contains(_activeDetPick))
+            _activeDetPick = OcrModelChoices.DetModels().First(_detTicks.Contains);
     }
 
-    private void PickActiveTier(string tier) => _activeTierPick = tier;
+    private void PickActiveDet(string modelName) => _activeDetPick = modelName;
 
-    private async Task ConfirmOcrTierAsync()
+    private void ToggleRec(string modelName)
     {
-        if (_busy || _tierTicks.Count == 0) return;
+        if (_recLocked.Contains(modelName)) return;
+        if (!_recTicks.Remove(modelName)) _recTicks.Add(modelName);
+        if (_recTicks.Count > 0 && !_recTicks.Contains(_activeRecPick))
+            _activeRecPick = OcrModelChoices.RecModels().First(_recTicks.Contains);
+    }
+
+    private void PickActiveRec(string modelName) => _activeRecPick = modelName;
+
+    private async Task ConfirmOcrModelsAsync()
+    {
+        if (_busy || _detTicks.Count == 0 || _recTicks.Count == 0) return;
         _busy = true;
         try
         {
-            await Coordinator.ContinueWithOcrTierAsync(_tierTicks, _activeTierPick);
+            await Coordinator.ContinueWithOcrModelsAsync(_detTicks, _activeDetPick, _recTicks, _activeRecPick);
         }
         finally
         {
@@ -438,36 +554,55 @@
         }
     }
 
-    // ── Màn B "Ngôn ngữ bổ sung" (2026-11-16) ─────────────────────────────────────────────────────
+    // ── Bước 3 "Ngôn ngữ" (spec 17-11 §5) ────────────────────────────────────────────────────────
 
-    // Preselect từ thực tế: rec legacy đã cài → tick + khoá; tick/bỏ tự do cho các ngôn ngữ còn lại;
-    // không chọn gì vẫn hợp lệ.
-    private void EnsureExtraState()
+    // Preselect từ thực tế: rec legacy đã cài → tick + khoá; "Đọc chính" theo rec trong settings khi
+    // rec đó nằm trong các dòng đã tick; trả lời trống hoàn toàn là hợp lệ.
+    private void EnsureLangsState()
     {
-        if (_extraInit) return;
-        _extraInit = true;
+        if (_langsInit) return;
+        _langsInit = true;
         _installedModels = OcrModelChoices.ScanInstalledModels(SetupPaths.ModelsDir);
-        _extraTicks = [.. OcrModelChoices.PreselectLegacyLanguages(_installedModels)];
+        (IReadOnlyList<string> ticked, IReadOnlyList<string> locked, string? active) =
+            OcrModelChoices.PreselectLanguages(_installedModels, SettingsStore.Load().OcrRec);
+        _langTicks = [.. ticked];
+        _langLocked = [.. locked];
+        _activeLangPick = active;
+        _langVariantPick.Clear();
+        foreach (LanguageChoice choice in OcrModelChoices.LanguageChoices())
+            _langVariantPick[choice.PrimaryLang] = OcrModelChoices.DefaultVariant(choice, _installedModels);
     }
 
-    private float ExtraRowMissingMb(string lang)
+    private void ToggleLang(LanguageChoice choice)
     {
-        string? rec = OcrModelChoices.LegacyRecFor(lang);
-        return rec is null || _installedModels.Contains(rec) ? 0 : OcrModelChoices.SizeMbOf(rec);
+        string rec = _langVariantPick[choice.PrimaryLang];
+        if (_langLocked.Contains(rec)) return;
+        if (!_langTicks.Remove(rec)) _langTicks.Add(rec);
+        if (_activeLangPick is not null && !_langTicks.Contains(_activeLangPick))
+            _activeLangPick = _langTicks.Count > 0 ? _langTicks[0] : null;
     }
 
-    private void ToggleExtra(string lang)
+    private void PickActiveLang(string rec) => _activeLangPick = rec;
+
+    // Đổi "Bản" của một dòng: giữ nguyên tick/khoá/chấm nếu dòng đó đang được chọn.
+    private void PickLangVariant(LanguageChoice choice, string newRec)
     {
-        if (!_extraTicks.Remove(lang)) _extraTicks.Add(lang);
+        string oldRec = _langVariantPick[choice.PrimaryLang];
+        if (oldRec == newRec) return;
+        _langVariantPick[choice.PrimaryLang] = newRec;
+        int index = _langTicks.IndexOf(oldRec);
+        if (index >= 0) _langTicks[index] = newRec;
+        if (_langLocked.Remove(oldRec) && _installedModels.Contains(newRec)) _langLocked.Add(newRec);
+        if (_activeLangPick == oldRec) _activeLangPick = newRec;
     }
 
-    private async Task ConfirmExtraLanguagesAsync()
+    private async Task ConfirmLanguagesAsync()
     {
         if (_busy) return;
         _busy = true;
         try
         {
-            await Coordinator.ContinueWithExtraLanguagesAsync(_extraTicks);
+            await Coordinator.ContinueWithLanguagesAsync(_langTicks, _activeLangPick);
         }
         finally
         {
@@ -476,15 +611,73 @@
         }
     }
 
-    private void SelectLanguage(string code) => _selected = code;
+    // ── Bước 4 "Chọn model LLM" (spec 17-11 §6) ──────────────────────────────────────────────────
 
-    private async Task ConfirmLanguageAsync()
+    // Danh sách đọc từ Core (llm.models.list — Core sống từ lúc app start); lỗi/mất Core ⇒ cờ để UI
+    // hiện "không đọc được danh sách" nhưng không chặn bước (để trống vẫn hợp lệ).
+    private async Task EnsureLlmStateAsync()
+    {
+        if (_llmInit) return;
+        _llmInit = true;
+        try
+        {
+            _llmModelsList = await Pipeline.ListLlmModelsAsync(CancellationToken.None);
+            _llmLoadFailed = false;
+        }
+        catch (Exception)
+        {
+            _llmModelsList = [];
+            _llmLoadFailed = true;
+        }
+
+        // Danh sách về SAU lượt render đầu của màn (await) → phải vẽ lại nếu không UI kẹt "đang nạp…".
+        await InvokeAsync(StateHasChanged);
+
+        _llmTicks = [];
+        _llmLocked = [];
+        _activeLlmPick = null;
+        if (_llmModelsList.Count > 0)
+        {
+            (IReadOnlyList<string> ticked, IReadOnlyList<string> locked, string? active) =
+                OcrModelChoices.PreselectLlmModels(
+                    _llmModelsList.Where(m => m.Installed).Select(m => m.Name).ToList(),
+                    SettingsStore.Load().LlmActiveModel,
+                    _llmModelsList.Select(m => m.Name).ToList());
+            _llmTicks = [.. ticked];
+            _llmLocked = [.. locked];
+            _activeLlmPick = active;
+        }
+    }
+
+    // Nút "Thử lại" khi đọc danh sách LLM thất bại — đọc lại từ Core (bước vẫn để trống được).
+    private async Task ReloadLlmAsync()
+    {
+        _llmInit = false;
+        await EnsureLlmStateAsync();
+    }
+
+    private void ToggleLlm(string modelName)
+    {
+        if (_llmLocked.Contains(modelName)) return;
+        if (!_llmTicks.Remove(modelName)) _llmTicks.Add(modelName);
+        if (_llmTicks.Count == 0) _activeLlmPick = null;
+        else if (_activeLlmPick is null || !_llmTicks.Contains(_activeLlmPick)) _activeLlmPick = _llmTicks[0];
+    }
+
+    private void PickActiveLlm(string modelName) => _activeLlmPick = modelName;
+
+    private double LlmTotalMb() => _llmTicks
+        .Select(name => _llmModelsList.FirstOrDefault(m => m.Name == name))
+        .Where(m => m is { Installed: false, Downloading: false })
+        .Sum(m => m!.SizeBytes) / (1024.0 * 1024.0);
+
+    private async Task ConfirmLlmModelsAsync()
     {
         if (_busy) return;
         _busy = true;
         try
         {
-            await Coordinator.ContinueWithLanguageAsync(_selected);
+            await Coordinator.ContinueWithLlmModelsAsync(_llmTicks, _activeLlmPick);
         }
         finally
         {
@@ -492,6 +685,12 @@
             StateHasChanged();
         }
     }
+
+    // ETA người-đọc-được: dưới 90 giây hiện giây, còn lại hiện phút (đơn vị nằm ở i18n).
+    private string FormatEta(TimeSpan eta) =>
+        eta.TotalSeconds < 90
+            ? L.Fmt("setup.progress.seconds", Math.Max(1, Math.Ceiling(eta.TotalSeconds)).ToString("0"))
+            : L.Fmt("setup.progress.minutes", Math.Ceiling(eta.TotalMinutes).ToString("0"));
 
     private async Task ConfirmFlavorSwitchAsync()
     {
