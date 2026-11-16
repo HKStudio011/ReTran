@@ -283,6 +283,21 @@ public class SetupStateNeedsSetupTests : IDisposable
     }
 
     [Fact]
+    public void Migration_OldFile_NoExtraLangs_LangsStaysNull()
+    {
+        // File cũ dừng trước màn B (extraLangs chưa từng được ghi) và không có ngôn ngữ legacy
+        // ⇒ "chưa hỏi", không phải "đã hỏi: không chọn" — bản mới sẽ hỏi màn Ngôn ngữ một lượt.
+        string json = Temp("setup-old-v4.json");
+        File.WriteAllText(json, """{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small"}""");
+
+        SetupState state = SetupState.Load(json);
+
+        Assert.Equal(new[] { "PP-OCRv6_small_det" }, state.Dets);
+        Assert.Null(state.Langs);
+        Assert.Null(state.ActiveLang);
+    }
+
+    [Fact]
     public void LegacyJson_NewFieldsNull()
     {
         string json = Temp("setup-old-v3.json");

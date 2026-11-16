@@ -25,6 +25,15 @@ public enum SetupStep
     /// <summary>Waiting for the user to answer the extra-language question (tick any or none). Chờ user trả lời màn ngôn ngữ bổ sung (tick nhiều hoặc không).</summary>
     ChoosingExtraLanguages,
 
+    /// <summary>Waiting for the user to tick the OCR det/rec models (at least one of each). Chờ user tick model det/rec OCR (ít nhất 1 mỗi khối).</summary>
+    ChoosingOcrModels,
+
+    /// <summary>Waiting for the user to answer the language screen (tick any legacy rec, or none). Chờ user trả lời màn Ngôn ngữ (tick rec legacy bất kỳ, hoặc không).</summary>
+    ChoosingLanguages,
+
+    /// <summary>Waiting for the user to answer the LLM screen (tick any catalog model, or none). Chờ user trả lời màn LLM (tick model bất kỳ, hoặc không).</summary>
+    ChoosingLlmModels,
+
     /// <summary>Re-verifying the bundled uv.exe on disk (the AV-quarantine window). Kiểm tra lại uv.exe đi kèm trên đĩa (cửa sổ cách ly AV).</summary>
     VerifyingFiles,
 
@@ -92,7 +101,7 @@ public sealed record FlavorSwitchInfo(OcrFlavor Installed, OcrFlavor Target);
 
 /// <summary>
 /// First-run Setup wizard orchestration as a testable state machine (spec §3, §4): hard gates first,
-/// the OCR-tier / language / extra-language answers once, then the pipeline VerifyingFiles → Syncing →
+/// the det/rec, language and LLM answers once, then the pipeline VerifyingFiles → Syncing →
 /// VerifyingSidecar →
 /// DownloadingLlmRuntime → DownloadingModels → Applying → Done. Soft steps retry up to
 /// <see cref="MaxRetries"/> times before failing; the hard
@@ -105,7 +114,7 @@ public sealed record FlavorSwitchInfo(OcrFlavor Installed, OcrFlavor Target);
 /// <c>uv sync</c> may leave no venv at all, so every retry is a full re-sync and the error screen
 /// quotes <see cref="UvSyncRunner.LastOutputTail"/>.
 /// Điều phối wizard Setup chạy lần đầu dưới dạng máy trạng thái test được (spec §3, §4): cổng cứng
-/// trước, ba câu trả lời wizard (tier OCR / ngôn ngữ / ngôn ngữ bổ sung) hỏi một lần, rồi pipeline
+/// trước, ba câu trả lời wizard (det/rec / Ngôn ngữ / LLM) hỏi một lần, rồi pipeline
 /// VerifyingFiles → Syncing → VerifyingSidecar →
 /// DownloadingLlmRuntime → DownloadingModels → Applying → Done. Các bước mềm retry tới <see cref="MaxRetries"/> lần trước
 /// khi fail; các bước cứng (Checking, VerifyingFiles) fail ngay. Tiến độ lưu vào <c>setup.json</c> sau
@@ -132,10 +141,10 @@ public sealed class SetupCoordinator
     private static readonly TimeSpan DefaultModelPollInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DefaultModelDownloadTimeout = TimeSpan.FromMinutes(60);
 
-    // Pipeline steps in order; Checking and the pre-pipeline answers (OCR tiers, language, extra
-    // languages) run before it, Done after it.
-    // Các bước pipeline theo thứ tự; Checking và các câu hỏi pre-pipeline (tier OCR, ngôn ngữ, ngôn
-    // ngữ bổ sung) chạy trước, Done chạy sau.
+    // Pipeline steps in order; Checking and the pre-pipeline answers (det/rec models, languages, LLM)
+    // run before it, Done after it.
+    // Các bước pipeline theo thứ tự; Checking và các câu hỏi pre-pipeline (model det/rec, Ngôn ngữ,
+    // LLM) chạy trước, Done chạy sau.
     private static readonly SetupStep[] PipelineSteps =
     [
         SetupStep.VerifyingFiles,
@@ -291,20 +300,48 @@ public sealed class SetupCoordinator
     public string? ActiveTier => _state.ActiveTier;
 
     /// <summary>
+    /// Det model marked "Dùng chính" in step 2; <see langword="null"/> until answered.
+    /// Model det được chấm "Dùng chính" ở bước 2; <see langword="null"/> khi chưa trả lời.
+    /// </summary>
+    public string? ActiveDet => _state.ActiveDet;
+
+    /// <summary>
+    /// Rec model marked "Dùng chính" in step 2 (the running rec unless <see cref="ActiveLang"/> is
+    /// set); <see langword="null"/> until answered.
+    /// Model rec được chấm "Dùng chính" ở bước 2 (rec đang chạy trừ khi có <see cref="ActiveLang"/>);
+    /// <see langword="null"/> khi chưa trả lời.
+    /// </summary>
+    public string? ActiveRec => _state.ActiveRec;
+
+    /// <summary>
+    /// Legacy rec marked "Đọc chính" in step 3 — the running rec when set; <see langword="null"/>
+    /// when the user did not mark one (or answered nothing).
+    /// Rec legacy được chấm "Đọc chính" ở bước 3 — rec đang chạy khi có; <see langword="null"/> khi
+    /// user không chấm (hoặc trả lời trống).
+    /// </summary>
+    public string? ActiveLang => _state.ActiveLang;
+
+    /// <summary>
+    /// LLM model marked "Dùng chính" in step 4; <see langword="null"/> when none (or nothing chosen).
+    /// Model LLM được chấm "Dùng chính" ở bước 4; <see langword="null"/> khi không chấm (hoặc không chọn gì).
+    /// </summary>
+    public string? ActiveLlm => _state.ActiveLlm;
+
+    /// <summary>
     /// True once the wizard reached <see cref="SetupStep.Done"/>. Đúng khi wizard đã tới <see cref="SetupStep.Done"/>.
     /// </summary>
     public bool IsComplete => Step == SetupStep.Done;
 
     /// <summary>
-    /// True while any coordinator operation (<see cref="StartAsync"/>, <see cref="ContinueWithOcrTierAsync"/>,
-    /// <see cref="ContinueWithLanguageAsync"/>, <see cref="ContinueWithExtraLanguagesAsync"/>,
+    /// True while any coordinator operation (<see cref="StartAsync"/>, <see cref="ContinueWithOcrModelsAsync"/>,
+    /// <see cref="ContinueWithLanguagesAsync"/>, <see cref="ContinueWithLlmModelsAsync"/>,
     /// <see cref="RetryAsync"/>, <see cref="ConfirmFlavorSwitchAsync"/>, <see cref="SwitchToCpuFlavorAsync"/>) is
     /// in flight; false once the run finishes, pauses for user input (language, flavor switch), or fails.
     /// Exposed so callers can tell "complete but re-running" apart from "complete and idle": during a forced
     /// re-run <see cref="Step"/> still holds <see cref="SetupStep.Done"/> until the first publish, so
     /// <see cref="IsComplete"/> alone cannot close that window.
-    /// Đúng khi một thao tác của coordinator (<see cref="StartAsync"/>, <see cref="ContinueWithOcrTierAsync"/>,
-    /// <see cref="ContinueWithLanguageAsync"/>, <see cref="ContinueWithExtraLanguagesAsync"/>,
+    /// Đúng khi một thao tác của coordinator (<see cref="StartAsync"/>, <see cref="ContinueWithOcrModelsAsync"/>,
+    /// <see cref="ContinueWithLanguagesAsync"/>, <see cref="ContinueWithLlmModelsAsync"/>,
     /// <see cref="RetryAsync"/>, <see cref="ConfirmFlavorSwitchAsync"/>, <see cref="SwitchToCpuFlavorAsync"/>)
     /// đang chạy; false khi lượt chạy kết thúc, dừng chờ user nhập liệu (ngôn ngữ, đổi flavor), hoặc fail.
     /// Mở ra để caller phân biệt "xong nhưng đang chạy lại" với "xong và rảnh": trong lúc "chạy lại setup",
@@ -345,13 +382,13 @@ public sealed class SetupCoordinator
 
     /// <summary>
     /// Starts the wizard: re-runs the system check (it is pure and cheap, and the flavor must follow
-    /// the CURRENT hardware), pauses at the first unanswered pre-pipeline question (OCR tiers →
-    /// language → extra languages), then runs the pipeline from the first not-done step. A completed
+    /// the CURRENT hardware), pauses at the first unanswered pre-pipeline question (det/rec models →
+    /// languages → LLM), then runs the pipeline from the first not-done step. A completed
     /// state short-circuits straight to <see cref="SetupStep.Done"/> unless <paramref name="force"/> is
     /// set (the "re-run setup" path — done steps are still skipped, so an unchanged machine passes
     /// through in seconds).
     /// Khởi động wizard: chạy lại check system (thuần và rẻ, flavor phải theo phần cứng HIỆN TẠI), dừng
-    /// ở câu hỏi pre-pipeline đầu tiên chưa được trả lời (tier OCR → ngôn ngữ → ngôn ngữ bổ sung), rồi
+    /// ở câu hỏi pre-pipeline đầu tiên chưa được trả lời (model det/rec → Ngôn ngữ → LLM), rồi
     /// chạy pipeline từ bước chưa done đầu tiên. State đã xong thì nhảy thẳng tới
     /// <see cref="SetupStep.Done"/> trừ khi đặt <paramref name="force"/> (đường "chạy lại setup" — bước
     /// đã done vẫn được skip, nên máy không đổi gì sẽ đi qua trong vài giây).
@@ -390,9 +427,9 @@ public sealed class SetupCoordinator
                 return;
             }
 
-            if (_state.Tiers is null)
+            if (_state.Dets is null)
             {
-                Step = SetupStep.ChoosingOcrTier;
+                Step = SetupStep.ChoosingOcrModels;
                 Publish();
                 return;
             }
@@ -534,6 +571,171 @@ public sealed class SetupCoordinator
     }
 
     /// <summary>
+    /// Continues after the user answered the det/rec screen: validates the ticked det and rec models
+    /// and their "Dùng chính" picks (at least one of each), persists them, marks the step done, and
+    /// resumes at the next unanswered question or the pipeline. A no-op when not in
+    /// <see cref="SetupStep.ChoosingOcrModels"/>.
+    /// Tiếp tục sau khi user trả lời màn det/rec: kiểm tra các model det/rec đã tick và lựa chọn "Dùng
+    /// chính" của chúng (ít nhất 1 mỗi khối), lưu lại, đánh dấu bước xong, rồi chạy tiếp ở câu hỏi kế
+    /// hoặc pipeline. Không làm gì nếu không ở <see cref="SetupStep.ChoosingOcrModels"/>.
+    /// </summary>
+    /// <param name="dets">Ticked det model names — at least one. Tên model det đã tick — ít nhất 1.</param>
+    /// <param name="activeDet">The "Dùng chính" det, one of <paramref name="dets"/>. Model det "Dùng chính", nằm trong <paramref name="dets"/>.</param>
+    /// <param name="recs">Ticked rec model names — at least one. Tên model rec đã tick — ít nhất 1.</param>
+    /// <param name="activeRec">The "Dùng chính" rec, one of <paramref name="recs"/>. Model rec "Dùng chính", nằm trong <paramref name="recs"/>.</param>
+    /// <param name="ct">Cancellation token. Token hủy.</param>
+    /// <exception cref="ArgumentException">Empty list, unknown model, or an active pick outside its ticked list. List rỗng, model lạ, hoặc lựa chọn chính ngoài danh sách đã tick.</exception>
+    public async Task ContinueWithOcrModelsAsync(IReadOnlyList<string> dets, string activeDet,
+        IReadOnlyList<string> recs, string activeRec, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(dets);
+        ArgumentNullException.ThrowIfNull(recs);
+        ArgumentException.ThrowIfNullOrEmpty(activeDet);
+        ArgumentException.ThrowIfNullOrEmpty(activeRec);
+        if (dets.Count == 0)
+            throw new ArgumentException("Cần tick ít nhất một model det.", nameof(dets));
+        if (recs.Count == 0)
+            throw new ArgumentException("Cần tick ít nhất một model rec.", nameof(recs));
+        foreach (string det in dets)
+        {
+            if (!OcrModelChoices.DetModels().Contains(det, StringComparer.Ordinal))
+                throw new ArgumentException($"Model det không hợp lệ: '{det}'.", nameof(dets));
+        }
+        foreach (string rec in recs)
+        {
+            if (!OcrModelChoices.RecModels().Contains(rec, StringComparer.Ordinal))
+                throw new ArgumentException($"Model rec không hợp lệ: '{rec}'.", nameof(recs));
+        }
+        if (!dets.Contains(activeDet, StringComparer.Ordinal))
+            throw new ArgumentException("Model det \"Dùng chính\" phải nằm trong các model đã tick.", nameof(activeDet));
+        if (!recs.Contains(activeRec, StringComparer.Ordinal))
+            throw new ArgumentException("Model rec \"Dùng chính\" phải nằm trong các model đã tick.", nameof(activeRec));
+
+        if (!TryBeginRun()) return;
+        try
+        {
+            if (Step != SetupStep.ChoosingOcrModels) return;
+
+            _state = _state with
+            {
+                Dets = [.. dets],
+                ActiveDet = activeDet,
+                Recs = [.. recs],
+                ActiveRec = activeRec,
+                Steps = WithStep(_state.Steps, StepKey(SetupStep.ChoosingOcrModels), "done"),
+            };
+            _state.Save();
+
+            await ContinueAfterAnswersAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            EndRun();
+        }
+    }
+
+    /// <summary>
+    /// Continues after the user answered the language screen: validates the ticked legacy rec names
+    /// (normalized, deduplicated; may be empty) and the optional "Đọc chính" pick, persists them,
+    /// marks the step done, and resumes. A no-op when not in
+    /// <see cref="SetupStep.ChoosingLanguages"/>.
+    /// Tiếp tục sau khi user trả lời màn Ngôn ngữ: kiểm tra tên rec legacy đã tick (bỏ trùng; có thể
+    /// rỗng) và lựa chọn "Đọc chính" tuỳ chọn, lưu lại, đánh dấu bước xong, rồi chạy tiếp. Không làm
+    /// gì nếu không ở <see cref="SetupStep.ChoosingLanguages"/>.
+    /// </summary>
+    /// <param name="langs">Ticked legacy rec model names (any subset of the step-3 variants), possibly empty. Tên rec legacy đã tick (tập con bất kỳ của các bản ở bước 3), có thể rỗng.</param>
+    /// <param name="activeLang">The "Đọc chính" rec (one of <paramref name="langs"/>), or <see langword="null"/>. Rec "Đọc chính" (nằm trong <paramref name="langs"/>), hoặc <see langword="null"/>.</param>
+    /// <param name="ct">Cancellation token. Token hủy.</param>
+    /// <exception cref="ArgumentException">An unknown rec name or an active pick outside the ticked list. Tên rec lạ hoặc lựa chọn chính ngoài danh sách đã tick.</exception>
+    public async Task ContinueWithLanguagesAsync(IReadOnlyList<string> langs, string? activeLang, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(langs);
+        var allowed = OcrModelChoices.LanguageChoices()
+            .SelectMany(c => c.Variants)
+            .ToHashSet(StringComparer.Ordinal);
+        var picks = new List<string>();
+        foreach (string lang in langs)
+        {
+            if (!allowed.Contains(lang))
+                throw new ArgumentException($"Rec ngôn ngữ không hợp lệ: '{lang}'.", nameof(langs));
+            if (!picks.Contains(lang, StringComparer.Ordinal)) picks.Add(lang);
+        }
+        if (activeLang is not null && !picks.Contains(activeLang, StringComparer.Ordinal))
+            throw new ArgumentException("Rec \"Đọc chính\" phải nằm trong các rec đã tick.", nameof(activeLang));
+
+        if (!TryBeginRun()) return;
+        try
+        {
+            if (Step != SetupStep.ChoosingLanguages) return;
+
+            _state = _state with
+            {
+                Langs = picks,
+                ActiveLang = activeLang,
+                Steps = WithStep(_state.Steps, StepKey(SetupStep.ChoosingLanguages), "done"),
+            };
+            _state.Save();
+
+            await ContinueAfterAnswersAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            EndRun();
+        }
+    }
+
+    /// <summary>
+    /// Continues after the user answered the LLM screen: validates the ticked catalog names
+    /// (deduplicated; may be empty) and the optional "Dùng chính" pick, persists them, marks the step
+    /// done, and resumes. When anything is ticked the llama.cpp-download and model-download markers
+    /// are cleared so those steps run again and fetch what is missing. A no-op when not in
+    /// <see cref="SetupStep.ChoosingLlmModels"/>.
+    /// Tiếp tục sau khi user trả lời màn LLM: kiểm tra tên catalog đã tick (bỏ trùng; có thể rỗng) và
+    /// lựa chọn "Dùng chính" tuỳ chọn, lưu lại, đánh dấu bước xong, rồi chạy tiếp. Khi có tick, marker
+    /// tải llama.cpp và tải model được xoá để hai bước đó chạy lại và tải phần còn thiếu. Không làm gì
+    /// nếu không ở <see cref="SetupStep.ChoosingLlmModels"/>.
+    /// </summary>
+    /// <param name="llmModels">Ticked LLM catalog names, possibly empty. Tên model LLM đã tick, có thể rỗng.</param>
+    /// <param name="activeLlm">The "Dùng chính" LLM (one of <paramref name="llmModels"/>), or <see langword="null"/>. Model LLM "Dùng chính" (nằm trong <paramref name="llmModels"/>), hoặc <see langword="null"/>.</param>
+    /// <param name="ct">Cancellation token. Token hủy.</param>
+    /// <exception cref="ArgumentException">A blank name or an active pick outside the ticked list. Tên rỗng hoặc lựa chọn chính ngoài danh sách đã tick.</exception>
+    public async Task ContinueWithLlmModelsAsync(IReadOnlyList<string> llmModels, string? activeLlm, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(llmModels);
+        var picks = new List<string>();
+        foreach (string model in llmModels)
+        {
+            if (string.IsNullOrWhiteSpace(model))
+                throw new ArgumentException($"Model LLM không hợp lệ: '{model}'.", nameof(llmModels));
+            if (!picks.Contains(model, StringComparer.Ordinal)) picks.Add(model);
+        }
+        if (activeLlm is not null && !picks.Contains(activeLlm, StringComparer.Ordinal))
+            throw new ArgumentException("Model LLM \"Dùng chính\" phải nằm trong các model đã tick.", nameof(activeLlm));
+
+        if (!TryBeginRun()) return;
+        try
+        {
+            if (Step != SetupStep.ChoosingLlmModels) return;
+
+            Dictionary<string, string> steps = WithStep(_state.Steps, StepKey(SetupStep.ChoosingLlmModels), "done");
+            if (picks.Count > 0)
+            {
+                // Có chọn LLM ⇒ hai bước tải phải chạy lại để tải bù (runtime llama.cpp + GGUF) — spec §10.
+                steps.Remove(StepKey(SetupStep.DownloadingLlmRuntime));
+                steps.Remove(StepKey(SetupStep.DownloadingModels));
+            }
+            _state = _state with { LlmModels = picks, ActiveLlm = activeLlm, Steps = steps };
+            _state.Save();
+
+            await ContinueAfterAnswersAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            EndRun();
+        }
+    }
+
+    /// <summary>
     /// Confirms the pending flavor switch (the user pressed "Đổi sang bản mới"): syncs the checked
     /// flavor — replacing what is installed — and continues the pipeline. A no-op when not in
     /// <see cref="SetupStep.ConfirmingFlavorSwitch"/>; NO sync call ever happens before this method.
@@ -649,9 +851,9 @@ public sealed class SetupCoordinator
                     return;
                 }
 
-                if (_state.Tiers is null)
+                if (_state.Dets is null)
                 {
-                    Step = SetupStep.ChoosingOcrTier;
+                    Step = SetupStep.ChoosingOcrModels;
                     Publish();
                     return;
                 }
@@ -718,24 +920,24 @@ public sealed class SetupCoordinator
     }
 
     /// <summary>
-    /// Resumes after a pre-pipeline answer was saved: pauses at the next unanswered question
-    /// (language, then extra languages), or runs the pipeline from its first step when everything is
-    /// answered.
-    /// Chạy tiếp sau khi một câu trả lời pre-pipeline được lưu: dừng ở câu hỏi chưa trả lời kế
-    /// (ngôn ngữ, rồi ngôn ngữ bổ sung), hoặc chạy pipeline từ bước đầu khi đã trả lời hết.
+    /// Resumes after a pre-pipeline answer was saved: pauses at the next unanswered step-3/step-4
+    /// question (languages, then LLM models), or runs the pipeline from its first step when everything
+    /// is answered.
+    /// Chạy tiếp sau khi một câu trả lời pre-pipeline được lưu: dừng ở câu hỏi bước 3/bước 4 chưa trả
+    /// lời kế (Ngôn ngữ, rồi model LLM), hoặc chạy pipeline từ bước đầu khi đã trả lời hết.
     /// </summary>
     private async Task ContinueAfterAnswersAsync(CancellationToken ct)
     {
-        if (_state.Language is null)
+        if (_state.Langs is null)
         {
-            Step = SetupStep.ChoosingLanguage;
+            Step = SetupStep.ChoosingLanguages;
             Publish();
             return;
         }
 
-        if (_state.ExtraLangs is null)
+        if (_state.LlmModels is null)
         {
-            Step = SetupStep.ChoosingExtraLanguages;
+            Step = SetupStep.ChoosingLlmModels;
             Publish();
             return;
         }

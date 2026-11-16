@@ -149,57 +149,32 @@ public class SetupCoordinatorTests : IDisposable
     // ── brief: bước cơ bản của máy trạng thái ─────────────────────────────────────────────────────
 
     [Fact]
-    public async Task Start_WithoutLanguage_PausesAtChoosingLanguage()
+    public async Task Start_NoLanguages_PausesAtChoosingLanguages()
     {
-        // Màn A đã trả lời; ngôn ngữ còn thiếu ⇒ pause kế tiếp là ChoosingLanguage.
+        // Model det/rec đã trả lời (file 16-11, migrate tự động); màn Ngôn ngữ còn thiếu ⇒ pause kế
+        // tiếp là ChoosingLanguages — không còn màn "chọn ngôn ngữ chính".
         WriteSetupJson("""{"flavor":"gpu","tiers":["small"],"activeTier":"small"}""");
         var coordinator = NewCoordinator();
 
         await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
 
-        Assert.Equal(SetupStep.ChoosingLanguage, coordinator.Step);
+        Assert.Equal(SetupStep.ChoosingLanguages, coordinator.Step);
         Assert.Equal(OcrFlavor.Gpu, coordinator.Flavor);
         Assert.Null(coordinator.Error);
-        // Checking passed and was persisted; the wizard now waits for the language answer.
-        // Checking đạt và đã lưu; wizard chờ user trả lời ngôn ngữ.
+        // Checking passed and was persisted; the wizard now waits for the language answers.
+        // Checking đạt và đã lưu; wizard chờ trả lời màn Ngôn ngữ.
         SetupState state = ReadSetupJson();
         Assert.Equal("gpu", state.Flavor);
-        Assert.Null(state.Language);
+        Assert.Null(state.Langs);
         Assert.Equal("done", state.Steps!["checking"]);
         Assert.Empty(_uvFake.SyncCalls);
         Assert.Empty(_bridge.Calls);
     }
 
     [Fact]
-    public async Task ContinueWithLanguage_RunsRemainingStepsAndCompletes()
-    {
-        // A và B đã trả lời; trả lời ngôn ngữ là đi trọn pipeline tới Done.
-        WriteSetupJson("""{"flavor":"gpu","tiers":["small"],"activeTier":"small","extraLangs":[]}""");
-        var coordinator = NewCoordinator();
-        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
-        Assert.Equal(SetupStep.ChoosingLanguage, coordinator.Step);
-
-        await coordinator.ContinueWithLanguageAsync("vi", TestContext.Current.CancellationToken);
-
-        Assert.Equal(SetupStep.Done, coordinator.Step);
-        Assert.True(coordinator.IsComplete);
-        SetupState state = ReadSetupJson();
-        Assert.True(state.IsComplete);
-        Assert.Equal("vi", state.Language);
-        // One full GPU sync; both models downloaded (the fake marks them installed on download).
-        // Một lệnh sync GPU duy nhất; cả hai model được tải (fake đánh dấu đã cài khi download).
-        Assert.Single(_uvFake.SyncCalls);
-        Assert.Equal(OcrFlavor.Gpu, FlavorOfSyncCall(_uvFake.SyncCalls[0]));
-        Assert.Equal([FakeCoreBridge.DetModel, FakeCoreBridge.RecModel], _bridge.Downloaded);
-        AppSettings settings = _settings.Load();
-        Assert.Equal(FakeCoreBridge.DetModel, settings.OcrDet);
-        Assert.Equal(FakeCoreBridge.RecModel, settings.OcrRec);
-    }
-
-    [Fact]
     public async Task FailedStep_RetriesThreeTimes_ThenFails()
     {
-        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[]}""");
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
         for (int i = 0; i < SetupCoordinator.MaxRetries + 1; i++)
             _uvFake.SyncResults.Enqueue((1, $"sync-fail-{i + 1}"));
         var coordinator = NewCoordinator();
@@ -217,7 +192,7 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task Retry_RestartsAttemptCounter()
     {
-        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[]}""");
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
         for (int i = 0; i < SetupCoordinator.MaxRetries + 1; i++)
             _uvFake.SyncResults.Enqueue((1, "fail"));
         var coordinator = NewCoordinator();
@@ -248,6 +223,7 @@ public class SetupCoordinatorTests : IDisposable
               "tiers": ["small"],
               "activeTier": "small",
               "extraLangs": [],
+              "llmModels": [],
               "steps": {
                 "checking": "done",
                 "choosinglanguage": "done",
@@ -271,7 +247,7 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task AllModelsAlreadyInstalled_StillWritesSettingsPair()
     {
-        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[]}""");
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
         _bridge.Installed.Add(FakeCoreBridge.DetModel);
         _bridge.Installed.Add(FakeCoreBridge.RecModel);
         var coordinator = NewCoordinator();
@@ -290,7 +266,7 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task PartialModel_IsDownloadedAgain_OnResume()
     {
-        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[]}""");
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
         // det installed; rec carries a .partial marker ⇒ the catalog reports installed=false.
         // det đã cài; rec còn marker .partial ⇒ catalog báo installed=false.
         _bridge.Installed.Add(FakeCoreBridge.DetModel);
@@ -307,7 +283,7 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task VerifyFiles_MissingUv_GoesToFailed_WithoutRetry()
     {
-        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[]}""");
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
         // uv.exe is present while Checking runs (probe #1) but gone by VerifyingFiles (probe #2):
         // the AV/SmartScreen quarantine window between the two steps.
         // uv.exe còn nguyên khi Checking chạy (lần dò #1) nhưng biến mất tới lúc VerifyingFiles
@@ -360,7 +336,7 @@ public class SetupCoordinatorTests : IDisposable
         freeBytes = 100 * GB; // the user freed space
         await coordinator.RetryAsync(TestContext.Current.CancellationToken);
 
-        Assert.Equal(SetupStep.ChoosingOcrTier, coordinator.Step); // re-ran Checking, now waiting on the OCR-tier answer
+        Assert.Equal(SetupStep.ChoosingOcrModels, coordinator.Step); // re-ran Checking, now waiting on the det/rec answer
         Assert.Empty(_uvFake.SyncCalls);
         Assert.Empty(_bridge.Calls);
     }
@@ -372,7 +348,7 @@ public class SetupCoordinatorTests : IDisposable
         // RunPipelineAsync(Checking) — Array.IndexOf returns -1 for a non-pipeline step, and
         // PipelineSteps[-1] throws IndexOutOfRangeException. Trigger: language already answered →
         // re-run Setup → Checking hard-fails (e.g. full disk) → user fixes it → clicks "Thử lại".
-        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[]}""");
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
         long freeBytes = 1 * GB; // below the GPU floor ⇒ Checking hard-fails
         var coordinator = NewCoordinator(diskFree: _ => freeBytes);
 
@@ -393,7 +369,7 @@ public class SetupCoordinatorTests : IDisposable
     {
         var coordinator = NewCoordinator();
         await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
-        Assert.Equal(SetupStep.ChoosingOcrTier, coordinator.Step); // máy chưa trả lời gì → dừng ở màn A
+        Assert.Equal(SetupStep.ChoosingOcrModels, coordinator.Step); // máy chưa trả lời gì → dừng ở màn det/rec
 
         coordinator.Skip();
 
@@ -411,13 +387,14 @@ public class SetupCoordinatorTests : IDisposable
 
         await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
         int afterStart = _changedCount;
-        Assert.True(afterStart > before, "Changed must fire while the wizard moves Checking → ChoosingLanguage");
+        Assert.True(afterStart > before, "Changed must fire while the wizard moves Checking → ChoosingOcrModels");
 
-        await coordinator.ContinueWithOcrTierAsync(["small"], "small", TestContext.Current.CancellationToken);
-        Assert.Equal(SetupStep.ChoosingLanguage, coordinator.Step);
-        await coordinator.ContinueWithLanguageAsync("vi", TestContext.Current.CancellationToken);
-        Assert.Equal(SetupStep.ChoosingExtraLanguages, coordinator.Step);
-        await coordinator.ContinueWithExtraLanguagesAsync([], TestContext.Current.CancellationToken);
+        await coordinator.ContinueWithOcrModelsAsync([FakeCoreBridge.DetModel], FakeCoreBridge.DetModel,
+            [FakeCoreBridge.RecModel], FakeCoreBridge.RecModel, TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.ChoosingLanguages, coordinator.Step);
+        await coordinator.ContinueWithLanguagesAsync([], null, TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.ChoosingLlmModels, coordinator.Step);
+        await coordinator.ContinueWithLlmModelsAsync([], null, TestContext.Current.CancellationToken);
         Assert.Equal(SetupStep.Done, coordinator.Step);
         Assert.True(_changedCount > afterStart, "Changed must fire on every subsequent step transition through Done");
     }
@@ -425,49 +402,155 @@ public class SetupCoordinatorTests : IDisposable
     // ── Tier OCR + ngôn ngữ bổ sung (2026-11-16 — màn A trước ngôn ngữ, màn B sau) ────────────────
 
     [Fact]
-    public async Task Start_NoAnswers_PausesAtOcrTier()
+    public async Task Start_NoAnswers_PausesAtOcrModels()
     {
-        // File cũ chỉ có language: lượt chạy đầu sau update hỏi màn A trước (spec §8) — chưa tải gì,
+        // File cũ chỉ có language: lượt chạy đầu sau update hỏi màn det/rec trước — chưa tải gì,
         // chưa gọi sidecar.
         WriteSetupJson("""{"flavor":"gpu","language":"vi"}""");
         var coordinator = NewCoordinator();
 
         await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
 
-        Assert.Equal(SetupStep.ChoosingOcrTier, coordinator.Step);
-        Assert.Null(coordinator.ActiveTier);
-        Assert.Null(ReadSetupJson().Tiers);
+        Assert.Equal(SetupStep.ChoosingOcrModels, coordinator.Step);
+        Assert.Null(coordinator.ActiveDet);
+        Assert.Null(ReadSetupJson().Dets);
         Assert.Empty(_uvFake.SyncCalls);
         Assert.Empty(_bridge.Calls);
     }
 
     [Fact]
-    public async Task Flow_Order_TierThenLanguageThenExtra()
+    public async Task Flow_Order_ModelsThenLanguagesThenLlm()
     {
-        // Máy sạch: A → ngôn ngữ → B → pipeline tới Done; tải đủ cặp model.
+        // Máy sạch: det/rec → Ngôn ngữ → LLM → pipeline tới Done; tải đủ cặp model.
         WriteSetupJson("""{"flavor":"gpu"}""");
         var coordinator = NewCoordinator();
 
         await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
-        Assert.Equal(SetupStep.ChoosingOcrTier, coordinator.Step);
+        Assert.Equal(SetupStep.ChoosingOcrModels, coordinator.Step);
 
-        await coordinator.ContinueWithOcrTierAsync(["small"], "small", TestContext.Current.CancellationToken);
-        Assert.Equal(SetupStep.ChoosingLanguage, coordinator.Step);
-        Assert.Equal("small", coordinator.ActiveTier);
+        await coordinator.ContinueWithOcrModelsAsync([FakeCoreBridge.DetModel], FakeCoreBridge.DetModel,
+            [FakeCoreBridge.RecModel], FakeCoreBridge.RecModel, TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.ChoosingLanguages, coordinator.Step);
+        Assert.Equal(FakeCoreBridge.DetModel, coordinator.ActiveDet);
 
-        await coordinator.ContinueWithLanguageAsync("vi", TestContext.Current.CancellationToken);
-        Assert.Equal(SetupStep.ChoosingExtraLanguages, coordinator.Step);
+        await coordinator.ContinueWithLanguagesAsync([], null, TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.ChoosingLlmModels, coordinator.Step);
 
-        await coordinator.ContinueWithExtraLanguagesAsync([], TestContext.Current.CancellationToken);
+        await coordinator.ContinueWithLlmModelsAsync([], null, TestContext.Current.CancellationToken);
         Assert.Equal(SetupStep.Done, coordinator.Step);
 
         // Marker pre-pipeline được lưu (không hỏi lại) + downloads đủ cặp.
         SetupState state = ReadSetupJson();
-        Assert.Equal("done", state.Steps!["choosingocrtier"]);
-        Assert.Equal("done", state.Steps["choosingextralanguages"]);
-        Assert.Equal(new[] { "small" }, state.Tiers);
-        Assert.Equal("small", state.ActiveTier);
+        Assert.Equal("done", state.Steps!["choosingocrmodels"]);
+        Assert.Equal("done", state.Steps["choosinglanguages"]);
+        Assert.Equal("done", state.Steps["choosingllmmodels"]);
+        Assert.Equal(new[] { FakeCoreBridge.DetModel }, state.Dets);
+        Assert.Equal(FakeCoreBridge.RecModel, state.ActiveRec);
         Assert.Equal([FakeCoreBridge.DetModel, FakeCoreBridge.RecModel], _bridge.Downloaded);
+    }
+
+    [Fact]
+    public async Task ContinueModels_ZeroDet_Throws()
+    {
+        var coordinator = NewCoordinator();
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => coordinator.ContinueWithOcrModelsAsync([], FakeCoreBridge.DetModel,
+                [FakeCoreBridge.RecModel], FakeCoreBridge.RecModel, TestContext.Current.CancellationToken));
+
+        Assert.False(File.Exists(_setupJson)); // validate trước khi chạy → không ghi state
+    }
+
+    [Fact]
+    public async Task ContinueModels_ZeroRec_Throws()
+    {
+        var coordinator = NewCoordinator();
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => coordinator.ContinueWithOcrModelsAsync([FakeCoreBridge.DetModel], FakeCoreBridge.DetModel,
+                [], FakeCoreBridge.RecModel, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task ContinueModels_BadActive_Throws()
+    {
+        var coordinator = NewCoordinator();
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => coordinator.ContinueWithOcrModelsAsync(
+                [FakeCoreBridge.DetModel], "PP-OCRv6_medium_det",
+                [FakeCoreBridge.RecModel], FakeCoreBridge.RecModel, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task ContinueLanguages_BadLang_Throws()
+    {
+        var coordinator = NewCoordinator();
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => coordinator.ContinueWithLanguagesAsync(["xx"], null, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task ContinueLanguages_BadActive_Throws()
+    {
+        var coordinator = NewCoordinator();
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => coordinator.ContinueWithLanguagesAsync(
+                ["korean_PP-OCRv5_mobile_rec"], "cyrillic_PP-OCRv5_mobile_rec",
+                TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task ContinueLlm_BadActive_Throws()
+    {
+        var coordinator = NewCoordinator();
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            () => coordinator.ContinueWithLlmModelsAsync(["m1"], "m2", TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task ContinueLlm_Choices_ClearsDownloadMarkers()
+    {
+        // Máy đã setup (marker tải done); bước 4 chưa trả lời → trả lời CÓ chọn ⇒ marker bước 8/9
+        // phải được xoá để chạy lại (tải bù runtime + GGUF) — spec §10.
+        WriteSetupJson("""{"flavor":"cpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"steps":{"checking":"done","choosingocrtier":"done","choosinglanguage":"done","choosingextralanguages":"done","verifyingfiles":"done","syncing":"done","verifyingsidecar":"done","downloadingllmruntime":"done","downloadingmodels":"done","applying":"done"}}""");
+        var coordinator = NewCoordinator(adapters: Adapters());
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.ChoosingLlmModels, coordinator.Step);
+
+        await coordinator.ContinueWithLlmModelsAsync(["Hy-MT2-1.8B-UD-Q4_K_XL"], "Hy-MT2-1.8B-UD-Q4_K_XL",
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        // Bước 8 chạy lại (tải runtime) thay vì skip theo marker cũ.
+        Assert.Equal(["cpu"], _bridge.LlmRuntimeDownloads);
+    }
+
+    [Fact]
+    public void ActiveProps_Exposed()
+    {
+        WriteSetupJson("""
+            {
+              "flavor": "gpu",
+              "language": "ko",
+              "tiers": ["small", "medium"],
+              "activeTier": "medium",
+              "extraLangs": ["ru"],
+              "llmModels": ["Hy-MT2-1.8B-UD-Q4_K_XL"],
+              "activeLlm": "Hy-MT2-1.8B-UD-Q4_K_XL"
+            }
+            """);
+
+        var coordinator = NewCoordinator();
+
+        Assert.Equal("PP-OCRv6_medium_det", coordinator.ActiveDet);
+        Assert.Equal("PP-OCRv6_medium_rec", coordinator.ActiveRec);
+        Assert.Equal("korean_PP-OCRv5_mobile_rec", coordinator.ActiveLang);
+        Assert.Equal("Hy-MT2-1.8B-UD-Q4_K_XL", coordinator.ActiveLlm);
     }
 
     [Fact]
@@ -482,6 +565,7 @@ public class SetupCoordinatorTests : IDisposable
               "tiers": ["small"],
               "activeTier": "small",
               "extraLangs": [],
+              "llmModels": [],
               "steps": {
                 "checking": "done",
                 "choosingocrtier": "done",
@@ -549,7 +633,7 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public void ActiveTier_Exposed()
     {
-        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small","medium"],"activeTier":"medium","extraLangs":[]}""");
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small","medium"],"activeTier":"medium","extraLangs":[],"llmModels":[]}""");
 
         Assert.Equal("medium", NewCoordinator().ActiveTier);
     }
@@ -566,7 +650,8 @@ public class SetupCoordinatorTests : IDisposable
               "language": "ko",
               "tiers": ["small", "medium"],
               "activeTier": "small",
-              "extraLangs": ["ru"]
+              "extraLangs": ["ru"],
+              "llmModels": []
             }
             """);
         var coordinator = NewCoordinator(adapters: Adapters()); // máy không NVIDIA → flavor CPU
@@ -589,7 +674,7 @@ public class SetupCoordinatorTests : IDisposable
     public async Task DownloadSet_SkipsInstalled()
     {
         // Model có cả trên đĩa (seam) lẫn trong catalog (RPC) → không gọi download.
-        WriteSetupJson("""{"flavor":"cpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[]}""");
+        WriteSetupJson("""{"flavor":"cpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
         _bridge.Installed.Add(FakeCoreBridge.DetModel);
         _bridge.Installed.Add(FakeCoreBridge.RecModel);
         var coordinator = NewCoordinator(
@@ -606,7 +691,7 @@ public class SetupCoordinatorTests : IDisposable
     public async Task Applying_TierAwarePair()
     {
         // auto + activeTier medium → cặp medium/medium; main ngoài phủ (ko) + tiny → tiny_det + korean rec.
-        WriteSetupJson("""{"flavor":"cpu","language":"auto","tiers":["medium"],"activeTier":"medium","extraLangs":[]}""");
+        WriteSetupJson("""{"flavor":"cpu","language":"auto","tiers":["medium"],"activeTier":"medium","extraLangs":[],"llmModels":[]}""");
         var coordinator = NewCoordinator(adapters: Adapters());
 
         await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
@@ -615,7 +700,7 @@ public class SetupCoordinatorTests : IDisposable
         Assert.Equal("PP-OCRv6_medium_det", settings.OcrDet);
         Assert.Equal("PP-OCRv6_medium_rec", settings.OcrRec);
 
-        WriteSetupJson("""{"flavor":"cpu","language":"ko","tiers":["tiny"],"activeTier":"tiny","extraLangs":[]}""");
+        WriteSetupJson("""{"flavor":"cpu","language":"ko","tiers":["tiny"],"activeTier":"tiny","extraLangs":[],"llmModels":[]}""");
         var second = NewCoordinator(adapters: Adapters());
 
         await second.StartAsync(ct: TestContext.Current.CancellationToken);
@@ -636,6 +721,7 @@ public class SetupCoordinatorTests : IDisposable
               "tiers": ["small", "medium"],
               "activeTier": "medium",
               "extraLangs": [],
+              "llmModels": [],
               "steps": {
                 "checking": "done",
                 "choosingocrtier": "done",
@@ -675,6 +761,7 @@ public class SetupCoordinatorTests : IDisposable
               "tiers": ["small", "medium"],
               "activeTier": "medium",
               "extraLangs": [],
+              "llmModels": [],
               "steps": {
                 "checking": "done",
                 "choosingocrtier": "done",
@@ -712,6 +799,7 @@ public class SetupCoordinatorTests : IDisposable
               "tiers": ["small"],
               "activeTier": "small",
               "extraLangs": [],
+              "llmModels": [],
               "steps": {
                 "checking": "done",
                 "choosingocrtier": "done",
@@ -737,94 +825,12 @@ public class SetupCoordinatorTests : IDisposable
         Assert.Empty(_bridge.Calls);
     }
 
-    [Fact]
-    public async Task ContinueExtra_NewChoices_ClearsMarkers_AndDownloads()
-    {
-        // Máy đã setup, file cũ chưa có extraLangs → user tick thêm ko ở màn B: reconcile sau khi lưu
-        // phải clear downloadingmodels để rec Hàn được tải bù; cặp đang chạy giữ nguyên.
-        WriteSetupJson("""
-            {
-              "flavor": "cpu",
-              "language": "vi",
-              "tiers": ["small"],
-              "activeTier": "small",
-              "steps": {
-                "checking": "done",
-                "choosingocrtier": "done",
-                "choosinglanguage": "done",
-                "verifyingfiles": "done",
-                "syncing": "done",
-                "verifyingsidecar": "done",
-                "downloadingllmruntime": "done",
-                "downloadingmodels": "done",
-                "applying": "done"
-              }
-            }
-            """);
-        _bridge.Installed.Add(FakeCoreBridge.DetModel);
-        _bridge.Installed.Add(FakeCoreBridge.RecModel);
-        var coordinator = NewCoordinator(
-            adapters: Adapters(),
-            modelDirExists: path => !HasModelDir(path, "korean_PP-OCRv5_mobile_rec"));
-
-        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
-        Assert.Equal(SetupStep.ChoosingExtraLanguages, coordinator.Step);
-
-        await coordinator.ContinueWithExtraLanguagesAsync(["ko"], TestContext.Current.CancellationToken);
-
-        Assert.Equal(SetupStep.Done, coordinator.Step);
-        Assert.Equal(["korean_PP-OCRv5_mobile_rec"], _bridge.Downloaded); // chỉ tải phần thiếu
-        AppSettings settings = _settings.Load();
-        Assert.Equal(FakeCoreBridge.DetModel, settings.OcrDet);          // cặp không đổi
-        Assert.Equal(FakeCoreBridge.RecModel, settings.OcrRec);
-    }
-
-    [Fact]
-    public async Task ContinueTier_NewChoices_ClearMarkers_AndDownload()
-    {
-        // Biến thể ở màn A: file cũ thiếu tiers (extraLangs đã trả lời), user tick thêm medium →
-        // reconcile sau khi lưu clear cả downloadingmodels lẫn applying để tải bù + áp cặp mới.
-        WriteSetupJson("""
-            {
-              "flavor": "cpu",
-              "language": "vi",
-              "extraLangs": [],
-              "steps": {
-                "checking": "done",
-                "choosinglanguage": "done",
-                "verifyingfiles": "done",
-                "syncing": "done",
-                "verifyingsidecar": "done",
-                "downloadingllmruntime": "done",
-                "downloadingmodels": "done",
-                "applying": "done"
-              }
-            }
-            """);
-        WriteSettingsJson("""{"provider":"google","src":"auto","dst":"vi","ocrDet":"PP-OCRv6_small_det","ocrRec":"PP-OCRv6_small_rec"}""");
-        var coordinator = NewCoordinator(
-            adapters: Adapters(),
-            modelDirExists: path => !path.Contains("PP-OCRv6_medium", StringComparison.Ordinal));
-
-        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
-        Assert.Equal(SetupStep.ChoosingOcrTier, coordinator.Step);
-
-        await coordinator.ContinueWithOcrTierAsync(["small", "medium"], "medium", TestContext.Current.CancellationToken);
-
-        Assert.Equal(SetupStep.Done, coordinator.Step);
-        Assert.Contains("PP-OCRv6_medium_det", _bridge.Downloaded);
-        Assert.Contains("PP-OCRv6_medium_rec", _bridge.Downloaded);
-        AppSettings settings = _settings.Load();
-        Assert.Equal("PP-OCRv6_medium_det", settings.OcrDet);
-        Assert.Equal("PP-OCRv6_medium_rec", settings.OcrRec);
-    }
-
     // ── Amendment A2: đổi flavor phải được user xác nhận ──────────────────────────────────────────
 
     [Fact]
     public async Task FlavorMismatch_PausesForConfirmation_NoSyncBeforeConfirm()
     {
-        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[]}""");
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
         _uvFake.Installed = OcrFlavor.Cpu; // the machine currently runs the CPU wheel
         var coordinator = NewCoordinator();
 
@@ -856,7 +862,7 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task GpuFlavor_LowCapability_Fails_AndCpuSwitchSyncsCpu()
     {
-        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[]}""");
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
         _uvFake.Installed = OcrFlavor.Gpu; // installed matches ⇒ no flavor-switch pause
         _bridge.DeviceResult = new JsonObject
         {
@@ -890,7 +896,7 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task GpuFlavor_NullCapability_FailsWithCcGateNotice()
     {
-        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[]}""");
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
         _uvFake.Installed = OcrFlavor.Gpu;
         _bridge.DeviceResult = new JsonObject { ["device"] = "cpu", ["capability"] = null };
         var coordinator = NewCoordinator();
@@ -906,7 +912,7 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task CpuFlavor_SidecarVerificationSkipsDeviceCheck()
     {
-        WriteSetupJson("""{"flavor":"cpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[]}""");
+        WriteSetupJson("""{"flavor":"cpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
         _uvFake.Installed = null;
         var coordinator = NewCoordinator(adapters: Adapters()); // no NVIDIA ⇒ CPU flavor
 
@@ -925,7 +931,7 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task LlmRuntime_DownloadsCudaFlavor_OnGpuMachine()
     {
-        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[]}""");
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
         var coordinator = NewCoordinator();
 
         await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
@@ -939,7 +945,7 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task LlmRuntime_DownloadsCpuFlavor_OnCpuMachine()
     {
-        WriteSetupJson("""{"flavor":"cpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[]}""");
+        WriteSetupJson("""{"flavor":"cpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
         _uvFake.Installed = null;
         var coordinator = NewCoordinator(adapters: Adapters()); // no NVIDIA ⇒ CPU flavor
 
@@ -952,7 +958,7 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task LlmRuntime_AlreadyInstalled_SkipsDownload()
     {
-        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[]}""");
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
         _bridge.LlmRuntimeInstalled = true;
         var coordinator = NewCoordinator();
 
@@ -966,7 +972,7 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task LlmRuntime_NeverInstalls_FailsSoftly_ThenRetrySucceeds()
     {
-        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[]}""");
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
         _bridge.LlmRuntimeDownloadCompletes = false; // "network" that never finishes
         var coordinator = NewCoordinator(modelDownloadTimeout: TimeSpan.FromMilliseconds(150));
 
@@ -999,6 +1005,7 @@ public class SetupCoordinatorTests : IDisposable
               "tiers": ["small"],
               "activeTier": "small",
               "extraLangs": [],
+              "llmModels": [],
               "steps": {
                 "checking": "done",
                 "choosinglanguage": "done",
@@ -1034,7 +1041,7 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task CheckingProgress_Checks_ContainNineItems_InOrder_AllOk()
     {
-        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[]}""");
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
         var coordinator = NewCoordinator();
 
         await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
@@ -1059,7 +1066,7 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task Checks_ResetOnRetry_NoStaleFailures()
     {
-        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[]}""");
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
         bool githubReachable = false;
         var coordinator = NewCoordinator(
             isHostReachable: host => githubReachable || host != "github.com");
@@ -1085,7 +1092,7 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task SyncFailure_LeavesNoVenv_EachRetryIsFullResync()
     {
-        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[]}""");
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
         const string tail = "error: failed to install: paddlepaddle-gpu==3.4.0 (network timeout)";
         for (int i = 0; i < SetupCoordinator.MaxRetries + 1; i++)
             _uvFake.SyncResults.Enqueue((1, tail));
@@ -1178,7 +1185,7 @@ public class SetupCoordinatorTests : IDisposable
     {
         // The other side of the pin: an incomplete persisted state keeps the default initial step.
         // Mặt còn lại của pin: state đã lưu chưa hoàn tất giữ nguyên bước khởi tạo mặc định.
-        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"steps":{"checking":"done"}}""");
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[],"steps":{"checking":"done"}}""");
 
         var coordinator = NewCoordinator();
 
@@ -1219,12 +1226,13 @@ public class SetupCoordinatorTests : IDisposable
         // Phase 1: complete the wizard in-session (the three answers + full pipeline on the fast fakes).
         // Giai đoạn 1: hoàn tất wizard trong phiên (3 câu trả lời + toàn bộ pipeline trên fake nhanh).
         await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
-        Assert.Equal(SetupStep.ChoosingOcrTier, coordinator.Step);
-        await coordinator.ContinueWithOcrTierAsync(["small"], "small", TestContext.Current.CancellationToken);
-        Assert.Equal(SetupStep.ChoosingLanguage, coordinator.Step);
-        await coordinator.ContinueWithLanguageAsync("vi", TestContext.Current.CancellationToken);
-        Assert.Equal(SetupStep.ChoosingExtraLanguages, coordinator.Step);
-        await coordinator.ContinueWithExtraLanguagesAsync([], TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.ChoosingOcrModels, coordinator.Step);
+        await coordinator.ContinueWithOcrModelsAsync([FakeCoreBridge.DetModel], FakeCoreBridge.DetModel,
+            [FakeCoreBridge.RecModel], FakeCoreBridge.RecModel, TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.ChoosingLanguages, coordinator.Step);
+        await coordinator.ContinueWithLanguagesAsync([], null, TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.ChoosingLlmModels, coordinator.Step);
+        await coordinator.ContinueWithLlmModelsAsync([], null, TestContext.Current.CancellationToken);
         Assert.Equal(SetupStep.Done, coordinator.Step);
         Assert.True(coordinator.IsComplete);
 
@@ -1266,12 +1274,12 @@ public class SetupCoordinatorTests : IDisposable
         var coordinator = NewCoordinator();
         Assert.False(coordinator.IsRunning);
 
-        // Pause: no OCR-tier answer yet — StartAsync returns having paused at ChoosingOcrTier; the run
+        // Pause: no det/rec answer yet — StartAsync returns having paused at ChoosingOcrModels; the run
         // is over even though the wizard still waits for user input.
-        // Dừng chờ: chưa trả lời màn A — StartAsync trả về sau khi dừng ở ChoosingOcrTier; lượt chạy
-        // đã kết thúc dù wizard vẫn đang chờ user nhập liệu.
+        // Dừng chờ: chưa trả lời màn det/rec — StartAsync trả về sau khi dừng ở ChoosingOcrModels; lượt
+        // chạy đã kết thúc dù wizard vẫn đang chờ user nhập liệu.
         await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
-        Assert.Equal(SetupStep.ChoosingOcrTier, coordinator.Step);
+        Assert.Equal(SetupStep.ChoosingOcrModels, coordinator.Step);
         Assert.False(coordinator.IsRunning);
 
         // Fail: hard Checking failure (disk below the GPU floor) — Failed; the run is over too.

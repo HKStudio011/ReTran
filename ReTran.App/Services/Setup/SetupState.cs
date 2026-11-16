@@ -126,6 +126,10 @@ public sealed record SetupState(
         }
         if (legacyRec is not null && !langs.Contains(legacyRec)) langs.Add(legacyRec);
 
+        // extraLangs null (màn B chưa từng trả lời) và không có rec legacy ⇒ giữ Langs = null để màn
+        // Ngôn ngữ được hỏi MỘT lượt ở bản mới — không biến "chưa hỏi" thành "đã hỏi: không chọn".
+        List<string>? mappedLangs = state.ExtraLangs is null && legacyRec is null ? null : langs;
+
         string? det = state.ActiveTier is { } tier ? $"PP-OCRv6_{tier}_det" : null;
         string? rec = state.ActiveTier is { } tier2 ? $"PP-OCRv6_{tier2}_rec" : null;
 
@@ -135,7 +139,7 @@ public sealed record SetupState(
             Recs = [.. state.Tiers.Select(t => $"PP-OCRv6_{t}_rec")],
             ActiveDet = det,
             ActiveRec = rec,
-            Langs = langs,
+            Langs = mappedLangs,
             ActiveLang = legacyRec,
         };
     }
