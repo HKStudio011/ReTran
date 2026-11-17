@@ -38,6 +38,14 @@ public sealed class LlamaServerHost(
     private Process? _process;
     private int _port;
 
+    // Serializes EnsureStartedAsync ACROSS the health wait: without it a second concurrent caller
+    // sees the process alive and returns before /health passes, so one translation can hit a
+    // still-loading server (BA review 2026-11-17). Held from entry until healthy (or failed+cleaned).
+    // Tuần tự hoá EnsureStartedAsync XUYÊN suốt pha chờ health: thiếu nó, caller thứ hai thấy process
+    // còn sống và trả về trước khi /health xong — một lượt dịch có thể trúng server đang nạp model
+    // (review BA 2026-11-17). Giữ từ lúc vào tới khi khỏe (hoặc fail + dọn sạch).
+    private readonly SemaphoreSlim _startGate = new(1, 1);
+
     /// <summary>The chosen port, or 0 before <see cref="EnsureStartedAsync"/>. Cổng đã chọn, hoặc 0 trước khi start.</summary>
     public int Port
     {
@@ -122,6 +130,11 @@ public sealed class LlamaServerHost(
     /// <exception cref="InvalidOperationException">Thrown when the binary/model is missing or the server never becomes healthy. Khi thiếu binary/model hoặc server không khỏe kịp.</exception>
     public async Task EnsureStartedAsync(CancellationToken ct)
     {
+        // Held across the health wait — see the field doc (BA review 2026-11-17).
+        // Giữ xuyên suốt pha chờ health — xem doc của field (review BA 2026-11-17).
+        await _startGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
         string effectiveServerExe = serverExe;
         string effectiveModelPath = modelPath;
         int port;
@@ -171,6 +184,11 @@ public sealed class LlamaServerHost(
             string tail = KillAndCollectStderrTail();
             throw new InvalidOperationException(
                 $"llama-server did not become healthy within {DefaultHealthTimeout.TotalSeconds:0} s.{tail}");
+        }
+        }
+        finally
+        {
+            _startGate.Release();
         }
     }
 

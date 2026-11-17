@@ -3,25 +3,27 @@ using Microsoft.Extensions.Logging;
 namespace ReTran_App.Services.Diagnostics;
 
 /// <summary>
-/// Minimal <see cref="ILoggerProvider"/> appending Information-and-above records to a daily log file under
-/// <c>%LOCALAPPDATA%\ReTran\logs</c>, so a packaged (Release) run is debuggable too: the Debug build
-/// has <see cref="TraceLoggerProvider"/> and Blazor devtools, a Release run has neither — the generic
-/// Blazor error banner is then the only symptom, which is exactly how the 2026-11-17 wizard crash
-/// report surfaced (an unhandled render exception with no stack anywhere).
-/// Provider <see cref="ILoggerProvider"/> t?i thi?u, ghi các b?n ghi t? Warning tr? lên vào file log
-/// theo ngày d??i <c>%LOCALAPPDATA%\ReTran\logs</c>, d? phiên ch?y đóng gói (Release) cung khai thác
-/// du?c: build Debug có <see cref="TraceLoggerProvider"/> và Blazor devtools, còn Release thì kh�ng có
-/// c? hai — banner l?i Blazor chung chung l� tri?u ch?ng duy nh?t, đúng cách báo c� crash wizard
-/// 2026-11-17 xu?t hi?n (exception render kh�ng x? l? mà kh�ng có stack ? dau).
+/// Minimal <see cref="ILoggerProvider"/> appending Information-and-above records to a daily log file
+/// under <c>%LOCALAPPDATA%\ReTran\logs</c>, so a packaged (Release) run is debuggable too: the Debug
+/// build has <see cref="TraceLoggerProvider"/> and Blazor devtools, a Release run has neither — the
+/// generic Blazor error banner is then the only symptom, which is exactly how the 2026-11-17 wizard
+/// crash report surfaced (an unhandled render exception with no stack anywhere). Information level is
+/// included so the wizard's flow (start/pause/done) is traceable without a debugger.
+/// Provider <see cref="ILoggerProvider"/> toi thieu, ghi cac ban ghi tu Information tro len vao file
+/// log theo ngay duoi <c>%LOCALAPPDATA%\ReTran\logs</c>, de phien chay dong goi (Release) cung khai
+/// thac duoc: build Debug co <see cref="TraceLoggerProvider"/> va Blazor devtools, con Release thi
+/// khong co ca hai — banner loi Blazor chung chung la trieu chung duy nhat, dung cach bao cao crash
+/// wizard 2026-11-17 xuat hien (exception render khong xu ly ma khong co stack o dau). Muc Information
+/// duoc ghi de trace duoc luong wizard (bat dau/dung/xong) ma khong can debugger.
 /// </summary>
 /// <remarks>
 /// Deliberately belt-and-braces: writes are serialized by a lock, the file is opened per record (no
 /// long-lived handle to fight a second app instance over), and every disk failure is swallowed —
 /// logging must never take the app down. Information-and-up keeps the wizard flow traceable without
 /// burying the stacks.
-/// C? tình an-toàn-c?-k?p: ghi du?c ph?i hóa b?ng lock, file m? theo t?ng b?n ghi (không gi? handle
-/// l�u đ? tranh v?i instance app th? hai), và m?i l?i đĩa đ?u b? nu?t — logging kh�ng bao gi? đ� app.
-/// Ch? t? Warning tr? lên đ? file c�n d?ng d?c (log Info s? v�i stack).
+/// Co tinh an-toan-cap-kip: ghi duoc hoa bang lock, file mo theo tung ban ghi (khong giu handle lau
+/// de tranh voi instance app thu hai), va moi loi dia deu bi nuot — logging khong bao gio dap app.
+/// Tu Information tro len de file con dung doc (log Info nhieu se vui stack).
 /// </remarks>
 internal sealed class FileLoggerProvider : ILoggerProvider
 {
@@ -31,7 +33,7 @@ internal sealed class FileLoggerProvider : ILoggerProvider
     /// <summary>
     /// Creates the provider; <paramref name="logDirectory"/> overrides the default
     /// <c>%LOCALAPPDATA%\ReTran\logs</c> (tests).
-    /// T?o provider; <paramref name="logDirectory"/> ghi đè m?c d?nh
+    /// Tao provider; <paramref name="logDirectory"/> ghi de mac dinh
     /// <c>%LOCALAPPDATA%\ReTran\logs</c> (test).
     /// </summary>
     internal FileLoggerProvider(string? logDirectory = null) =>
@@ -45,7 +47,7 @@ internal sealed class FileLoggerProvider : ILoggerProvider
     public void Dispose()
     {
         // Nothing to release: records are appended per write and the provider owns no handle.
-        // Không có gì cần giải phóng: từng bản ghi append theo lần ghi và provider không giữ handle.
+        // Khong co gi can giai phong: tung ban ghi append theo lan ghi va provider khong giu handle.
     }
 
     private void Write(string line)
@@ -62,8 +64,8 @@ internal sealed class FileLoggerProvider : ILoggerProvider
         }
         catch (Exception)
         {
-            // Đĩa từ chối (khoá/đầy/quyền) — bỏ dòng log, không bao giờ để logging làm app sập.
             // Disk refused (lock/full/ACL) — drop the line; logging must never crash the app.
+            // Dia tu choi (khoa/day/quyen) — bo dong log, khong bao gio de logging lam app sap.
         }
     }
 

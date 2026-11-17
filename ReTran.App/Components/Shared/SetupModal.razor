@@ -69,8 +69,7 @@
     @* z-index 60 inline (lớn hơn z-50 của .rt-sheet): settings sheet đứng sau trong DOM nên với cùng
        z-index nó sẽ phủ lên modal — nút "Chạy lại setup" phải để wizard hiện trên sheet. Toasts (z-70)
        vẫn nổi trên cùng. *@
-    <LoggingErrorBoundary @ref="_modalBoundary">
-        <ChildContent>
+    <LoggingErrorBoundary>
         <div class="fixed inset-0 flex items-center justify-center bg-black/50 p-4" style="z-index: 60;">
         @* max-height + overflow-y trên KHUNG dialog (BA 17-11: màn bước 4 có 2 nhóm × 6 dòng + hint +
            tổng + nút — cao hơn cửa sổ, nút "Tiếp tục" trôi khỏi màn): nội dung quá cao thì cả khung
@@ -393,18 +392,6 @@
             </div>
         </div>
     }
-        <ErrorContent>
-            @* Fallback khi render wizard ném exception: Blazor Hybrid KHÔNG đưa exception render qua
-               ILogger (banner "An unhandled error" là triệu chứng duy nhất) — LoggingErrorBoundary đã
-               ghi stack vào file log, fallback này cho user đường thử lại thay vì màn đứng yên. *@
-            <div class="fixed inset-0 flex items-center justify-center bg-black/50 p-4" style="z-index: 60;">
-                <div role="alert" class="rt-setup-modal w-full max-w-sm rounded-lg border border-surface bg-background p-4 shadow-xl">
-                    <p class="mb-3 text-sm" style="color: var(--rt-danger);">@(L["setup.renderError"])</p>
-                    <button type="button" class="rt-btn rt-mini" @onclick="RecoverModal">@(L["setup.error.retry"])</button>
-                </div>
-            </div>
-        </ErrorContent>
-        </ChildContent>
     </LoggingErrorBoundary>
 }
 
@@ -412,9 +399,6 @@
     private bool _wizardActive;   // Wizard đã được start (hoặc đang chạy do rerun) — phân biệt với đường rẻ "đã xong".
     private bool _busy;           // Chặn bấm chồng các nút xác nhận/thử lại.
     private bool _showSkipConfirm; // Popup [Thoát ReTran]/[Bỏ qua thiết lập]/[Quay lại] đang mở (spec 2026-11-13).
-    private LoggingErrorBoundary? _modalBoundary;
-
-    private void RecoverModal() => _modalBoundary?.Recover();
 
     // Ba màn hỏi vòng 2 (spec 17-11): state nhập liệu, khởi tạo 1 lần mỗi lần VÀO màn từ preselect
     // thực tế (filesystem + settings); rời màn reset để lượt rerun sau lấy lại đúng thực tế.

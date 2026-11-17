@@ -98,7 +98,20 @@ public sealed class OpenAiChatClient(HttpClient client)
 
         using (resp)
         {
-            string responseBody = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            string responseBody;
+            try
+            {
+                // Body read MUST use the timeout token (not the outer ct): a server that sends
+                // headers then stalls would otherwise hang past the 300-s cap (BA review 2026-11-17).
+                // Đọc body PHẢI dùng token timeout (không phải ct ngoài): server gửi header rồi đứng
+                // yên sẽ treo vượt mốc 300 s nếu dùng ct (review BA 2026-11-17).
+                responseBody = await resp.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                throw new TimeoutException($"LLM request timed out after {Timeout.TotalSeconds:0} s.");
+            }
+
             if (resp.StatusCode != HttpStatusCode.OK)
             {
                 string snippet = responseBody.Length > 300 ? responseBody[..300] : responseBody;
