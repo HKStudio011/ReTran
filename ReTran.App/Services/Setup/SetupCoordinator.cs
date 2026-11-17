@@ -421,6 +421,18 @@ public sealed class SetupCoordinator
             }
 
             _state = _stateFactory();
+
+            // A fresh app session cannot assume the Core from a previous session is still alive: the
+            // VerifyingSidecar marker is SESSION truth, not disk truth. Drop it on every run start so
+            // the step kill+starts+pings Core again (cheap) — otherwise a resume skips it and every
+            // later RPC step dies with "Core not started" (BA 2026-11-17: Checking → llama.cpp →
+            // failed 4/4, caught by the file log).
+            // Phiên app mới không thể mặc định Core của phiên trước còn sống: marker VerifyingSidecar
+            // là sự-thật-THEO-PHIÊN, không phải sự-thật-trên-đĩa. Bỏ marker này ở đầu mọi lượt chạy để
+            // bước đó kill+start+ping Core lại (rẻ) — nếu không, resume sẽ skip nó và mọi bước RPC sau
+            // chết với "Core not started" (BA 2026-11-17: Checking → llama.cpp → fail 4/4, file log bắt được).
+            _state.Steps?.Remove(StepKey(SetupStep.VerifyingSidecar));
+
             if (force)
             {
                 // The repair rerun restarts from step 1: clear the v2 answers (all three question
@@ -1142,9 +1154,10 @@ public sealed class SetupCoordinator
                 {
                     JsonNode? status = await _bridge.CallAsync("llm.runtime.status", null, ct).ConfigureAwait(false);
                     if (IsLlmRuntimeInstalled(status)) break;
-                    // Tiến độ tải zip runtime (spec vòng 2 §9): status có `progress` → đưa vào
-                    // snapshot để UI hiện % + ETA; không có thì UI giữ thanh vô định.
+                    // Tiến độ tải zip runtime (spec vòng 2 §9): status có `progress` → đưa vào snapshot
+                    // và PUBLISH — không publish thì UI không bao giờ vẽ lại dòng % + ETA.
                     _downloads = [.. ParseRuntimeDownloads(status)];
+                    Publish();
                     await Task.Delay(_modelPollInterval, window.Token).ConfigureAwait(false);
                 }
 
@@ -1161,6 +1174,7 @@ public sealed class SetupCoordinator
         }
 
         _downloads = [];
+        Publish();
         Error = SetupMessage.Of("setup.fail.llmRuntime",
             (MaxRetries + 1).ToString(), _modelDownloadTimeout.TotalMinutes.ToString("0"));
         return StepOutcome.Failed;
@@ -1295,6 +1309,7 @@ public sealed class SetupCoordinator
                     }
 
                     _downloads = [.. downloads];
+                    Publish();
                     if (ocrDone && llmDone) break;
                     await Task.Delay(_modelPollInterval, window.Token).ConfigureAwait(false);
                 }

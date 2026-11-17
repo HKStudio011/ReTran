@@ -590,7 +590,10 @@ public class SetupCoordinatorTests : IDisposable
         Assert.Empty(_uvFake.SyncCalls);
         Assert.Empty(_bridge.Downloaded);
         Assert.Empty(_bridge.LlmRuntimeDownloads);
-        Assert.Empty(_bridge.Calls);
+        // Phần đắt (tải model/runtime) vẫn bỏ qua; VerifyingSidecar thì LUÔN verify lại từ BA 17-11
+        // (phiên mới không thể coi Core của phiên cũ còn sống).
+        Assert.DoesNotContain(_bridge.Calls, c => c.Method == "ocr.models.download");
+        Assert.DoesNotContain(_bridge.Calls, c => c.Method.StartsWith("llm.runtime", StringComparison.Ordinal));
     }
 
     // ── Tải theo lựa chọn + Applying + reconcile (2026-11-16, Review Focus #3/#4/#5) ───────────────
@@ -776,7 +779,9 @@ public class SetupCoordinatorTests : IDisposable
         SetupState state = ReadSetupJson();
         Assert.Equal("done", state.Steps!["downloadingmodels"]);
         Assert.Equal("done", state.Steps["applying"]);
-        Assert.Empty(_bridge.Calls);
+        // Marker được giữ (không clear); VerifyingSidecar vẫn verify lại (BA 17-11) nên Calls có
+        // ping/list — phần đắt cần bỏ qua là DOWNLOAD, assert ở đó.
+        Assert.DoesNotContain(_bridge.Calls, c => c.Method == "ocr.models.download");
     }
 
     [Fact]
@@ -1402,6 +1407,47 @@ public class SetupCoordinatorTests : IDisposable
     }
 
     [Fact]
+    public async Task Resume_AfterSessionRestart_StillVerifiesSidecar()
+    {
+        // BA 2026-11-17 (file log bắt được): wizard dở ở bước 8 → app khởi động lại → resume SKIP
+        // VerifyingSidecar theo marker của phiên cũ → Core chưa hề được start → mọi RPC bước 8 chết
+        // với "Core not started" 4/4. Mỗi lượt chạy wizard phải verify sidecar lại (kill+start+ping — rẻ).
+        WriteSetupJson("""
+            {
+              "flavor": "gpu",
+              "language": "auto",
+              "dets": ["PP-OCRv6_medium_det"],
+              "activeDet": "PP-OCRv6_medium_det",
+              "recs": ["PP-OCRv6_medium_rec"],
+              "activeRec": "PP-OCRv6_medium_rec",
+              "langs": [],
+              "llmModels": ["Hy-MT2-1.8B-UD-Q4_K_XL"],
+              "activeLlm": "Hy-MT2-1.8B-UD-Q4_K_XL",
+              "isComplete": false,
+              "steps": {
+                "checking": "done",
+                "choosinglanguage": "done",
+                "verifyingfiles": "done",
+                "syncing": "done",
+                "verifyingsidecar": "done",
+                "applying": "done",
+                "choosingocrmodels": "done",
+                "choosinglanguages": "done",
+                "choosingllmmodels": "done"
+              }
+            }
+            """);
+        _bridge.LlmInstalled.Add("Hy-MT2-1.8B-UD-Q4_K_XL"); // GGUF đã cài → bước 9 không tải
+        var coordinator = NewCoordinator();
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.True(_bridge.RestartCount >= 1, "Core phải được start lại trong phiên mới");
+        Assert.Contains(_bridge.Calls, c => c.Method == "sidecar.ping");
+    }
+
+    [Fact]
     public async Task Syncing_AlwaysRuns_EvenWhenSameFlavorInstalled()
     {
         // BA 2026-11-17: Syncing phải LUÔN chạy uv sync thật (kể cả khi wheel đúng đang cài) — sync
@@ -1470,6 +1516,16 @@ public class SetupCoordinatorTests : IDisposable
         Assert.Equal(150_000_000, info.ReceivedBytes);
         Assert.Equal(500_000_000, info.TotalBytes);
         Assert.Equal(25_000_000, info.BytesPerSec);
+
+        // Snapshot đổi phải Publish — không publish thì modal không bao giờ vẽ lại dòng % + ETA
+        // (bug thật 2026-11-17: vòng poll cập nhật `_downloads` lặng lẽ).
+        int seen = _changedCount;
+        var changedDeadline = DateTime.UtcNow.AddSeconds(2);
+        while (_changedCount <= seen && DateTime.UtcNow < changedDeadline)
+        {
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+        }
+        Assert.True(_changedCount > seen, "Downloads snapshot đổi nhưng không Publish — UI không hiện %/ETA");
 
         // Cho lượt thử kế tiếp hoàn tất → Done; snapshot rỗng sau khi tải xong.
         _bridge.LlmRuntimeDownloadCompletes = true;
