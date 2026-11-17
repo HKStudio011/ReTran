@@ -481,6 +481,7 @@ public static class I18nStrings
         ["setup.check.gpu.build.cpu"] = "bản CPU",
         ["setup.check.disk.detail"] = "cần {0} GB (bản {1})",
         ["setup.error.retry"] = "Thử lại",
+        ["setup.renderError"] = "Đã xảy ra lỗi khi hiển thị bước này — chi tiết đã được ghi vào log.",
         ["setup.error.skip"] = "Bỏ qua",
         ["setup.error.switchCpu"] = "Chuyển sang bản CPU",
         // Thông điệp lỗi wizard: SystemCheck/SetupCoordinator trả key + args (SetupMessage), modal
@@ -1017,6 +1018,7 @@ public static class I18nStrings
         ["setup.check.gpu.build.cpu"] = "CPU build",
         ["setup.check.disk.detail"] = "needs {0} GB ({1} build)",
         ["setup.error.retry"] = "Retry",
+        ["setup.renderError"] = "Something went wrong rendering this step — details were written to the log.",
         ["setup.error.skip"] = "Skip",
         ["setup.error.switchCpu"] = "Switch to the CPU build",
         // Wizard failure messages: SystemCheck/SetupCoordinator return a key + args (SetupMessage) and

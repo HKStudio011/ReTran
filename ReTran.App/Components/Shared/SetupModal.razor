@@ -5,11 +5,13 @@
 @using ReTran_App.Core
 @using ReTran_App.Services
 @using ReTran_App.Services.Setup
+@using Microsoft.Extensions.Logging
 @implements IDisposable
 @inject SetupCoordinator Coordinator
 @inject I18nService L
 @inject AppSettingsService SettingsStore
 @inject PipelineController Pipeline
+@inject ILogger<SetupModal> Logger
 
 @if (_wizardActive && !Coordinator.IsComplete && !Coordinator.SkippedForSession)
 {
@@ -67,7 +69,9 @@
     @* z-index 60 inline (lớn hơn z-50 của .rt-sheet): settings sheet đứng sau trong DOM nên với cùng
        z-index nó sẽ phủ lên modal — nút "Chạy lại setup" phải để wizard hiện trên sheet. Toasts (z-70)
        vẫn nổi trên cùng. *@
-    <div class="fixed inset-0 flex items-center justify-center bg-black/50 p-4" style="z-index: 60;">
+    <LoggingErrorBoundary @ref="_modalBoundary">
+        <ChildContent>
+        <div class="fixed inset-0 flex items-center justify-center bg-black/50 p-4" style="z-index: 60;">
         @* max-height + overflow-y trên KHUNG dialog (BA 17-11: màn bước 4 có 2 nhóm × 6 dòng + hint +
            tổng + nút — cao hơn cửa sổ, nút "Tiếp tục" trôi khỏi màn): nội dung quá cao thì cả khung
            cuộn được; các danh sách bên trong vẫn giữ scroll riêng 300px của chúng. *@
@@ -199,7 +203,11 @@
                     <ul class="setup-choices">
                         @foreach (LanguageChoice choice in OcrModelChoices.LanguageChoices())
                         {
-                            string rec = _langVariantPick[choice.PrimaryLang];
+                            @* Fallback: nếu render đến trước EnsureLangsState (race sau nút Tiếp tục),
+                               tính variant tại chỗ thay vì quăng KeyNotFoundException (BA 17-11). *@
+                            string rec = _langVariantPick.TryGetValue(choice.PrimaryLang, out string? picked)
+                                ? picked
+                                : OcrModelChoices.DefaultVariant(choice, _installedModels);
                             bool locked = _langLocked.Contains(rec);
                             float missing = ModelRowMissingMb(rec);
                             <li>
@@ -375,12 +383,28 @@
             </div>
         </div>
     }
+        <ErrorContent>
+            @* Fallback khi render wizard ném exception: Blazor Hybrid KHÔNG đưa exception render qua
+               ILogger (banner "An unhandled error" là triệu chứng duy nhất) — LoggingErrorBoundary đã
+               ghi stack vào file log, fallback này cho user đường thử lại thay vì màn đứng yên. *@
+            <div class="fixed inset-0 flex items-center justify-center bg-black/50 p-4" style="z-index: 60;">
+                <div role="alert" class="rt-setup-modal w-full max-w-sm rounded-lg border border-surface bg-background p-4 shadow-xl">
+                    <p class="mb-3 text-sm" style="color: var(--rt-danger);">@(L["setup.renderError"])</p>
+                    <button type="button" class="rt-btn rt-mini" @onclick="RecoverModal">@(L["setup.error.retry"])</button>
+                </div>
+            </div>
+        </ErrorContent>
+        </ChildContent>
+    </LoggingErrorBoundary>
 }
 
 @code {
     private bool _wizardActive;   // Wizard đã được start (hoặc đang chạy do rerun) — phân biệt với đường rẻ "đã xong".
     private bool _busy;           // Chặn bấm chồng các nút xác nhận/thử lại.
     private bool _showSkipConfirm; // Popup [Thoát ReTran]/[Bỏ qua thiết lập]/[Quay lại] đang mở (spec 2026-11-13).
+    private LoggingErrorBoundary? _modalBoundary;
+
+    private void RecoverModal() => _modalBoundary?.Recover();
 
     // Ba màn hỏi vòng 2 (spec 17-11): state nhập liệu, khởi tạo 1 lần mỗi lần VÀO màn từ preselect
     // thực tế (filesystem + settings); rời màn reset để lượt rerun sau lấy lại đúng thực tế.
@@ -411,9 +435,7 @@
         Coordinator.Changed += OnChanged;
         // Modal được mount lại (điều hướng qua lại) trong khi wizard đang đứng sẵn ở một màn hỏi →
         // khởi tạo state nhập liệu ngay; Changed có thể không bắn thêm khi đang pause.
-        if (Coordinator.Step == SetupStep.ChoosingOcrModels) EnsureModelsState();
-        if (Coordinator.Step == SetupStep.ChoosingLanguages) EnsureLangsState();
-        if (Coordinator.Step == SetupStep.ChoosingLlmModels) _ = EnsureLlmStateAsync();
+        SyncScreenInputState();
         if (!_wizardActive)
         {
             SetupState state = SetupState.Load();
@@ -433,15 +455,33 @@
     // start wizard từ SettingsPanel, không qua component này).
     private void OnChanged() => _ = InvokeAsync(() =>
     {
-        if (!Coordinator.IsComplete) _wizardActive = true;
+        try
+        {
+            if (!Coordinator.IsComplete) _wizardActive = true;
+            SyncScreenInputState();
+            StateHasChanged();
+        }
+        catch (Exception ex)
+        {
+            // Publish từ thread nền (uv sync, poll tải) không được phép giết phiên UI — log + nuốt;
+            // stack nằm trong file log để chẩn đoán (BA 17-11).
+            Logger.LogError(ex, "setup-modal: OnChanged failed");
+        }
+    });
+
+    // Khởi tạo state nhập liệu cho màn ĐANG đứng — gọi TRƯỚC MỌI render của màn đó: từ OnChanged,
+    // từ finally của các nút "Tiếp tục" (bấm → coordinator chuyển màn → render màn mới có thể đến
+    // TRƯỚC callback OnChanged ⇒ đọc state rỗng ⇒ KeyNotFoundException ở màn Ngôn ngữ — banner
+    // "bấm Tiếp tục mới bị", BA 2026-11-17), và từ OnInitialized khi modal mount lại giữa chừng.
+    private void SyncScreenInputState()
+    {
         if (Coordinator.Step == SetupStep.ChoosingOcrModels) EnsureModelsState();
         else _modelsInit = false;
         if (Coordinator.Step == SetupStep.ChoosingLanguages) EnsureLangsState();
         else _langsInit = false;
         if (Coordinator.Step == SetupStep.ChoosingLlmModels) _ = EnsureLlmStateAsync();
         else _llmInit = false;
-        StateHasChanged();
-    });
+    }
 
     public void Dispose() => Coordinator.Changed -= OnChanged;
 
@@ -494,16 +534,25 @@
     {
         if (_modelsInit) return;
         _modelsInit = true;
-        _installedModels = OcrModelChoices.ScanInstalledModels(SetupPaths.ModelsDir);
-        AppSettings settings = SettingsStore.Load();
-        ModelPreselect dets = OcrModelChoices.PreselectModels(_installedModels, settings.OcrDet, OcrModelChoices.DetModels());
-        ModelPreselect recs = OcrModelChoices.PreselectModels(_installedModels, settings.OcrRec, OcrModelChoices.RecModels());
-        _detTicks = [.. dets.Ticked];
-        _detLocked = [.. dets.Locked];
-        _activeDetPick = dets.Active;
-        _recTicks = [.. recs.Ticked];
-        _recLocked = [.. recs.Locked];
-        _activeRecPick = recs.Active;
+        try
+        {
+            _installedModels = OcrModelChoices.ScanInstalledModels(SetupPaths.ModelsDir);
+            AppSettings settings = SettingsStore.Load();
+            ModelPreselect dets = OcrModelChoices.PreselectModels(_installedModels, settings.OcrDet, OcrModelChoices.DetModels());
+            ModelPreselect recs = OcrModelChoices.PreselectModels(_installedModels, settings.OcrRec, OcrModelChoices.RecModels());
+            _detTicks = [.. dets.Ticked];
+            _detLocked = [.. dets.Locked];
+            _activeDetPick = dets.Active;
+            _recTicks = [.. recs.Ticked];
+            _recLocked = [.. recs.Locked];
+            _activeRecPick = recs.Active;
+        }
+        catch (Exception ex)
+        {
+            _modelsInit = false; // cho lần render/publish kế thử lại — không khoá cứng màn hỏi
+            Logger.LogError(ex, "setup-modal: EnsureModelsState failed");
+            throw;
+        }
     }
 
     // Nhãn dòng cỡ: tên + mô tả từ i18n; cỡ lạ (chưa có key) → hiện token trần (fallback, không vỡ UI).
@@ -555,6 +604,7 @@
         finally
         {
             _busy = false;
+            SyncScreenInputState(); // màn đích có thể đã đổi — init state TRƯỚC khi render
             StateHasChanged();
         }
     }
@@ -567,20 +617,31 @@
     {
         if (_langsInit) return;
         _langsInit = true;
-        _installedModels = OcrModelChoices.ScanInstalledModels(SetupPaths.ModelsDir);
-        (IReadOnlyList<string> ticked, IReadOnlyList<string> locked, string? active) =
-            OcrModelChoices.PreselectLanguages(_installedModels, SettingsStore.Load().OcrRec);
-        _langTicks = [.. ticked];
-        _langLocked = [.. locked];
-        _activeLangPick = active;
-        _langVariantPick.Clear();
-        foreach (LanguageChoice choice in OcrModelChoices.LanguageChoices())
-            _langVariantPick[choice.PrimaryLang] = OcrModelChoices.DefaultVariant(choice, _installedModels);
+        try
+        {
+            _installedModels = OcrModelChoices.ScanInstalledModels(SetupPaths.ModelsDir);
+            (IReadOnlyList<string> ticked, IReadOnlyList<string> locked, string? active) =
+                OcrModelChoices.PreselectLanguages(_installedModels, SettingsStore.Load().OcrRec);
+            _langTicks = [.. ticked];
+            _langLocked = [.. locked];
+            _activeLangPick = active;
+            _langVariantPick.Clear();
+            foreach (LanguageChoice choice in OcrModelChoices.LanguageChoices())
+                _langVariantPick[choice.PrimaryLang] = OcrModelChoices.DefaultVariant(choice, _installedModels);
+        }
+        catch (Exception ex)
+        {
+            _langsInit = false; // cho lần render/publish kế thử lại
+            Logger.LogError(ex, "setup-modal: EnsureLangsState failed");
+            throw;
+        }
     }
 
     private void ToggleLang(LanguageChoice choice)
     {
-        string rec = _langVariantPick[choice.PrimaryLang];
+        string rec = _langVariantPick.TryGetValue(choice.PrimaryLang, out string? picked)
+            ? picked
+            : OcrModelChoices.DefaultVariant(choice, _installedModels);
         if (_langLocked.Contains(rec)) return;
         if (!_langTicks.Remove(rec)) _langTicks.Add(rec);
         if (_activeLangPick is not null && !_langTicks.Contains(_activeLangPick))
@@ -592,7 +653,9 @@
     // Đổi "Bản" của một dòng: giữ nguyên tick/khoá/chấm nếu dòng đó đang được chọn.
     private void PickLangVariant(LanguageChoice choice, string newRec)
     {
-        string oldRec = _langVariantPick[choice.PrimaryLang];
+        string oldRec = _langVariantPick.TryGetValue(choice.PrimaryLang, out string? prev)
+            ? prev
+            : OcrModelChoices.DefaultVariant(choice, _installedModels);
         if (oldRec == newRec) return;
         _langVariantPick[choice.PrimaryLang] = newRec;
         int index = _langTicks.IndexOf(oldRec);
@@ -612,6 +675,7 @@
         finally
         {
             _busy = false;
+            SyncScreenInputState();
             StateHasChanged();
         }
     }
@@ -629,28 +693,40 @@
             _llmModelsList = await Pipeline.ListLlmModelsAsync(CancellationToken.None);
             _llmLoadFailed = false;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
             _llmModelsList = [];
             _llmLoadFailed = true;
+            _llmInit = false; // nút "Thử lại" đọc lại được
+            Logger.LogWarning(ex, "setup-modal: đọc danh sách LLM từ Core thất bại");
+            await InvokeAsync(StateHasChanged);
+            return;
         }
 
         // Danh sách về SAU lượt render đầu của màn (await) → phải vẽ lại nếu không UI kẹt "đang nạp…".
         await InvokeAsync(StateHasChanged);
 
-        _llmTicks = [];
-        _llmLocked = [];
-        _activeLlmPick = null;
-        if (_llmModelsList.Count > 0)
+        try
         {
-            (IReadOnlyList<string> ticked, IReadOnlyList<string> locked, string? active) =
-                OcrModelChoices.PreselectLlmModels(
-                    _llmModelsList.Where(m => m.Installed).Select(m => m.Name).ToList(),
-                    SettingsStore.Load().LlmActiveModel,
-                    _llmModelsList.Select(m => m.Name).ToList());
-            _llmTicks = [.. ticked];
-            _llmLocked = [.. locked];
-            _activeLlmPick = active;
+            _llmTicks = [];
+            _llmLocked = [];
+            _activeLlmPick = null;
+            if (_llmModelsList.Count > 0)
+            {
+                (IReadOnlyList<string> ticked, IReadOnlyList<string> locked, string? active) =
+                    OcrModelChoices.PreselectLlmModels(
+                        _llmModelsList.Where(m => m.Installed).Select(m => m.Name).ToList(),
+                        SettingsStore.Load().LlmActiveModel,
+                        _llmModelsList.Select(m => m.Name).ToList());
+                _llmTicks = [.. ticked];
+                _llmLocked = [.. locked];
+                _activeLlmPick = active;
+            }
+        }
+        catch (Exception ex)
+        {
+            _llmInit = false;
+            Logger.LogError(ex, "setup-modal: EnsureLlmStateAsync preselect failed");
         }
     }
 
@@ -687,6 +763,7 @@
         finally
         {
             _busy = false;
+            SyncScreenInputState();
             StateHasChanged();
         }
     }

@@ -1,0 +1,19 @@
+@* ErrorBoundary có log: Blazor Hybrid KHÔNG đưa exception render qua ILogger (banner
+   "An unhandled error has occurred" là triệu chứng duy nhất user thấy) — override OnErrorAsync
+   để stack đổ vào file log (%LOCALAPPDATA%\ReTran\logs) trước khi fallback hiển thị.
+   ErrorBoundary with logging: Blazor Hybrid does not route render exceptions through ILogger
+   (the generic "An unhandled error has occurred" banner is the only symptom) — OnErrorAsync
+   dumps the stack into the file log before the fallback shows. *@
+@inherits ErrorBoundary
+@using Microsoft.Extensions.Logging
+@code {
+    [Inject]
+    private ILogger<LoggingErrorBoundary> Logger { get; set; } = null!;
+
+    /// <inheritdoc/>
+    protected override Task OnErrorAsync(Exception exception)
+    {
+        Logger.LogError(exception, "setup-modal: unhandled rendering exception (ErrorBoundary caught)");
+        return Task.CompletedTask;
+    }
+}
