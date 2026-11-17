@@ -89,7 +89,20 @@ public static class OcrModelChoices
             if (!Directory.Exists(official)) return found;
             foreach (string dir in Directory.EnumerateDirectories(official))
             {
-                found.Add(Path.GetFileName(dir));
+                // Strict rule mirrors the sidecar's installed definition (and the coordinator's
+                // IsModelDirInstalled): a half-downloaded model (non-empty dir + `<name>.partial`
+                // marker next to it) or an empty dir must NOT count as installed — otherwise the
+                // step-2/3 preselect shows "Đã cài" + locked for a model the download step will
+                // re-fetch (BA review 2026-11-17: same class as the reconcile bug).
+                // Luật chặt mirror sidecar (và IsModelDirInstalled của coordinator): model tải dở
+                // (thư mục có nội dung + marker `<tên>.partial` cạnh nó) hoặc thư mục rỗng KHÔNG
+                // được tính là đã cài — nếu không preselect bước 2/3 sẽ hiện "Đã cài" + khoá cho
+                // model mà bước tải sẽ tải lại (review BA 2026-11-17: cùng họ bug reconcile).
+                string name = Path.GetFileName(dir);
+                bool halfDownloaded = File.Exists(Path.Combine(official, name + ".partial"));
+                bool empty = !Directory.EnumerateFileSystemEntries(dir).Any();
+                if (halfDownloaded || empty) continue;
+                found.Add(name);
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -239,7 +252,17 @@ public static class OcrModelChoices
     {
         var ticked = candidates.Where(installed.Contains).ToList();
         var locked = new List<string>(ticked);
-        string? active = current is not null && ticked.Contains(current, StringComparer.Ordinal) ? current : null;
+
+        // Spec §6: "có tick ⇒ chấm luôn tồn tại (tự gán dòng tick đầu khi chưa có)" — an installed
+        // model with a missing/other active still shows the dot on the first (locked) ticked row;
+        // returning null here made Applying skip the LlmActiveModel write and llm.models.set
+        // (BA review 2026-11-17).
+        // Spec §6: "có tick ⇒ chấm luôn tồn tại (tự gán dòng tick đầu khi chưa có)" — model đã cài
+        // với LlmActiveModel trống/khác vẫn hiện chấm trên dòng tick (khoá) đầu; trả null khiến
+        // Applying bỏ qua ghi LlmActiveModel và llm.models.set (review BA 2026-11-17).
+        string? active = current is not null && ticked.Contains(current, StringComparer.Ordinal)
+            ? current
+            : ticked.Count > 0 ? ticked[0] : null;
         return (ticked, locked, active);
     }
 

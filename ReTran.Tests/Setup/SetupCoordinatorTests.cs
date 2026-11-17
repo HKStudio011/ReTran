@@ -238,7 +238,7 @@ public class SetupCoordinatorTests : IDisposable
         await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(SetupStep.Done, coordinator.Step);
-        Assert.Empty(_uvFake.SyncCalls); // no uv sync re-run / không chạy lại uv sync
+        Assert.Single(_uvFake.SyncCalls); // BA 17-11: Syncing luôn chạy thật (verify/sửa venv)
         SetupState state = ReadSetupJson();
         Assert.Equal("ko", state.Language);
         Assert.True(state.IsComplete);
@@ -559,7 +559,8 @@ public class SetupCoordinatorTests : IDisposable
     public async Task Flow_AllAnswered_SkipsPauses()
     {
         // Máy đã setup (answers + mọi marker done, chưa isComplete): lượt chạy đi thẳng tới Done —
-        // không pause, không sync, không gọi RPC nào (pass-through, Review Focus #2).
+        // không pause, không hỏi lại màn nào. BA 17-11: Syncing + VerifyingSidecar + 2 bước tải
+        // LUÔN thực thi (sync thật; các bước tải bỏ qua phần đắt vì model đã cài thật).
         WriteSetupJson("""
             {
               "flavor": "gpu",
@@ -582,16 +583,18 @@ public class SetupCoordinatorTests : IDisposable
               }
             }
             """);
+        _bridge.Installed.Add(FakeCoreBridge.DetModel);
+        _bridge.Installed.Add(FakeCoreBridge.RecModel);
         var coordinator = NewCoordinator();
 
         await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(SetupStep.Done, coordinator.Step);
-        Assert.Empty(_uvFake.SyncCalls);
-        Assert.Empty(_bridge.Downloaded);
+        Assert.Single(_uvFake.SyncCalls); // Syncing luôn chạy thật (BA 17-11)
+        Assert.Empty(_bridge.Downloaded); // model đã cài thật → không tải lại
         Assert.Empty(_bridge.LlmRuntimeDownloads);
-        // Phần đắt (tải model/runtime) vẫn bỏ qua; VerifyingSidecar thì LUÔN verify lại từ BA 17-11
-        // (phiên mới không thể coi Core của phiên cũ còn sống).
+        // VerifyingSidecar LUÔN verify lại từ BA 17-11 (phiên mới không thể coi Core của phiên cũ còn sống).
+        Assert.Contains(_bridge.Calls, c => c.Method == "sidecar.ping");
         Assert.DoesNotContain(_bridge.Calls, c => c.Method == "ocr.models.download");
         Assert.DoesNotContain(_bridge.Calls, c => c.Method.StartsWith("llm.runtime", StringComparison.Ordinal));
     }
@@ -702,7 +705,7 @@ public class SetupCoordinatorTests : IDisposable
 
         Assert.Equal(SetupStep.Done, coordinator.Step);
         Assert.Contains("PP-OCRv6_medium_rec", _bridge.Downloaded);
-        Assert.Empty(_uvFake.SyncCalls);              // các bước khác vẫn skip
+        Assert.Single(_uvFake.SyncCalls);             // BA 17-11: Syncing luôn chạy thật
         Assert.Empty(_bridge.LlmRuntimeDownloads);
         Assert.Equal("done", ReadSetupJson().Steps!["downloadingmodels"]);
     }
@@ -710,6 +713,10 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task Reconcile_PairMismatch_ClearsApplying()
     {
+        _bridge.Installed.Add("PP-OCRv6_small_det");
+        _bridge.Installed.Add("PP-OCRv6_small_rec");
+        _bridge.Installed.Add("PP-OCRv6_medium_det");
+        _bridge.Installed.Add("PP-OCRv6_medium_rec");
         // Settings đang trỏ tiny, answers nói medium (model đủ trên đĩa) → chỉ bước áp dụng chạy lại.
         WriteSetupJson("""
             {
@@ -748,6 +755,8 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task Reconcile_AllPresent_NoClears()
     {
+        _bridge.Installed.Add("PP-OCRv6_small_det");
+        _bridge.Installed.Add("PP-OCRv6_small_rec");
         // Khớp hết: đủ model + cặp đúng → không clear marker nào; lượt chạy đi thẳng (pass-through).
         WriteSetupJson("""
             {
@@ -772,6 +781,8 @@ public class SetupCoordinatorTests : IDisposable
             }
             """);
         var coordinator = NewCoordinator(adapters: Adapters());
+        _bridge.Installed.Add("PP-OCRv6_small_det");
+        _bridge.Installed.Add("PP-OCRv6_small_rec");
 
         await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
 
@@ -780,7 +791,7 @@ public class SetupCoordinatorTests : IDisposable
         Assert.Equal("done", state.Steps!["downloadingmodels"]);
         Assert.Equal("done", state.Steps["applying"]);
         // Marker được giữ (không clear); VerifyingSidecar vẫn verify lại (BA 17-11) nên Calls có
-        // ping/list — phần đắt cần bỏ qua là DOWNLOAD, assert ở đó.
+        // ping/list - phần đắt cần bỏ qua là DOWNLOAD, assert ở đó.
         Assert.DoesNotContain(_bridge.Calls, c => c.Method == "ocr.models.download");
     }
 
@@ -844,6 +855,9 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task Reconcile_LlmActiveMismatch_ClearsApplying()
     {
+        _bridge.Installed.Add("PP-OCRv6_small_det");
+        _bridge.Installed.Add("PP-OCRv6_small_rec");
+        _bridge.LlmInstalled.Add("Hy-MT2-1.8B-UD-Q4_K_XL");
         // Settings đang trỏ LLM khác activeLlm ⇒ chỉ bước Applying chạy lại (ghi lại + set lại model).
         WriteSetupJson("""
             {
@@ -1086,6 +1100,8 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task LlmRuntime_ResumeFromOldSetupJson_RunsTheNewStep()
     {
+        _bridge.Installed.Add(FakeCoreBridge.DetModel);
+        _bridge.Installed.Add(FakeCoreBridge.RecModel);
         // setup.json của bản cũ: mọi bước cũ đã done, chưa hoàn tất — bước mới vắng marker phải
         // chạy (và chỉ nó: các bước cũ vẫn được skip, không sync/không tải model lại).
         WriteSetupJson("""
@@ -1113,7 +1129,7 @@ public class SetupCoordinatorTests : IDisposable
 
         Assert.Equal(SetupStep.Done, coordinator.Step);
         Assert.Equal(["cuda"], _bridge.LlmRuntimeDownloads);
-        Assert.Empty(_uvFake.SyncCalls);
+        Assert.Single(_uvFake.SyncCalls); // BA 17-11: Syncing luôn chạy thật
         Assert.Empty(_bridge.Downloaded);
         Assert.Equal("done", ReadSetupJson().Steps!["downloadingllmruntime"]);
     }
@@ -1339,6 +1355,115 @@ public class SetupCoordinatorTests : IDisposable
     }
 
     // ── "Chạy lại setup" = chạy lại TỪ BƯỚC 1 (BA 17-11 chiều: rerun chỉ-đi-tiếp-bước-thiếu vô nghĩa khi dùng để sửa lỗi) ──
+
+    [Fact]
+    public async Task StartAsync_CompleteState_ButVenvMissing_RunsWizard()
+    {
+        // BA review 17-11 (I1 — dead path): NeedsSetup phát hiện venv mất, nhưng StartAsync thường
+        // short-circuit Done trên state complete ⇒ wizard không bao giờ hiện để sửa. Gate mới:
+        // short-circuit chỉ khi ARTIFACTS còn (venv + models).
+        WriteSetupJson("""
+            {
+              "flavor": "gpu",
+              "language": "vi",
+              "dets": ["PP-OCRv6_small_det"],
+              "activeDet": "PP-OCRv6_small_det",
+              "recs": ["PP-OCRv6_small_rec"],
+              "activeRec": "PP-OCRv6_small_rec",
+              "langs": [],
+              "llmModels": [],
+              "isComplete": true,
+              "steps": {
+                "checking": "done",
+                "choosingocrmodels": "done",
+                "choosinglanguages": "done",
+                "choosingllmmodels": "done",
+                "verifyingfiles": "done",
+                "syncing": "done",
+                "verifyingsidecar": "done",
+                "downloadingllmruntime": "done",
+                "downloadingmodels": "done",
+                "applying": "done"
+              }
+            }
+            """);
+        _bridge.LlmInstalled.Add("Hy-MT2-1.8B-UD-Q4_K_XL");
+        var coordinator = NewCoordinator(
+            fileExists: path => !path.EndsWith("python.exe", StringComparison.Ordinal)); // venv MẤT
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        // Không short-circuit: wizard chạy sửa lại (sync thật + verify sidecar) rồi Done.
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Single(_uvFake.SyncCalls);
+        Assert.True(_bridge.RestartCount >= 1);
+    }
+
+    [Fact]
+    public async Task DownloadSteps_AlwaysRun_GgufDeletedAfterCompletion()
+    {
+        // BA review 17-11 (I2 — LLM half of reconcile): GGUF bị xoá khỏi đĩa SAU khi hoàn tất ⇒ bước 9
+        // phải chạy lại và tải bù, dù marker `downloadingmodels` còn "done".
+        WriteSetupJson("""
+            {
+              "flavor": "gpu",
+              "language": "vi",
+              "dets": ["PP-OCRv6_small_det"],
+              "activeDet": "PP-OCRv6_small_det",
+              "recs": ["PP-OCRv6_small_rec"],
+              "activeRec": "PP-OCRv6_small_rec",
+              "langs": [],
+              "llmModels": ["Hy-MT2-1.8B-UD-Q4_K_XL"],
+              "isComplete": false,
+              "steps": {
+                "checking": "done",
+                "choosingocrmodels": "done",
+                "choosinglanguages": "done",
+                "choosingllmmodels": "done",
+                "verifyingfiles": "done",
+                "syncing": "done",
+                "verifyingsidecar": "done",
+                "downloadingllmruntime": "done",
+                "downloadingmodels": "done",
+                "applying": "done"
+              }
+            }
+            """);
+        _bridge.LlmInstalled.Add("Hy-MT2-1.8B-UD-Q4_K_XL");
+        _bridge.LlmInstalled.Remove("Hy-MT2-1.8B-UD-Q4_K_XL"); // GGUF biến mất khỏi đĩa
+        var coordinator = NewCoordinator();
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Equal(["Hy-MT2-1.8B-UD-Q4_K_XL"], _bridge.LlmDownloaded); // tải bù
+    }
+
+    [Fact]
+    public async Task CpuSwitch_SyncFails_Retry_DoesNotRePromptFlavorSwitch()
+    {
+        // BA review 17-11 (I4): sau CPU-switch, sync fail → Retry KHÔNG được hỏi lại
+        // ConfirmingFlavorSwitch — lượt chuyển chính là xác nhận (Amendment A2).
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
+        _uvFake.Installed = OcrFlavor.Gpu; // wheel gpu đang cài — probe sẽ thấy gpu
+        _bridge.DeviceResult = new JsonObject { ["device"] = "cpu", ["capability"] = null }; // CC gate
+        var coordinator = NewCoordinator();
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+        Assert.True(coordinator.CanSwitchToCpuFlavor);
+
+        // Switch-sync sẽ fail CẢ 4 lần thử nội bộ (RunSyncLoopAsync) → Failed.
+        for (int i = 0; i < 4; i++) _uvFake.SyncResults.Enqueue((1, "boom"));
+        await coordinator.SwitchToCpuFlavorAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+
+        await coordinator.RetryAsync(TestContext.Current.CancellationToken);
+
+        // Retry: KHÔNG hỏi lại flavor switch — sync chạy lại (queue cạn → thành công) → Done.
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Null(coordinator.PendingFlavorSwitch);
+        Assert.True(_uvFake.SyncCalls.Count >= 2);
+    }
 
     [Fact]
     public async Task Rerun_ForceReset_ClearsAnswersAndMarkers_ReasksFromFirstQuestion()

@@ -178,6 +178,14 @@ public sealed class SetupCoordinator
     private SetupCheckItem[] _checks = []; // snapshot checklist Checking - thay nguyên khối mỗi event
     private SetupDownloadInfo[] _downloads = []; // snapshot tiến độ tải - thay nguyên khối mỗi poll
 
+    // True once the user explicitly confirmed the flavor swap in THIS run (ConfirmFlavorSwitch /
+    // SwitchToCpuFlavor): a retry after a failed post-switch sync must NOT re-prompt the switch —
+    // the switch itself was the confirmation (Amendment A2). BA review 2026-11-17.
+    // True sau khi user xác nhận đổi flavor trong LƯỢT NÀY (ConfirmFlavorSwitch / SwitchToCpuFlavor):
+    // retry sau sync fail không được hỏi lại — lượt chuyển chính là xác nhận (Amendment A2).
+    // Review BA 2026-11-17.
+    private bool _flavorSwitchConfirmed;
+
     /// <summary>
     /// Creates the coordinator. Every dependency is injectable so the whole machine runs on fakes in
     /// tests; the optional seams default to production values (<c>SetupState.Load()</c>,
@@ -420,6 +428,17 @@ public sealed class SetupCoordinator
                 Publish();
             }
 
+            // Run-scoped UX state must not leak across runs: a CC-gate failure in run N must not offer
+            // a CPU switch in run N+1, and stale PendingFlavorSwitch/Notice contradict their documented
+            // invariants (BA review 2026-11-17).
+            // Trạng thái UX theo lượt không được lộ sang lượt khác: fail CC-gate ở lượt N không được
+            // đề nghị đổi CPU ở lượt N+1; PendingFlavorSwitch/Notice cũ mù vi phạm invariant đã doc
+            // (review BA 2026-11-17).
+            CanSwitchToCpuFlavor = false;
+            PendingFlavorSwitch = null;
+            Notice = null;
+            _flavorSwitchConfirmed = false;
+
             _state = _stateFactory();
 
             // A fresh app session cannot assume the Core from a previous session is still alive: the
@@ -462,7 +481,14 @@ public sealed class SetupCoordinator
                 _state.Save();
             }
 
-            if (!force && _state.IsComplete)
+            // The complete-state short-circuit only holds when the ARTIFACTS are still on disk (venv +
+            // models): NeedsSetup fires on their loss (spec v1 §5.9), and a bare Done here voided that
+            // trigger — a lost venv never got repaired and pipeline start failed every launch
+            // (BA review 2026-11-17: dead path).
+            // Mất tắt hoàn tất chỉ có hiệu lực khi ARTIFACTS còn trên đĩa (venv + models): NeedsSetup
+            // bắn khi chúng mất (spec v1 §5.9), và Done trần vô hiệu hoá trigger đó — venv mất không
+            // bao giờ được sửa, start pipeline fail mỗi lần mở app (review BA 2026-11-17: dead path).
+            if (!force && _state.IsComplete && ArtifactsPresent())
             {
                 Step = SetupStep.Done;
                 Publish();
@@ -480,6 +506,8 @@ public sealed class SetupCoordinator
             Step = SetupStep.Checking;
             Publish();
             _logger?.LogInformation("setup: run started (force={Force})", force);
+            _logger?.LogInformation("setup: state complete={Complete}, artifacts present={Artifacts}",
+                _state.IsComplete, ArtifactsPresent());
 
             StepOutcome outcome = RunCheckingStep();
             if (outcome == StepOutcome.Failed)
@@ -688,9 +716,10 @@ public sealed class SetupCoordinator
         {
             if (Step != SetupStep.ConfirmingFlavorSwitch) return;
 
-            // The multi-minute sync below must show as Syncing — never as ConfirmingFlavorSwitch with a
+            // The multi-minute sync below must show as Syncing - never as ConfirmingFlavorSwitch with a
             // null PendingFlavorSwitch, which would contradict the documented invariant of both.
             PendingFlavorSwitch = null;
+            _flavorSwitchConfirmed = true; // lượt chuyển chính là xác nhận — retry không hỏi lại (A2)
             Step = SetupStep.Syncing;
             Publish();
             _logger?.LogInformation("setup: user xác nhận đổi flavor sang {Flavor}", Flavor);
@@ -732,6 +761,7 @@ public sealed class SetupCoordinator
             Flavor = OcrFlavor.Cpu;
             _state = _state with { Flavor = FlavorName(OcrFlavor.Cpu) };
             _state.Save();
+            _flavorSwitchConfirmed = true; // lượt chuyển chính là xác nhận — retry không hỏi lại (A2)
             // The multi-minute sync below must show as Syncing — never as Failed with a null Error,
             // which would contradict the documented invariant of both.
             Step = SetupStep.Syncing;
@@ -847,7 +877,19 @@ public sealed class SetupCoordinator
         for (int i = Array.IndexOf(PipelineSteps, fromStep); i < PipelineSteps.Length; i++)
         {
             SetupStep step = PipelineSteps[i];
-            if (IsStepDone(step)) continue;
+            // Three steps ALWAYS execute when reached — their internals skip the expensive part:
+            //   • the two download steps: a GGUF/runtime deleted after completion is re-fetched on the
+            //     next run, and a bare done marker from an older session never hides a missing artifact
+            //     (BA review 2026-11-17: the LLM half of reconcile);
+            //   • Syncing: the real frozen sync validates/repairs the venv and picks up shipped
+            //     pyproject/lock changes (BA 2026-11-17 — user directive: always run).
+            // Ba bước LUÔN thực thi khi tới lượt — phần bên trong tự bỏ qua phần đắt:
+            //   • hai bước tải: GGUF/runtime bị xoá sau khi hoàn tất sẽ được tải bù ở lượt kế, marker
+            //     done của phiên cũ không bao giờ che mất artifact còn thiếu (review BA 2026-11-17:
+            //     nửa LLM của reconcile);
+            //   • Syncing: frozen sync thật xác minh/sửa venv và nhận pyproject/lock mới theo bản
+            //     cập nhật (BA 2026-11-17 — chỉ đạo của user: luôn chạy).
+            if (IsStepDone(step) && step is not (SetupStep.DownloadingModels or SetupStep.DownloadingLlmRuntime or SetupStep.Syncing)) continue;
 
             StepOutcome outcome = await RunStepAsync(step, ct).ConfigureAwait(false);
             if (outcome != StepOutcome.Done) return; // Paused or Failed — state already set by the step
@@ -1002,7 +1044,7 @@ public sealed class SetupCoordinator
     {
         OcrFlavor? installed = await _uvSync.InstalledPaddleFlavorAsync(ct).ConfigureAwait(false);
 
-        if (installed is { } current && current != Flavor)
+        if (installed is { } current && current != Flavor && !_flavorSwitchConfirmed)
         {
             EnterFlavorSwitchPause(current);
             return StepOutcome.Paused;
@@ -1481,6 +1523,18 @@ public sealed class SetupCoordinator
     /// </summary>
     private bool ModelInstalled(string modelName) =>
         _modelDirExists(Path.Combine(SetupPaths.ModelsDir, SetupState.OfficialModelsSubdir, modelName));
+
+    /// <summary>
+    /// Whether the wizard's expensive artifacts are still on disk: the sidecar venv python and a
+    /// non-empty official models cache. Uses the injected seams so tests keep their fakes — this
+    /// gates the complete-state short-circuit (a lost venv must run the repair, not Done).
+    /// Kiểm tra các artifact đắt tiền của wizard còn trên đĩa: python venv sidecar và cache model
+    /// chính thức không rỗng. Dùng seam inject để test giữ fake — điều này chặn short-circuit
+    /// complete-state (venv mất phải chạy luồng sửa, không phải Done).
+    /// </summary>
+    private bool ArtifactsPresent() =>
+        _fileExists(SetupPaths.VenvPythonExe)
+        && _modelDirExists(Path.Combine(SetupPaths.ModelsDir, SetupState.OfficialModelsSubdir));
 
     /// <summary>
     /// The sidecar's installed rule mirrored (<c>ocr/models.py</c>): the model directory exists, is

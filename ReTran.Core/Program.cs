@@ -99,7 +99,7 @@ public static class Program
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ReTran", "llm");
         var llmModels = new LlmModelManager(
             Path.Combine(llmRoot, "models"), Path.Combine(llmRoot, "models.json"));
-        var llmRuntime = new LlamaRuntimeManager(Path.Combine(llmRoot, "runtime"), new HttpClient());
+        var llmRuntime = new LlamaRuntimeManager(Path.Combine(llmRoot, "runtime"), HttpUa.CreateClient());
         LlamaServerHost? llmServer = null;
         string? llmServerModel = null;
         AppDomain.CurrentDomain.ProcessExit += (_, _) => llmServer?.Dispose();

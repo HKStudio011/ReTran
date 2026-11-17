@@ -48,14 +48,24 @@ public class OcrModelChoicesTests
     }
 
     [Fact]
-    public void ScanInstalledModels_ReadsTempDirs()
+    public void ScanInstalledModels_ReadsTempDirs_StrictRule()
     {
         string root = Path.Combine(Path.GetTempPath(), $"retran-models-{Guid.NewGuid():N}");
         try
         {
             string official = Path.Combine(root, "official_models");
+            // small_det: cài đủ (dir + file) → tính.
             Directory.CreateDirectory(Path.Combine(official, "PP-OCRv6_small_det"));
+            File.WriteAllText(Path.Combine(official, "PP-OCRv6_small_det", "model.bin"), "x");
+            // korean: cài đủ → tính.
             Directory.CreateDirectory(Path.Combine(official, "korean_PP-OCRv5_mobile_rec"));
+            File.WriteAllText(Path.Combine(official, "korean_PP-OCRv5_mobile_rec", "model.bin"), "x");
+            // medium_rec: đang tải dở (dir có file + marker .partial cạnh nó) → KHÔNG tính.
+            Directory.CreateDirectory(Path.Combine(official, "PP-OCRv6_medium_rec"));
+            File.WriteAllText(Path.Combine(official, "PP-OCRv6_medium_rec", ".cachefile"), "x");
+            File.WriteAllText(Path.Combine(official, "PP-OCRv6_medium_rec.partial"), "");
+            // empty: dir rỗng → KHÔNG tính.
+            Directory.CreateDirectory(Path.Combine(official, "PP-OCRv6_tiny_det"));
             File.WriteAllText(Path.Combine(official, "stray.txt"), "x"); // file lạ — bỏ qua
 
             var found = OcrModelChoices.ScanInstalledModels(root);
@@ -63,6 +73,8 @@ public class OcrModelChoicesTests
             Assert.Equal(2, found.Count);
             Assert.Contains("PP-OCRv6_small_det", found);
             Assert.Contains("korean_PP-OCRv5_mobile_rec", found);
+            Assert.DoesNotContain("PP-OCRv6_medium_rec", found); // tải dở — chưa cài
+            Assert.DoesNotContain("PP-OCRv6_tiny_det", found);   // dir rỗng — chưa cài
 
             // Thư mục cha không tồn tại → tập rỗng (không ném).
             Assert.Empty(OcrModelChoices.ScanInstalledModels(Path.Combine(root, "nope")));
@@ -205,6 +217,19 @@ public class OcrModelChoicesTests
         Assert.Equal(new[] { "Hy-MT2-1.8B-UD-Q4_K_XL" }, ticked);
         Assert.Equal(new[] { "Hy-MT2-1.8B-UD-Q4_K_XL" }, locked);
         Assert.Equal("Hy-MT2-1.8B-UD-Q4_K_XL", active);
+    }
+
+    [Fact]
+    public void PreselectLlmModels_Installed_CurrentMissingOrOther_ActiveFirstTicked()
+    {
+        // Spec §6: "có tick ⇒ chấm luôn tồn tại (tự gán dòng tick đầu khi chưa có)" — model đã cài
+        // nhưng LlmActiveModel trống/khác ⇒ chấm trên dòng tick (khoá) đầu, không để null.
+        string[] installed = ["Hy-MT2-7B-Q5_K_M"];
+        var (ticked, locked, active) = OcrModelChoices.PreselectLlmModels(
+            installed, null, ["Hy-MT2-1.8B-UD-Q4_K_XL", "Hy-MT2-7B-Q5_K_M"]);
+
+        Assert.Equal(["Hy-MT2-7B-Q5_K_M"], ticked);
+        Assert.Equal("Hy-MT2-7B-Q5_K_M", active); // trước đây: null ⇒ Applying bỏ qua llm.models.set
     }
 
     [Fact]

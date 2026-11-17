@@ -299,7 +299,11 @@
                         </div>
                     }
                     <p class="setup-total">@(L.Fmt("setup.models.total", FormatMb(LlmTotalMb())))</p>
-                    <button type="button" class="rt-btn rt-btn-primary" disabled="@_busy" @onclick="ConfirmLlmModelsAsync">@(L["setup.next"])</button>
+                    @* Disable khi danh sách đang nạp: 1 click lúc list rỗng = trả lời rỗng ⇒ bước 4
+                       không bao giờ được hỏi lại (BA review 17-11). Khi loadFailed, trả lời trống vẫn hợp lệ. *@
+                    <button type="button" class="rt-btn rt-btn-primary"
+                            disabled="@(_busy || (!_llmLoadFailed && _llmModelsList.Count == 0))"
+                            @onclick="ConfirmLlmModelsAsync">@(L["setup.next"])</button>
                     break;
 
                 case SetupStep.ConfirmingFlavorSwitch:
