@@ -1368,6 +1368,7 @@ public class SetupCoordinatorTests : IDisposable
             """);
         _bridge.Installed.Add(FakeCoreBridge.DetModel);
         _bridge.Installed.Add(FakeCoreBridge.RecModel);
+        _uvFake.Installed = OcrFlavor.Gpu; // wheel đúng đang cài — rerun vẫn phải chạy sync thật
         var coordinator = NewCoordinator();
 
         await coordinator.StartAsync(force: true, ct: TestContext.Current.CancellationToken);
@@ -1394,8 +1395,88 @@ public class SetupCoordinatorTests : IDisposable
         Assert.Equal(SetupStep.Done, coordinator.Step);
         // Pipeline chạy LẠI (marker đã xoá): sidecar được ping/verify lại...
         Assert.Contains(_bridge.Calls, c => c.Method == "sidecar.ping");
+        // ...uv sync chạy THẬT (không đường nhanh cùng-flavor — BA 17-11: rerun phải chạy đủ bước)...
+        Assert.Single(_uvFake.SyncCalls);
         // ...nhưng model ĐÃ CÀI THẬT thì không tải lại.
         Assert.DoesNotContain(_bridge.Calls, c => c.Method == "ocr.models.download");
+    }
+
+    [Fact]
+    public async Task Syncing_AlwaysRuns_EvenWhenSameFlavorInstalled()
+    {
+        // BA 2026-11-17: Syncing phải LUÔN chạy uv sync thật (kể cả khi wheel đúng đang cài) — sync
+        // xác minh/sửa venv hỏng ngầm và nhận thư viện mới theo pyproject/lock của bản cập nhật.
+        WriteSetupJson("""{"flavor":"gpu"}""");
+        _uvFake.Installed = OcrFlavor.Gpu; // wheel "đúng" đã cài — điều kiện skip của đường nhanh cũ
+        var coordinator = NewCoordinator();
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+        await coordinator.ContinueWithOcrModelsAsync([FakeCoreBridge.DetModel], FakeCoreBridge.DetModel,
+            [FakeCoreBridge.RecModel], FakeCoreBridge.RecModel, TestContext.Current.CancellationToken);
+        await coordinator.ContinueWithLanguagesAsync([], null, TestContext.Current.CancellationToken);
+        await coordinator.ContinueWithLlmModelsAsync([], null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Single(_uvFake.SyncCalls); // sync thật đã chạy, không skip
+    }
+
+    [Fact]
+    public async Task LlmRuntimeDownload_ReportsProgress_InWizardDownloads()
+    {
+        // Bước 8 đang tải zip runtime → snapshot Downloads phải có "llama.cpp" với % + ETA
+        // (BA 17-11: tải llama.cpp chưa có phần trăm và ETA).
+        WriteSetupJson("""
+            {
+              "flavor": "gpu",
+              "language": "vi",
+              "dets": ["PP-OCRv6_small_det"],
+              "activeDet": "PP-OCRv6_small_det",
+              "recs": ["PP-OCRv6_small_rec"],
+              "activeRec": "PP-OCRv6_small_rec",
+              "langs": [],
+              "llmModels": ["Hy-MT2-1.8B-UD-Q4_K_XL"],
+              "isComplete": false,
+              "steps": {
+                "checking": "done",
+                "choosingocrmodels": "done",
+                "choosinglanguages": "done",
+                "choosingllmmodels": "done",
+                "verifyingfiles": "done",
+                "syncing": "done",
+                "verifyingsidecar": "done",
+                "downloadingmodels": "done",
+                "applying": "done"
+              }
+            }
+            """);
+        _bridge.Installed.Add(FakeCoreBridge.DetModel);
+        _bridge.Installed.Add(FakeCoreBridge.RecModel);
+        _bridge.LlmRuntimeInstalled = false;
+        _bridge.LlmRuntimeDownloadCompletes = false; // "mạng chậm" — tải không xong trong cửa sổ
+        _bridge.LlmRuntimeProgress = new ReTran.Core.Llm.LlmDownloadProgress(150_000_000, 500_000_000, 25_000_000);
+        var coordinator = NewCoordinator(modelDownloadTimeout: TimeSpan.FromMilliseconds(500));
+
+        Task run = coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        // Đợi snapshot tiến độ xuất hiện (poll 10 ms của wizard).
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (coordinator.Downloads.Count == 0 && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+        }
+
+        SetupDownloadInfo info = Assert.Single(coordinator.Downloads);
+        Assert.Equal("llama.cpp", info.Name);
+        Assert.Equal(150_000_000, info.ReceivedBytes);
+        Assert.Equal(500_000_000, info.TotalBytes);
+        Assert.Equal(25_000_000, info.BytesPerSec);
+
+        // Cho lượt thử kế tiếp hoàn tất → Done; snapshot rỗng sau khi tải xong.
+        _bridge.LlmRuntimeDownloadCompletes = true;
+        await run.WaitAsync(TimeSpan.FromSeconds(15), TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Empty(coordinator.Downloads);
     }
 
     // ── khởi tạo Step từ state đã lưu (micro-task 14c) ────────────────────────────────────────────
@@ -1740,6 +1821,9 @@ public class SetupCoordinatorTests : IDisposable
         /// <summary>When false, a runtime download records the flavor but never completes (dead network). Khi false, lệnh tải runtime ghi flavor nhưng không bao giờ xong (mạng chết).</summary>
         public bool LlmRuntimeDownloadCompletes { get; set; } = true;
 
+        /// <summary>Optional <c>progress</c> object the fake includes in <c>llm.runtime.status</c> (wizard vòng 2 §9). Object <c>progress</c> tuỳ chọn fake nhúng vào <c>llm.runtime.status</c>.</summary>
+        public ReTran.Core.Llm.LlmDownloadProgress? LlmRuntimeProgress { get; set; }
+
         /// <summary>Flavors of accepted <c>llm.runtime.download</c> calls, in order. Các flavor của lệnh <c>llm.runtime.download</c> đã nhận, theo thứ tự.</summary>
         public List<string> LlmRuntimeDownloads { get; } = [];
 
@@ -1781,6 +1865,14 @@ public class SetupCoordinatorTests : IDisposable
                     ["serverPath"] = LlmRuntimeInstalled
                         ? @"C:\fake\llm\runtime\b7234\llama-server.exe"
                         : null,
+                    ["progress"] = LlmRuntimeProgress is null
+                        ? null
+                        : new JsonObject
+                        {
+                            ["receivedBytes"] = LlmRuntimeProgress.ReceivedBytes,
+                            ["totalBytes"] = LlmRuntimeProgress.TotalBytes,
+                            ["bytesPerSec"] = LlmRuntimeProgress.BytesPerSec,
+                        },
                 }),
                 "llm.runtime.download" => DownloadLlmRuntime(@params),
                 "llm.runtime.check" => CheckLlmRuntime(),

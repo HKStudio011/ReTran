@@ -13,7 +13,15 @@ namespace ReTran.Core.Llm;
 /// <param name="Tag">Extracted build tag, e.g. <c>b12110</c>, or <see langword="null"/>. Tag bản đã giải nén, hoặc <see langword="null"/>.</param>
 /// <param name="Installed">The <c>llama-server.exe</c> of that tag exists. <c>llama-server.exe</c> của tag đó tồn tại.</param>
 /// <param name="ServerPath">Path to <c>llama-server.exe</c> (may not exist yet). Đường dẫn <c>llama-server.exe</c> (có thể chưa tồn tại).</param>
-public sealed record LlmRuntimeStatus(string? Tag, bool Installed, string? ServerPath);
+public sealed record LlmRuntimeStatus(string? Tag, bool Installed, string? ServerPath)
+{
+    /// <summary>
+    /// In-flight zip download progress (wizard vòng 2 §9 — % + ETA); <see langword="null"/> unless a
+    /// download is running and reporting. Tiến độ tải zip đang chạy; <see langword="null"/> trừ khi
+    /// có lượt tải đang báo tiến độ.
+    /// </summary>
+    public LlmDownloadProgress? Progress { get; init; }
+}
 
 /// <summary>
 /// Manages the llama.cpp runtime: checks the newest Windows build that has a matching asset on
@@ -38,8 +46,15 @@ public sealed class LlamaRuntimeManager(
 
     private readonly string _rootDir = rootDir ?? throw new ArgumentNullException(nameof(rootDir));
     private readonly HttpClient _github = github ?? throw new ArgumentNullException(nameof(github));
-    private readonly Func<Uri, string, CancellationToken, Task> _downloader =
-        downloader ?? DefaultDownloadAsync;
+
+    // Resolved at use: the default downloader reports progress, so it must be an instance method (a
+    // field initializer cannot reference one). Giải quyết lúc dùng: downloader mặc định báo tiến độ
+    // nên phải là instance method (field initializer không được tham chiếu instance member).
+    private readonly Func<Uri, string, CancellationToken, Task>? _downloader = downloader;
+
+    /// <summary>In-flight zip download progress keyed by asset file name (≤ 1 entry — downloads are serialized). Tiến độ tải zip đang chạy theo tên asset (≤ 1 entry — tải được tuần tự hoá).</summary>
+    private readonly Dictionary<string, LlmDownloadProgress> _progress = new();
+    private readonly object _progressLock = new();
 
     // One download at a time: two overlapping llm.runtime.download calls (setup + Settings, or a
     // double fire) would otherwise extract into the same <tag>/ directory and interleave the
@@ -74,7 +89,30 @@ public sealed class LlamaRuntimeManager(
         string? tag = ReadTag();
         string? serverPath = tag is null ? null : Path.Combine(_rootDir, tag, "llama-server.exe");
         bool installed = serverPath is not null && File.Exists(serverPath);
-        return Task.FromResult(new LlmRuntimeStatus(tag, installed, serverPath));
+        LlmDownloadProgress? progress;
+        lock (_progressLock)
+        {
+            progress = _progress.Values.FirstOrDefault();
+        }
+        return Task.FromResult(new LlmRuntimeStatus(tag, installed, serverPath) { Progress = progress });
+    }
+
+    /// <summary>
+    /// Reports byte-level progress of the in-flight runtime zip download (called by the default
+    /// downloader per chunk; tests call it directly on a blocked fake).
+    /// Báo tiến độ theo byte của lượt tải zip runtime đang chạy (default downloader gọi theo chunk;
+    /// test gọi trực tiếp trên fake đang chặn).
+    /// </summary>
+    /// <param name="assetName">Asset file name being downloaded (progress key). Tên file asset đang tải (khóa tiến độ).</param>
+    /// <param name="receivedBytes">Bytes written so far. Số byte đã ghi.</param>
+    /// <param name="totalBytes">Total bytes from content-length, or 0 when unknown. Tổng byte theo content-length, hoặc 0 khi chưa biết.</param>
+    /// <param name="bytesPerSec">Average speed in bytes/second, or <see langword="null"/>. Tốc độ trung bình (byte/giây), hoặc <see langword="null"/>.</param>
+    internal void ReportDownloadProgress(string assetName, long receivedBytes, long totalBytes, double? bytesPerSec)
+    {
+        lock (_progressLock)
+        {
+            _progress[assetName] = new LlmDownloadProgress(receivedBytes, totalBytes, bytesPerSec);
+        }
     }
 
     /// <summary>
@@ -128,14 +166,26 @@ public sealed class LlamaRuntimeManager(
     private async Task DownloadAndExtractAsync(string url, string targetDir, CancellationToken ct)
     {
         var uri = new Uri(url);
-        string zipPath = Path.Combine(_rootDir, Path.GetFileName(uri.LocalPath));
+        string assetName = Path.GetFileName(uri.LocalPath);
+        string zipPath = Path.Combine(_rootDir, assetName);
         try
         {
-            await _downloader(uri, zipPath, ct).ConfigureAwait(false);
+            Func<Uri, string, CancellationToken, Task> download = _downloader ?? DefaultDownloadAsync;
+            await download(uri, zipPath, ct).ConfigureAwait(false);
+            // Download finished — the progress entry goes away before the (indeterminate) extraction.
+            // Tải xong — entry tiến độ biến mất trước khi (giải nén không đo được).
+            lock (_progressLock)
+            {
+                _progress.Remove(assetName);
+            }
             ZipFile.ExtractToDirectory(zipPath, targetDir, overwriteFiles: true);
         }
         finally
         {
+            lock (_progressLock)
+            {
+                _progress.Remove(assetName);
+            }
             try { File.Delete(zipPath); } catch (IOException) { }
         }
     }
@@ -144,7 +194,15 @@ public sealed class LlamaRuntimeManager(
         string flavor, CancellationToken ct)
     {
         string pattern = FlavorPattern(flavor);
-        using HttpResponseMessage response = await _github.GetAsync(ReleasesUrl, ct).ConfigureAwait(false);
+        using var request = new HttpRequestMessage(HttpMethod.Get, ReleasesUrl);
+        // GitHub API's documented preference for release lookups; the browser-like User-Agent is
+        // already the client default (a UA-less client is answered 403).
+        // Sở thích ghi rõ của GitHub API cho tra cứu release; User-Agent giống trình duyệt đã là
+        // mặc định của client (client thiếu UA bị trả 403).
+        request.Headers.Accept.ParseAdd("application/vnd.github+json");
+        using HttpResponseMessage response = await _github
+            .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct)
+            .ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
         string body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
 
@@ -234,15 +292,31 @@ public sealed class LlamaRuntimeManager(
         File.WriteAllText(StatePath, new JsonObject { ["tag"] = tag }.ToJsonString());
     }
 
-    private static async Task DefaultDownloadAsync(Uri uri, string target, CancellationToken ct)
+    private async Task DefaultDownloadAsync(Uri uri, string target, CancellationToken ct)
     {
+        string assetName = Path.GetFileName(uri.LocalPath);
         using HttpResponseMessage response =
             await SharedClient.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
+        long total = response.Content.Headers.ContentLength ?? 0;
         await using Stream source = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         await using FileStream destination = File.Create(target);
-        await source.CopyToAsync(destination, ct).ConfigureAwait(false);
+
+        // Read in chunks so the wizard can show percent and ETA (same pattern as the GGUF downloads).
+        // Đọc theo chunk để wizard hiện được phần trăm và ETA (cùng kiểu với các lượt tải GGUF).
+        byte[] buffer = new byte[81920];
+        long received = 0;
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        ReportDownloadProgress(assetName, 0, total, null);
+        int read;
+        while ((read = await source.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+        {
+            await destination.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+            received += read;
+            double seconds = stopwatch.Elapsed.TotalSeconds;
+            ReportDownloadProgress(assetName, received, total, seconds > 0.5 ? received / seconds : null);
+        }
     }
 
-    private static readonly HttpClient SharedClient = new();
+    private static readonly HttpClient SharedClient = HttpUa.CreateClient();
 }

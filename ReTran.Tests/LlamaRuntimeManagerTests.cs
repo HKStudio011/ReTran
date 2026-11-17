@@ -48,6 +48,29 @@ public class LlamaRuntimeManagerTests : IDisposable
         ]
         """;
 
+    [Fact]
+    public async Task Status_CarriesProgress_WhileDownloading_AndClearsAfter()
+    {
+        // Tiến độ zip runtime (wizard vòng 2 §9): status mang `progress` khi đang tải, mất khi tải xong
+        // (DownloadAndExtractAsync xoá entry sau khi downloader trả về, trước khi giải nén).
+        var downloader = new RecordingZipDownloader();
+        var manager = new LlamaRuntimeManager(
+            _dir, new HttpClient(new GhHandler(ReleasesJson)), downloader.DownloadAsync);
+
+        Assert.Null((await manager.GetStatusAsync(CancellationToken.None)).Progress);
+
+        manager.ReportDownloadProgress("cuda190.zip", 100, 400, 50.0); // đúng tên asset mà DownloadAsync("cuda") sẽ tải
+        LlmRuntimeStatus status = await manager.GetStatusAsync(CancellationToken.None);
+        Assert.NotNull(status.Progress);
+        Assert.Equal(100, status.Progress!.ReceivedBytes);
+        Assert.Equal(400, status.Progress.TotalBytes);
+        Assert.Equal(50.0, status.Progress.BytesPerSec);
+
+        // Lượt tải thật (fake downloader trả ngay) → entry tiến độ bị xoá.
+        await manager.DownloadAsync("cuda", CancellationToken.None);
+        Assert.Null((await manager.GetStatusAsync(CancellationToken.None)).Progress);
+    }
+
     private sealed class RecordingZipDownloader
     {
         public List<Uri> Uris { get; } = new();

@@ -13,10 +13,10 @@ public sealed class GoogleWebTranslator : ITranslator
     private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(60);
 
     /// <summary>
-    /// Shared client for the default path (no custom handler, default timeout), so production calls pool connections.
-    /// Client dùng chung cho đường mặc định (không custom handler, timeout mặc định) để production gọi gộp kết nối.
+    /// Shared client for the default path (no custom handler, default timeout), so production calls pool connections. Browser-like headers: the Google web endpoint challenges/throttles bare UAs.
+    /// Client dùng chung cho đường mặc định (không custom handler, timeout mặc định) để production gọi gộp kết nối. Header giống trình duyệt: endpoint web của Google challenge/throttle UA trần.
     /// </summary>
-    private static readonly HttpClient SharedClient = new() { Timeout = DefaultTimeout };
+    private static readonly HttpClient SharedClient = HttpUa.Apply(new HttpClient { Timeout = DefaultTimeout });
 
     private readonly HttpClient _client;
 
@@ -38,7 +38,7 @@ public sealed class GoogleWebTranslator : ITranslator
         }
         else
         {
-            _client = handler is null ? new HttpClient() : new HttpClient(handler);
+            _client = HttpUa.Apply(handler is null ? new HttpClient() : new HttpClient(handler));
             _client.Timeout = effectiveTimeout;
         }
     }

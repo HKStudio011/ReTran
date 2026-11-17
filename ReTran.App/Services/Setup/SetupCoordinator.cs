@@ -174,9 +174,9 @@ public sealed class SetupCoordinator
     private readonly ILogger<SetupCoordinator>? _logger;
 
     private SetupState _state;
-    private int _running; // 0 idle / 1 a run is in progress (Interlocked) — guards against double starts
-    private SetupCheckItem[] _checks = []; // snapshot checklist Checking — thay nguyên khối mỗi event
-    private SetupDownloadInfo[] _downloads = []; // snapshot tiến độ tải — thay nguyên khối mỗi poll
+    private int _running; // 0 idle / 1 a run is in progress (Interlocked) - guards against double starts
+    private SetupCheckItem[] _checks = []; // snapshot checklist Checking - thay nguyên khối mỗi event
+    private SetupDownloadInfo[] _downloads = []; // snapshot tiến độ tải - thay nguyên khối mỗi poll
 
     /// <summary>
     /// Creates the coordinator. Every dependency is injectable so the whole machine runs on fakes in
@@ -427,13 +427,13 @@ public sealed class SetupCoordinator
                 // screens are asked again) and every step marker (the pipeline re-verifies), then
                 // persist immediately — a crash mid-rerun must leave "rerunning", never the old
                 // "complete" state. What stays: the model download step still skips genuinely
-                // installed models (its bridge catalog is the truth), and Syncing still skips on a
-                // flavor match, so an unchanged machine only pays the questions + re-verification.
+                // installed models (its bridge catalog is the truth); Syncing always runs its real
+                // frozen sync anyway (see RunSyncStepAsync).
                 // Lượt rerun sửa lỗi chạy lại từ bước 1: xoá câu trả lời v2 (cả 3 màn được hỏi lại)
                 // và mọi marker bước (pipeline xác minh lại), rồi lưu NGAY — crash giữa rerun phải
                 // để lại state "đang rerun", không bao giờ là "đã xong" cũ. Cái giữ nguyên: bước tải
-                // vẫn bỏ qua model đã cài THẬT (catalog của bridge là sự thật), Syncing vẫn skip khi
-                // khớp flavor — máy không đổi chỉ trả giá bằng phần hỏi lại + xác minh lại.
+                // vẫn bỏ qua model đã cài THẬT (catalog của bridge là sự thật); Syncing luôn chạy
+                // frozen sync thật (xem RunSyncStepAsync).
                 _state = _state with
                 {
                     Dets = null,
@@ -960,12 +960,16 @@ public sealed class SetupCoordinator
     /// Syncing entry (Amendment A2): probes the installed paddle flavor first. Nothing installed →
     /// straight to the sync loop; a DIFFERENT flavor installed → pause in
     /// <see cref="SetupStep.ConfirmingFlavorSwitch"/> until the user confirms (no sync before that);
-    /// the SAME flavor installed → fast path, mark done without any uv call ("re-run setup" smoke #8 —
-    /// an exit-0 <c>uv pip show</c> already proves the venv carries this wheel).
+    /// the SAME flavor installed → STILL runs the real frozen sync, never a mark-done shortcut: the
+    /// sync validates and repairs the venv (hidden environment damage) and picks up shipped
+    /// pyproject/lock changes (a new library from an app update) — with a warm uv cache it is quick,
+    /// and skipping it is exactly how a broken environment survives a "re-run setup" (BA 2026-11-17).
     /// Vào bước Syncing (Amendment A2): dò flavor paddle đã cài trước. Chưa cài gì → thẳng vào vòng
     /// sync; đang cài flavor KHÁC → dừng ở <see cref="SetupStep.ConfirmingFlavorSwitch"/> cho tới khi
-    /// user xác nhận (không sync trước đó); đã cài ĐÚNG flavor → đường nhanh, đánh dấu done không gọi uv
-    /// nào ("chạy lại setup" smoke #8 — <c>uv pip show</c> exit 0 đã chứng minh venv mang wheel này).
+    /// user xác nhận (không sync trước đó); đã cài ĐÚNG flavor → VẪN chạy frozen sync thật, không bao
+    /// giờ chỉ đánh dấu done: sync xác minh và sửa venv (hỏng ngầm) đồng thời nhận thay đổi
+    /// pyproject/lock theo bản cập nhật (thư viện mới) — cache uv ấm thì nhanh, và bỏ qua nó chính là
+    /// cách một môi trường hỏng sống sót qua "chạy lại setup" (BA 2026-11-17).
     /// </summary>
     private async Task<StepOutcome> RunSyncStepAsync(CancellationToken ct)
     {
@@ -975,12 +979,6 @@ public sealed class SetupCoordinator
         {
             EnterFlavorSwitchPause(current);
             return StepOutcome.Paused;
-        }
-
-        if (installed == Flavor)
-        {
-            MarkStepDone(SetupStep.Syncing);
-            return StepOutcome.Done;
         }
 
         return await RunSyncLoopAsync(ct).ConfigureAwait(false);
@@ -1142,10 +1140,15 @@ public sealed class SetupCoordinator
                 window.CancelAfter(_modelDownloadTimeout);
                 while (true)
                 {
-                    if (await IsLlmRuntimeInstalledAsync(ct).ConfigureAwait(false)) break;
+                    JsonNode? status = await _bridge.CallAsync("llm.runtime.status", null, ct).ConfigureAwait(false);
+                    if (IsLlmRuntimeInstalled(status)) break;
+                    // Tiến độ tải zip runtime (spec vòng 2 §9): status có `progress` → đưa vào
+                    // snapshot để UI hiện % + ETA; không có thì UI giữ thanh vô định.
+                    _downloads = [.. ParseRuntimeDownloads(status)];
                     await Task.Delay(_modelPollInterval, window.Token).ConfigureAwait(false);
                 }
 
+                _downloads = [];
                 MarkStepDone(SetupStep.DownloadingLlmRuntime);
                 return StepOutcome.Done;
             }
@@ -1157,9 +1160,29 @@ public sealed class SetupCoordinator
             }
         }
 
+        _downloads = [];
         Error = SetupMessage.Of("setup.fail.llmRuntime",
             (MaxRetries + 1).ToString(), _modelDownloadTimeout.TotalMinutes.ToString("0"));
         return StepOutcome.Failed;
+    }
+
+    /// <summary>
+    /// The optional <c>progress</c> object of <c>llm.runtime.status</c> as a download entry named
+    /// <c>llama.cpp</c> (the runtime zip is the only thing step 8 downloads); empty when the status
+    /// carries no progress, so the UI keeps its indeterminate bar.
+    /// Object <c>progress</c> tuỳ chọn của <c>llm.runtime.status</c> dưới dạng một entry tải tên
+    /// <c>llama.cpp</c> (zip runtime là thứ duy nhất bước 8 tải); rỗng khi status không có tiến độ,
+    /// để UI giữ thanh vô định.
+    /// </summary>
+    private static List<SetupDownloadInfo> ParseRuntimeDownloads(JsonNode? status)
+    {
+        var downloads = new List<SetupDownloadInfo>();
+        if (status?["progress"] is JsonObject p)
+        {
+            downloads.Add(new SetupDownloadInfo(
+                "llama.cpp", ReadLong(p, "receivedBytes"), ReadLong(p, "totalBytes"), ReadDouble(p, "bytesPerSec")));
+        }
+        return downloads;
     }
 
     /// <summary>
@@ -1195,11 +1218,20 @@ public sealed class SetupCoordinator
     private async Task<bool> IsLlmRuntimeInstalledAsync(CancellationToken ct)
     {
         JsonNode? status = await _bridge.CallAsync("llm.runtime.status", null, ct).ConfigureAwait(false);
-        return status is JsonObject obj
+        return IsLlmRuntimeInstalled(status);
+    }
+
+    /// <summary>
+    /// The <c>installed</c> flag of one <c>llm.runtime.status</c> node; a malformed or missing field
+    /// counts as not installed.
+    /// Cờ <c>installed</c> của một node <c>llm.runtime.status</c>; field thiếu hoặc sai định dạng coi
+    /// như chưa cài.
+    /// </summary>
+    private static bool IsLlmRuntimeInstalled(JsonNode? status) =>
+        status is JsonObject obj
             && obj["installed"] is JsonValue value
             && value.TryGetValue<bool>(out bool installed)
             && installed;
-    }
 
     /// <summary>
     /// DownloadingModels: downloads every model the saved answers need — the det+rec pair of every

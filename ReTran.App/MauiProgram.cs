@@ -127,7 +127,11 @@ namespace ReTran_App
             // closed form would build a second controller (run state and active source would split in two).
             builder.Services.AddSingleton<IPipelineControl>(sp => sp.GetRequiredService<PipelineController>());
 
-            builder.Services.AddSingleton(_ => new HttpClient());
+            // Browser-like UA on the DI client: GitHubAppUpdateService talks to the GitHub API, which
+            // answers 403 to a UA-less client (the update check would silently never work).
+            // UA giống trình duyệt cho client DI: GitHubAppUpdateService gọi GitHub API — API trả 403
+            // cho client thiếu UA (check cập nhật sẽ âm thầm không bao giờ chạy được).
+            builder.Services.AddSingleton(_ => HttpUa.Apply(new HttpClient()));
             builder.Services.AddSingleton<GitHubAppUpdateService>();
             builder.Services.AddSingleton<IAppUpdateService>(sp => sp.GetRequiredService<GitHubAppUpdateService>());
             builder.Services.AddSingleton<UpdateStopper>();
@@ -296,7 +300,8 @@ namespace ReTran_App
         // worst case thật là 3 host treo × 60 s — tối đa 180 s — không phải một lần 60 s; offline
         // vẫn fail nhanh (DNS lỗi ngay) và chỉ host treo mới chờ hết timeout của nó, vẫn chấp nhận
         // được cho một lần kiểm tra wizard.
-        private static readonly HttpClient NetworkProbeClient = new() { Timeout = TimeSpan.FromSeconds(60) };
+        private static readonly HttpClient NetworkProbeClient = HttpUa.Apply(
+            new HttpClient { Timeout = TimeSpan.FromSeconds(60) });
 
         /// <summary>
         /// Free bytes on the volume containing <paramref name="path"/>; 0 when unreadable (fail-safe:

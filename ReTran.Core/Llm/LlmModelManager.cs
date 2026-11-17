@@ -53,7 +53,7 @@ public sealed class LlmModelManager(
     string modelsDir, string stateFile,
     Func<LlmModelSpec, string, CancellationToken, Task>? downloader = null)
 {
-    private static readonly HttpClient SharedClient = new();
+    private static readonly HttpClient SharedClient = HttpUa.CreateClient();
 
     private readonly string _modelsDir = modelsDir ?? throw new ArgumentNullException(nameof(modelsDir));
     private readonly string _stateFile = stateFile ?? throw new ArgumentNullException(nameof(stateFile));
