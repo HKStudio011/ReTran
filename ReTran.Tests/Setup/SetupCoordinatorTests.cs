@@ -1647,13 +1647,13 @@ public class SetupCoordinatorTests : IDisposable
             TestContext.Current.CancellationToken);
         await entered.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
-        // In flight: the run is in progress while Step still reads Done — IsComplete alone would pass
-        // the gate, but with IsRunning the gate blocks.
-        // Đang chạy: lượt run đang diễn ra trong khi Step vẫn đọc là Done — IsComplete đơn lẻ sẽ pass
-        // gate, nhưng kèm IsRunning thì gate chặn.
+        // In flight: the run is in progress and now publishes Checking EARLY (BA 17-11 — the modal must
+        // be visible during the probe window), so Step reads Checking, not the stale Done.
+        // Đang chạy: lượt run đang diễn ra và giờ publish Checking SỚM (BA 17-11 — modal phải hiện
+        // trong cửa sổ probe), nên Step đọc là Checking, không phải Done cũ.
         Assert.True(coordinator.IsRunning);
-        Assert.Equal(SetupStep.Done, coordinator.Step);
-        Assert.True(coordinator.IsComplete);
+        Assert.Equal(SetupStep.Checking, coordinator.Step);
+        Assert.False(coordinator.IsComplete);
         Assert.False(PipelineGate.CanStartPipeline(coordinator.IsComplete, coordinator.IsRunning, coordinator.SkippedForSession));
 
         release.SetResult();

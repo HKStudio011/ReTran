@@ -3,7 +3,7 @@ using Microsoft.Extensions.Logging;
 namespace ReTran_App.Services.Diagnostics;
 
 /// <summary>
-/// Minimal <see cref="ILoggerProvider"/> appending Warning-and-above records to a daily log file under
+/// Minimal <see cref="ILoggerProvider"/> appending Information-and-above records to a daily log file under
 /// <c>%LOCALAPPDATA%\ReTran\logs</c>, so a packaged (Release) run is debuggable too: the Debug build
 /// has <see cref="TraceLoggerProvider"/> and Blazor devtools, a Release run has neither — the generic
 /// Blazor error banner is then the only symptom, which is exactly how the 2026-11-17 wizard crash
@@ -17,8 +17,8 @@ namespace ReTran_App.Services.Diagnostics;
 /// <remarks>
 /// Deliberately belt-and-braces: writes are serialized by a lock, the file is opened per record (no
 /// long-lived handle to fight a second app instance over), and every disk failure is swallowed —
-/// logging must never take the app down. Warnings-and-up only keeps the file useful (Info chatter
-/// would bury the stack).
+/// logging must never take the app down. Information-and-up keeps the wizard flow traceable without
+/// burying the stacks.
 /// C? tình an-toàn-c?-k?p: ghi du?c ph?i hóa b?ng lock, file m? theo t?ng b?n ghi (không gi? handle
 /// l�u đ? tranh v?i instance app th? hai), và m?i l?i đĩa đ?u b? nu?t — logging kh�ng bao gi? đ� app.
 /// Ch? t? Warning tr? lên đ? file c�n d?ng d?c (log Info s? v�i stack).
@@ -73,7 +73,7 @@ internal sealed class FileLoggerProvider : ILoggerProvider
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
         /// <inheritdoc/>
-        public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Warning;
+        public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Information;
 
         /// <inheritdoc/>
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,

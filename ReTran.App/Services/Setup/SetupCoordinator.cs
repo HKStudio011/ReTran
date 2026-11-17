@@ -469,6 +469,18 @@ public sealed class SetupCoordinator
                 return;
             }
 
+            // Publish EARLY that the run is in Checking: on a machine whose previous run ended at
+            // Done, Step still reads Done here — and the modal (IsComplete => Step == Done) would
+            // stay HIDDEN for the entire check window (network probes, up to ~180 s), which looked
+            // exactly like "bấm Chạy lại setup nhưng không có gì hiện ra" (BA 2026-11-17).
+            // Publish SỚM rằng lượt chạy đang ở Checking: trên máy có lượt trước kết thúc ở Done,
+            // Step vẫn đọc là Done tại đây — và modal (IsComplete => Step == Done) sẽ ẨN suốt cửa sổ
+            // check (probe mạng, tới ~180 s), nhìn đúng như "bấm Chạy lại setup nhưng không có gì
+            // hiện ra" (BA 2026-11-17).
+            Step = SetupStep.Checking;
+            Publish();
+            _logger?.LogInformation("setup: run started (force={Force})", force);
+
             StepOutcome outcome = RunCheckingStep();
             if (outcome == StepOutcome.Failed)
             {
@@ -480,6 +492,7 @@ public sealed class SetupCoordinator
             {
                 Step = SetupStep.ChoosingOcrModels;
                 Publish();
+                _logger?.LogInformation("setup: paused at {Step}", Step);
                 return;
             }
 
@@ -856,6 +869,7 @@ public sealed class SetupCoordinator
         {
             Step = SetupStep.ChoosingLanguages;
             Publish();
+            _logger?.LogInformation("setup: paused at {Step}", Step);
             return;
         }
 
@@ -863,6 +877,7 @@ public sealed class SetupCoordinator
         {
             Step = SetupStep.ChoosingLlmModels;
             Publish();
+            _logger?.LogInformation("setup: paused at {Step}", Step);
             return;
         }
 
