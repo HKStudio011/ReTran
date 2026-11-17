@@ -62,12 +62,12 @@ public static class OcrModelChoices
 ```
 Luật chọn (pin bằng test): full(t)=det∧rec có → tick+khoá; bán phần → tick, không khoá; không tick nào → ticked `["small"]` tự do; `ActiveTier` = tier của `currentDet` nếu ∈ ticked, else `"small"` nếu ticked, else tier đầu theo thứ tự. `NeededModels` = distinct: mọi `TierDet/TierRec` của `tiers` + `LegacyRecFor(mainLang)` khi `!IsV6Covered` + `LegacyRecFor(e)` cho mỗi extra. `ExpectedPair` = `(TierDet(activeTier), IsV6Covered(main) ? TierRec(activeTier) : LegacyRecFor(main))`.
 
-- [ ] **Step 1: Viết test failing** — `OcrModelChoicesTests`:
+- [x] **Step 1: Viết test failing** — `OcrModelChoicesTests`:
   `TierModelNames_ComposeCorrectly` (3 tier × det/rec; `TierOfDet` cả 3 + chuỗi lạ → null) · `LegacyRecFor_MapsTheEightLanguages` (ko→`korean_PP-OCRv5_mobile_rec`, ru→`cyrillic_…`, ar→`arabic_…`, th→`th_…`, ta→`ta_…`, te→`te_…`, hi→`devanagari_…`, el→`el_…`; `"fr"`/`"xx"` → null) · `IsV6Covered_AutoCoveredTrue_OthersFalse` (auto/vi/en/ja/zh true; ko/ru/th/el/hi/ta/te false) · `PreselectTiers_Full_ TicksAndLocks` (installed small đủ, current small/small → Ticked [small], Locked [small], Active small) · `PreselectTiers_Partial_TicksUnlocked` (chỉ `small_det`) · `PreselectTiers_Clean_DefaultsSmallFree` · `PreselectTiers_ActiveFromLegacyPair` (current det=`PP-OCRv6_tiny_det`, rec=`korean_…` → Active tiny khi tiny ticked) · `PreselectLegacyLanguages_InstalledOnly` · `NeededModels_TiersPlusLegacyPlusExtras` (tiers [small,medium], main ko, extras [ru] → 6 tên đúng, không trùng) · `NeededModels_AutoNoExtras_TierModelsOnly` · `ExpectedPair_Auto_V6Pair` + `ExpectedPair_Korean_TierDetPlusKorRec` · `ScanInstalledModels_ReadsTempDirs` (temp dir + 2 dir con + 1 file → 2 tên). `I18nServiceTests`: `LanguageNames_HaveNativeTamilTelugu` (`LanguageName("ta")=="தமிழ்"`, `"te"=="తెలుగు"`).
-- [ ] **Step 2: Chạy — fail** (CS0246). `--filter-class "OcrModelChoicesTests"` (global).
-- [ ] **Step 3: Implement** — helper mirror từ `OcrCatalogDisplay` (rec legacy = rec có tên KHÔNG bắt đầu `"PP-OCRv6"` đầu tiên phủ lang — cùng xấp xỉ `PairFor` cũ); `ScanInstalledModels` = `Directory.EnumerateDirectories(Path.Combine(modelsDir, SetupState.OfficialModelsSubdir))` lấy `Path.GetFileName`, thiếu dir → empty, lỗi → empty. Thêm 2 tên ta/te vào `LanguageNames`.
-- [ ] **Step 4: Pass** — `OcrModelChoicesTests` + `I18nServiceTests` xanh.
-- [ ] **Step 5: Commit** — `feat(setup): model-tier choice rules for the wizard`
+- [x] **Step 2: Chạy — fail** (CS0246). `--filter-class "OcrModelChoicesTests"` (global).
+- [x] **Step 3: Implement** — helper mirror từ `OcrCatalogDisplay` (rec legacy = rec có tên KHÔNG bắt đầu `"PP-OCRv6"` đầu tiên phủ lang — cùng xấp xỉ `PairFor` cũ); `ScanInstalledModels` = `Directory.EnumerateDirectories(Path.Combine(modelsDir, SetupState.OfficialModelsSubdir))` lấy `Path.GetFileName`, thiếu dir → empty, lỗi → empty. Thêm 2 tên ta/te vào `LanguageNames`.
+- [x] **Step 4: Pass** — `OcrModelChoicesTests` + `I18nServiceTests` xanh.
+- [x] **Step 5: Commit** — `feat(setup): model-tier choice rules for the wizard`
 
 ---
 
@@ -90,11 +90,11 @@ public Task ContinueWithExtraLanguagesAsync(IReadOnlyList<string> extraLangs, Ca
 ```
 Flow: `StartAsync` (sau Checking thành công): `Tiers is null` → `Step=ChoosingOcrTier; Publish(); return;` → `Language is null` → `ChoosingLanguage` (như cũ) → `ExtraLangs is null` → `ChoosingExtraLanguages` → else `RunPipelineAsync(VerifyingFiles)`. `ContinueWithOcrTierAsync`: validate (`tiers.Count ≥ 1`, subset `OcrModelChoices.Tiers`, `activeTier ∈ tiers`; sai → `ArgumentException`), lưu `Tiers`/`ActiveTier` + marker `StepKey(ChoosingOcrTier)`, save; rồi tiếp: Language null → pause Language; ExtraLangs null → pause B; else pipeline. `ContinueWithLanguageAsync`: thêm nhánh ExtraLangs null → pause B (trước khi vào pipeline). `ContinueWithExtraLanguagesAsync`: validate mọi phần tử ∈ `LegacyLanguageCodes` (sai → `ArgumentException`), dedupe giữ thứ tự, lưu + marker, → pipeline. Marker keys tự sinh `StepKey` = lowercase tên enum (`choosingocrtier`, `choosingextralanguages`).
 
-- [ ] **Step 1: Test failing** — `SetupStateTests`: `TiersActiveExtra_RoundTrip` + `LegacyJson_NullNewFields` + `ExtraLangs_EmptyList_DistinctFromNull`. `SetupCoordinatorTests` test mới: `Start_NoAnswers_PausesAtOcrTier` (fixture chỉ flavor+language → Step=ChoosingOcrTier sau StartAsync), `Flow_Order_TierThenLanguageThenExtra` (fixture flavor-only: Start→A; ContinueA→Language; ContinueLanguage→B; ContinueB→Done, `_bridge.Downloaded` chứa đủ bộ), `ContinueTier_ZeroTiers_Throws` + `ContinueTier_BadActiveTier_Throws` + `ContinueExtra_UnknownLang_Throws`, `Flow_AllAnswered_SkipsPauses` (fixture đủ 3 answers → StartAsync → Done không pause, không download mới), `ActiveTier_Exposed`.
-- [ ] **Step 2: Chạy — fail**.
-- [ ] **Step 3: Implement** + **cập nhật fixtures cũ**: mọi fixture `WriteSetupJson` KHÔNG phải case `isComplete:true`/“file cũ” chủ đích → thêm `"tiers":["small"],"activeTier":"small","extraLangs":[]` (giữ nguyên ý nghĩa từng test; các test cũ resume/pipeline phải đi thẳng như trước).
-- [ ] **Step 4: Pass** — `SetupStateTests` + `SetupCoordinatorTests` xanh (toàn bộ, kể cả test cũ).
-- [ ] **Step 5: Commit** — `feat(setup): tier and extra-language pauses in the wizard flow`
+- [x] **Step 1: Test failing** — `SetupStateTests`: `TiersActiveExtra_RoundTrip` + `LegacyJson_NullNewFields` + `ExtraLangs_EmptyList_DistinctFromNull`. `SetupCoordinatorTests` test mới: `Start_NoAnswers_PausesAtOcrTier` (fixture chỉ flavor+language → Step=ChoosingOcrTier sau StartAsync), `Flow_Order_TierThenLanguageThenExtra` (fixture flavor-only: Start→A; ContinueA→Language; ContinueLanguage→B; ContinueB→Done, `_bridge.Downloaded` chứa đủ bộ), `ContinueTier_ZeroTiers_Throws` + `ContinueTier_BadActiveTier_Throws` + `ContinueExtra_UnknownLang_Throws`, `Flow_AllAnswered_SkipsPauses` (fixture đủ 3 answers → StartAsync → Done không pause, không download mới), `ActiveTier_Exposed`.
+- [x] **Step 2: Chạy — fail**.
+- [x] **Step 3: Implement** + **cập nhật fixtures cũ**: mọi fixture `WriteSetupJson` KHÔNG phải case `isComplete:true`/“file cũ” chủ đích → thêm `"tiers":["small"],"activeTier":"small","extraLangs":[]` (giữ nguyên ý nghĩa từng test; các test cũ resume/pipeline phải đi thẳng như trước).
+- [x] **Step 4: Pass** — `SetupStateTests` + `SetupCoordinatorTests` xanh (toàn bộ, kể cả test cũ).
+- [x] **Step 5: Commit** — `feat(setup): tier and extra-language pauses in the wizard flow`
 
 ---
 
@@ -115,9 +115,9 @@ private void ReconcileMarkers()                 // answers đủ mới chạy; c
 `RunDownloadModelsStepAsync`: needed = `OcrModelChoices.NeededModels(tiers, activeTier, LanguageCode, extras)`; list qua bridge → `download` mọi tên chưa installed; **poll tới khi MỌI tên needed installed** (retry/cửa sổ như cũ, dùng `_modelPollInterval`/`_modelDownloadTimeout`). Bỏ hẳn lượt gọi `recommend`.
 `RunApplyingStepAsync`: `(det, rec) = OcrModelChoices.ExpectedPair(activeTier, LanguageCode)`; `_settings.Save(... OcrDet=det, OcrRec=rec)` (bỏ recommend).
 `ReconcileMarkers`: nếu `Tiers is null || ExtraLangs is null` → return; needed thiếu trên đĩa (qua `ModelInstalled`) → xoá marker `downloadingmodels`; `ExpectedPair ≠ settings.OcrDet/OcrRec` → xoá marker `applying`; có xoá → save.
-- [ ] **Step 1: Test failing** — `DownloadSet_TiersLegacyMainExtras` (tick small+medium, main ko, extra ru → `_bridge.Downloaded` = đúng 6 tên, đúng thứ tự needed) · `DownloadSet_SkipsInstalled` (modelDirExists trả true cho small_det/rec → không download 2 tên đó) · `Applying_TierAwarePair` (auto+tick medium → settings medium/medium; main ko + activeTier tiny → `tiny_det` + `korean_…`) · `Reconcile_MissingModel_ClearsDownload` (fixture đủ answers + steps done + `downloadingmodels:done`; modelDirExists false cho `medium_rec` khi tiers chứa medium → StartAsync → download được gọi cho medium_rec + step chạy lại → Done; các step khác vẫn skip) · `Reconcile_PairMismatch_ClearsApplying` (settings pair tiny; answers activeTier medium → applying chạy lại → settings = medium pair) · `Reconcile_AllPresent_NoClears` (`_bridge.Downloaded` rỗng + Done, mọi step skip) · `ContinueExtra_NewChoices_ClearsMarkers_AndDownloads` (fixture đủ answers cũ + done; `ContinueWithExtraLanguagesAsync(["ko"])` → korean rec được download + settings không đổi; biến thể: answers mới ở A cũng clear được).
-- [ ] **Step 2: fail** → **Step 3: implement** → **Step 4: pass** (`SetupCoordinatorTests` toàn bộ).
-- [ ] **Step 5: Commit** — `feat(setup): tier-aware downloads, applying and rerun reconcile`
+- [x] **Step 1: Test failing** — `DownloadSet_TiersLegacyMainExtras` (tick small+medium, main ko, extra ru → `_bridge.Downloaded` = đúng 6 tên, đúng thứ tự needed) · `DownloadSet_SkipsInstalled` (modelDirExists trả true cho small_det/rec → không download 2 tên đó) · `Applying_TierAwarePair` (auto+tick medium → settings medium/medium; main ko + activeTier tiny → `tiny_det` + `korean_…`) · `Reconcile_MissingModel_ClearsDownload` (fixture đủ answers + steps done + `downloadingmodels:done`; modelDirExists false cho `medium_rec` khi tiers chứa medium → StartAsync → download được gọi cho medium_rec + step chạy lại → Done; các step khác vẫn skip) · `Reconcile_PairMismatch_ClearsApplying` (settings pair tiny; answers activeTier medium → applying chạy lại → settings = medium pair) · `Reconcile_AllPresent_NoClears` (`_bridge.Downloaded` rỗng + Done, mọi step skip) · `ContinueExtra_NewChoices_ClearsMarkers_AndDownloads` (fixture đủ answers cũ + done; `ContinueWithExtraLanguagesAsync(["ko"])` → korean rec được download + settings không đổi; biến thể: answers mới ở A cũng clear được).
+- [x] **Step 2: fail** → **Step 3: implement** → **Step 4: pass** (`SetupCoordinatorTests` toàn bộ).
+- [x] **Step 5: Commit** — `feat(setup): tier-aware downloads, applying and rerun reconcile`
 
 ---
 
@@ -134,17 +134,17 @@ private void ReconcileMarkers()                 // answers đủ mới chạy; c
 - Case `ChoosingLanguage`: `PairFor(code)` dùng `Coordinator.ActiveTier ?? "small"` → det `TierDet`, rec `IsV6Covered ? TierRec : LegacyRecFor` (thay `DefaultDet/DefaultRec`); `OptionMeta`/`SelectedTotalMb`/`Covers/SizeMb` chuyển sang `OcrModelChoices`.
 - CSS scoped: thêm `.setup-choices` (như mockup: grid 18px/1fr/auto, checkbox accent, `.det` mono, `.use` radio, `.tag-installed`, disabled opacity) — **không rebuild Vite**.
 - i18n (VI / EN) — thêm trong block setup: `setup.tier.title` “Chọn model OCR”/“Choose OCR models” · `setup.tier.hint` “(ít nhất 1)”/“(at least 1)” · `setup.tier.name.tiny|small|medium` “Tiny/Small/Medium” · `setup.tier.desc.tiny` “nhẹ nhất, tải nhanh nhất”/“lightest, fastest to download” · `setup.tier.desc.small` “khuyến nghị”/“recommended” · `setup.tier.desc.medium` “chính xác nhất, tải lâu nhất”/“most accurate, longest download” · `setup.tier.use` “Dùng chính”/“Use as primary” · `setup.tier.installed` “đã cài”/“installed” · `setup.tier.willDownload` “sẽ tải ~{0}”/“will download ~{0}” · `setup.tier.total` “Tổng tải: {0}”/“Total download: {0}” · `setup.tier.minOne` “Chọn ít nhất 1 bản để tiếp tục.”/“Pick at least one to continue.” · `setup.extra.title` “Ngôn ngữ bổ sung”/“Extra languages” · `setup.extra.hint` “(ngoài phủ PP-OCRv6 — có thể để trống)”/“(outside PP-OCRv6 coverage — optional)” · `setup.extra.note` “Tick để tải sẵn model nhận chữ riêng; cặp đang chạy vẫn theo ngôn ngữ chính — đổi dùng sau ở Cài đặt.”/“Tick to pre-download dedicated recognition models; the running pair still follows the main language — switch later in Settings.” · `setup.extra.total` “Tải thêm: {0}”/“Extra download: {0}” · `setup.next` “Tiếp tục”/“Continue”.
-- [ ] **Step 1: Implement UI + keys** → **Step 2: build 0 error + `I18nServiceTests` pass** → **Step 3: Commit** — `feat(setup): tier and extra-language screens`
+- [x] **Step 1: Implement UI + keys** → **Step 2: build 0 error + `I18nServiceTests` pass** → **Step 3: Commit** — `feat(setup): tier and extra-language screens`
 
 ---
 
 ### Task 5: Xác minh + board + review + báo cáo
 
-- [ ] **Step 1:** build + focused (`OcrModelChoicesTests`, `SetupStateTests`, `SetupCoordinatorTests`, `I18nServiceTests`).
-- [ ] **Step 2:** full suite ≥ 872 + số test mới (0 failed; 2 skip VRAM đã biết; flaky-under-load có thể gặp — chạy lại lượt 2).
-- [ ] **Step 3:** Regenerate board `visual-compare/index.template.html`: thêm 2 figure màn mới (copy từ `mockup-model-extra-langs.html`), cập nhật flow strip + badge; regenerate `index.html`; mở bằng `Start-Process` (browser tool của session hiện không khả dụng).
-- [ ] **Step 4:** Final review: thử `ocr_review` (tool OpenCodeReview mới: `from`/`to` + backgroundFile spec) — nếu tool lỗi/không dùng được → reviewer subagent như các plan trước (code-reviewer template, model mạnh nhất khả dụng). Re-grade + fix pass nếu Critical/Important.
-- [ ] **Step 5:** Ledger + báo cáo cuối (rulings, deferred minors, smoke checklist, menu push).
+- [x] **Step 1:** build + focused (`OcrModelChoicesTests`, `SetupStateTests`, `SetupCoordinatorTests`, `I18nServiceTests`).
+- [x] **Step 2:** full suite ≥ 872 + số test mới (0 failed; 2 skip VRAM đã biết; flaky-under-load có thể gặp — chạy lại lượt 2).
+- [x] **Step 3:** Regenerate board `visual-compare/index.template.html`: thêm 2 figure màn mới (copy từ `mockup-model-extra-langs.html`), cập nhật flow strip + badge; regenerate `index.html`; mở bằng `Start-Process` (browser tool của session hiện không khả dụng).
+- [x] **Step 4:** Final review: thử `ocr_review` (tool OpenCodeReview mới: `from`/`to` + backgroundFile spec) — nếu tool lỗi/không dùng được → reviewer subagent như các plan trước (code-reviewer template, model mạnh nhất khả dụng). Re-grade + fix pass nếu Critical/Important. *(Kết quả: `ocr_review` chưa cấu hình LLM endpoint → dùng reviewer subagent; verdict Yes, 0C/0I/1M.)*
+- [x] **Step 5:** Ledger + báo cáo cuối (rulings, deferred minors, smoke checklist, menu push).
 
 ## Self-review (đã chạy theo writing-plans)
 

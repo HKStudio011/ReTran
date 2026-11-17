@@ -56,7 +56,7 @@ public static SystemCheckResult Run(
 - `DecideFlavor` trả thêm phần tử thứ 4 `SetupMessage GpuLabel` (đổi tuple — private, không ảnh hưởng public).
 - **Chủ ý:** cổng `uv.exe` chuyển lên TRƯỚC cổng arch (để thứ tự chạy = thứ tự hiển thị `files → env → models → arch → …`). Trường hợp hiếm cả-hai-fail giờ báo `setup.fail.uvMissing` thay vì arch.
 
-- [ ] **Step 1: Viết test failing** — thêm vào `SystemCheckTests.cs` (dùng helper `Check(...)`, `FileSystem(...)`, `Adapters(...)` sẵn có):
+- [x] **Step 1: Viết test failing** — thêm vào `SystemCheckTests.cs` (dùng helper `Check(...)`, `FileSystem(...)`, `Adapters(...)` sẵn có):
   - `Progress_EmitsPendingThenRunningAndResults_InOrder`: thu `List<SetupCheckItem>` qua `SystemCheck.Run(..., progress: list.Add)` (adapters NvidiaCurrent, đủ điều kiện); assert: 9 event đầu = `Pending` với ids đúng thứ tự trên; các event sau theo cặp `Running` → kết quả cho từng mục theo đúng thứ tự; 3 mục net Ok theo host; event cuối là `net:github.com` Ok; `result.Ok`.
   - `UvMissing_WithWrongArch_ReportsUv_AndFilesItemFails`: `uvPresent:false` + `osArchitecture: () => Architecture.Arm64`; assert `files` Running→Fail (Detail key `setup.fail.uvMissing`), KHÔNG có event `arch:*`, `result.FailureReason!.Key == "setup.fail.uvMissing"`.
   - `Progress_EnvAndModels_ReportPresence`: run với `venvPresent:true` → env Detail key `.present`; `venvPresent:false` → `.absent`; `countModelEntries: _ => 3` → models Detail args `["3"]` + key `.present`; `_ => 0` → `.absent`.
@@ -64,10 +64,10 @@ public static SystemCheckResult Run(
   - `Progress_GpuWarn_EmitsNoticeAsDetail`: NVIDIA driver cũ (vd `NvidiaWithDriver(560, 76)`) → `gpu` event `Warn` + Detail key `setup.notice.oldDriver`.
   - `Progress_CallbackThrows_CheckStillSucceeds`: `progress: _ => throw new InvalidOperationException("x")` → `Run` trả `Ok=true`, không ném.
 
-- [ ] **Step 2: Chạy test — phải fail** (compile fail: `SetupCheckItem` chưa có).
+- [x] **Step 2: Chạy test — phải fail** (compile fail: `SetupCheckItem` chưa có).
   Run: `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj" -- --filter-class "SystemCheckTests"` → FAIL CS0246.
 
-- [ ] **Step 3: Implement** —
+- [x] **Step 3: Implement** —
   - `SetupCheckItem.cs`: enum + record + doc comment song ngữ (record: Id định danh để UI cập nhật theo Id; Label/Detail là `SetupMessage` để modal resolve i18n).
   - `SetupState.cs`: `internal const string OfficialModelsSubdir = "official_models";`
   - `SystemCheck.cs`:
@@ -77,9 +77,9 @@ public static SystemCheckResult Run(
     - `DecideFlavor` trả `(OcrFlavor, SetupMessage? Notice, string? CudaWheel, SetupMessage GpuLabel)`; GpuLabel: có card → `setup.check.gpu.label` args (name, driverDisplay) với driverDisplay = product version từ `TryGetNvidiaProductVersion` ("617.42") else raw/"—"; không card → `setup.check.gpu.none`.
   - Giữ nguyên mọi message/gate/threshold hiện có (chỉ thêm emit + đổi vị trí khối uv gate).
 
-- [ ] **Step 4: Chạy test — phải pass.** `SystemCheckTests` toàn bộ (60 + 6 mới) pass.
+- [x] **Step 4: Chạy test — phải pass.** `SystemCheckTests` toàn bộ (60 + 6 mới) pass.
 
-- [ ] **Step 5: Commit** — `git add ReTran.App/Services/Setup/SetupCheckItem.cs ReTran.App/Services/Setup/SystemCheck.cs ReTran.App/Services/Setup/SetupState.cs ReTran.Tests/Setup/SystemCheckTests.cs` → `feat(setup): report per-item progress from the checking step`
+- [x] **Step 5: Commit** — `git add ReTran.App/Services/Setup/SetupCheckItem.cs ReTran.App/Services/Setup/SystemCheck.cs ReTran.App/Services/Setup/SetupState.cs ReTran.Tests/Setup/SystemCheckTests.cs` → `feat(setup): report per-item progress from the checking step`
 
 ---
 
@@ -95,15 +95,15 @@ public static SystemCheckResult Run(
 - `RunCheckingStep` truyền `progress: OnCheckProgress, countModelEntries: _countModelEntries` vào `SystemCheck.Run`.
 - Consumes: Task 1 (`SetupCheckItem`, `Run` signature mới).
 
-- [ ] **Step 1: Viết test failing** — trong `SetupCoordinatorTests.cs`:
+- [x] **Step 1: Viết test failing** — trong `SetupCoordinatorTests.cs`:
   - Cập nhật helper `NewCoordinator(...)`: thêm param `Func<string, int>? countModelEntries = null` truyền xuống ctor với default `_ => 0` (hermetic).
   - `CheckingProgress_Checks_ContainNineItems_InOrder_AllOk`: `WriteSetupJson("""{"flavor":"gpu","language":"vi"}""")`; `StartAsync` (dừng ở ChoosingLanguage sau Checking); assert `Checks.Count == 9`, ids đúng thứ tự (`files, env, models, arch, gpu, disk, net:pypi.org, net:www.paddlepaddle.org.cn, net:github.com`), tất cả `Ok`, models Detail key `.absent` (fake 0).
   - `Checks_ResetOnRetry_NoStaleFailures`: `NewCoordinator(isHostReachable: host => host != "github.com")` → `StartAsync` → `Failed`; đổi cờ fake (biến local điều khiển) → `RetryAsync` → `Done`; assert `Checks.Count == 9`, không item nào `Fail`, `net:github.com` cuối = `Ok`.
   - `Checks_BeforeAnyRun_Empty`: coordinator mới → `Assert.Empty(coordinator.Checks)`.
-- [ ] **Step 2: Chạy test — fail** (`Checks` chưa tồn tại; FQN `SetupCoordinatorTests`).
-- [ ] **Step 3: Implement** như Interfaces (doc comment song ngữ cho `Checks` + param mới; comment nêu lý do mảng thay-thế-nguyên-khối: UI đọc khi thread nền ghi).
-- [ ] **Step 4: Chạy test — pass** (`SetupCoordinatorTests` 32 + 3 mới).
-- [ ] **Step 5: Commit** — `git add` 2 file → `feat(setup): expose live check items on the coordinator`
+- [x] **Step 2: Chạy test — fail** (`Checks` chưa tồn tại; FQN `SetupCoordinatorTests`).
+- [x] **Step 3: Implement** như Interfaces (doc comment song ngữ cho `Checks` + param mới; comment nêu lý do mảng thay-thế-nguyên-khối: UI đọc khi thread nền ghi).
+- [x] **Step 4: Chạy test — pass** (`SetupCoordinatorTests` 32 + 3 mới).
+- [x] **Step 5: Commit** — `git add` 2 file → `feat(setup): expose live check items on the coordinator`
 
 ---
 
@@ -151,9 +151,9 @@ public static SystemCheckResult Run(
   - `setup.check.gpu.build.gpu`: "bản GPU (CUDA 12.9)" / "GPU build (CUDA 12.9)"
   - `setup.check.gpu.build.cpu`: "bản CPU" / "CPU build"
   - `setup.check.disk.detail`: "cần {0} GB (bản {1})" / "needs {0} GB ({1} build)"
-- [ ] **Step 1: Implement** markup + helpers + style + keys (UI không unit-test theo convention; xác minh ở Task 4 bằng board).
-- [ ] **Step 2: Build + parity** — `dotnet build` 0 error; `dotnet test ... -- --filter-class "I18nServiceTests"` pass (parity key mới).
-- [ ] **Step 3: Commit** — `git add ReTran.App/Components/Shared/SetupModal.razor ReTran.App/Services/I18nStrings.cs` → `feat(setup): live checklist UI on the checking screen`
+- [x] **Step 1: Implement** markup + helpers + style + keys (UI không unit-test theo convention; xác minh ở Task 4 bằng board).
+- [x] **Step 2: Build + parity** — `dotnet build` 0 error; `dotnet test ... -- --filter-class "I18nServiceTests"` pass (parity key mới).
+- [x] **Step 3: Commit** — `git add ReTran.App/Components/Shared/SetupModal.razor ReTran.App/Services/I18nStrings.cs` → `feat(setup): live checklist UI on the checking screen`
 
 ---
 
@@ -161,11 +161,11 @@ public static SystemCheckResult Run(
 
 **Files:** scratch (không commit): `.superpowers/sdd/2026-11-04-first-run-setup-wizard/visual-compare/index.template.html`
 
-- [ ] **Step 1:** `dotnet build "ReTran Project.slnx"` → 0 error.
-- [ ] **Step 2:** Focused: `SystemCheckTests` + `SetupCoordinatorTests` + `I18nServiceTests` pass.
-- [ ] **Step 3:** Full suite `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj"` → ≥ 863 (861 pass + 2 skip GPU-busy; nếu ComfyUI đã tắt thì đủ 863 pass cũng được).
-- [ ] **Step 4:** Cập nhật board: thay 2 figure Checking (1 & 1b) trong `index.template.html` bằng 3 trạng thái mới (copy markup từ `mockup-checking.html`), sửa caption/"quan sát", regenerate `index.html` bằng script inline CSS+fonts sẵn có, `browser.preview` lại cho user.
-- [ ] **Step 5:** Không commit (scratch ignored); báo cáo cuối + smoke checklist (chạy lại setup trên máy thật: xem 3 dòng mạng hiện dần; máy đã setup → env/models "đã có"; rút mạng → ✗ đúng host).
+- [x] **Step 1:** `dotnet build "ReTran Project.slnx"` → 0 error.
+- [x] **Step 2:** Focused: `SystemCheckTests` + `SetupCoordinatorTests` + `I18nServiceTests` pass.
+- [x] **Step 3:** Full suite `dotnet test --project "ReTran.Tests/ReTran.Tests.csproj"` → ≥ 863 (861 pass + 2 skip GPU-busy; nếu ComfyUI đã tắt thì đủ 863 pass cũng được).
+- [x] **Step 4:** Cập nhật board: thay 2 figure Checking (1 & 1b) trong `index.template.html` bằng 3 trạng thái mới (copy markup từ `mockup-checking.html`), sửa caption/"quan sát", regenerate `index.html` bằng script inline CSS+fonts sẵn có, `browser.preview` lại cho user.
+- [x] **Step 5:** Không commit (scratch ignored); báo cáo cuối + smoke checklist (chạy lại setup trên máy thật: xem 3 dòng mạng hiện dần; máy đã setup → env/models "đã có"; rút mạng → ✗ đúng host).
 
 ## Self-review (đã chạy theo writing-plans)
 
