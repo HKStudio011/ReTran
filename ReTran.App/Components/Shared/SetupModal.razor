@@ -356,7 +356,13 @@
                                         {
                                             <text> · @(L.Fmt("setup.progress.eta", FormatEta(t)))</text>
                                         }
-                                        @if (download.BytesPerSec == 0d)
+                                        @if (download.Total > 0)
+                                        {
+                                            <text> · @(L.Fmt("setup.progress.model", download.Index, download.Total))</text>
+                                        }
+                                        @* Speed null/0 ⇒ đang kết nối lại hoặc chưa đo được — hiện note thay
+                                           vì ETA (spec vòng 2 §9: null speed cũng là reconnect). *@
+                                        @if (download.BytesPerSec is null or <= 0d)
                                         {
                                             <text> · @(L["setup.progress.retry"])</text>
                                         }
@@ -467,9 +473,10 @@
         }
         catch (Exception ex)
         {
-            // Publish từ thread nền (uv sync, poll tải) không được phép giết phiên UI — log + nuốt;
-            // stack nằm trong file log để chẩn đoán (BA 17-11).
+            // Publish từ thread nền (uv sync, poll tải) không được phép giết phiên UI — log + vẫn
+            // thử render lại với state hiện có; stack nằm trong file log để chẩn đoán (BA 17-11).
             Logger.LogError(ex, "setup-modal: OnChanged failed");
+            StateHasChanged();
         }
     });
 
@@ -789,6 +796,7 @@
         finally
         {
             _busy = false;
+            SyncScreenInputState();
             StateHasChanged();
         }
     }
@@ -804,6 +812,7 @@
         finally
         {
             _busy = false;
+            SyncScreenInputState(); // retry có thể rơi vào màn hỏi — init state trước render
             StateHasChanged();
         }
     }
@@ -819,6 +828,7 @@
         finally
         {
             _busy = false;
+            SyncScreenInputState();
             StateHasChanged();
         }
     }

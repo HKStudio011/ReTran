@@ -100,7 +100,11 @@ public sealed record FlavorSwitchInfo(OcrFlavor Installed, OcrFlavor Target);
 /// <param name="ReceivedBytes">Bytes received so far. Số byte đã nhận.</param>
 /// <param name="TotalBytes">Total bytes, or 0 when unknown. Tổng số byte, hoặc 0 khi chưa biết.</param>
 /// <param name="BytesPerSec">Current speed in bytes/second, or <see langword="null"/>. Tốc độ hiện tại (byte/giây), hoặc <see langword="null"/>.</param>
-public sealed record SetupDownloadInfo(string Name, long ReceivedBytes, long TotalBytes, double? BytesPerSec);
+/// <param name="Index">1-based position in the run's needed-model list (spec §9 "model 2/3"); 0 = outside the list (hide the counter). Vị trí 1-based trong danh sách model cần tải (spec §9 "model 2/3"); 0 = ngoài danh sách (ẩn bộ đếm).</param>
+/// <param name="Total">Count of the needed-model list; 0 = hide the counter. Tổng số model cần tải; 0 = ẩn bộ đếm.</param>
+public sealed record SetupDownloadInfo(
+    string Name, long ReceivedBytes, long TotalBytes, double? BytesPerSec,
+    int Index = 0, int Total = 0);
 
 /// <summary>
 /// First-run Setup wizard orchestration as a testable state machine (spec §3, §4): hard gates first,
@@ -177,6 +181,12 @@ public sealed class SetupCoordinator
     private int _running; // 0 idle / 1 a run is in progress (Interlocked) - guards against double starts
     private SetupCheckItem[] _checks = []; // snapshot checklist Checking - thay nguyên khối mỗi event
     private SetupDownloadInfo[] _downloads = []; // snapshot tiến độ tải - thay nguyên khối mỗi poll
+
+    // EMA (α = 0.3) of each download's bytes/sec — spec vòng 2 §9: ETA làm mượt để không nhảy loạn
+    // theo từng poll. Key = download name; cleared when the step finishes.
+    // EMA (α = 0,3) của tốc độ từng lượt tải — spec vòng 2 §9: ETA làm mượt để không nhảy loạn theo
+    // từng poll. Key = tên download; xoá khi bước kết thúc.
+    private readonly Dictionary<string, double> _emaBps = new();
 
     // True once the user explicitly confirmed the flavor swap in THIS run (ConfirmFlavorSwitch /
     // SwitchToCpuFlavor): a retry after a failed post-switch sync must NOT re-prompt the switch —
@@ -374,7 +384,7 @@ public sealed class SetupCoordinator
 
     /// <summary>
     /// The pending flavor switch while in <see cref="SetupStep.ConfirmingFlavorSwitch"/> (installed vs
-    /// target); <see langword="null"} in every other step. Đổi flavor đang chờ khi ở <see cref="SetupStep.ConfirmingFlavorSwitch"/> (bản đã cài so với bản đích); <see langword="null"} ở mọi bước khác.
+    /// target); <see langword="null"/> in every other step. Đổi flavor đang chờ khi ở <see cref="SetupStep.ConfirmingFlavorSwitch"/> (bản đã cài so với bản đích); <see langword="null"/> ở mọi bước khác.
     /// </summary>
     public FlavorSwitchInfo? PendingFlavorSwitch { get; private set; }
 
@@ -1211,22 +1221,36 @@ public sealed class SetupCoordinator
                 {
                     JsonNode? status = await _bridge.CallAsync("llm.runtime.status", null, ct).ConfigureAwait(false);
                     if (IsLlmRuntimeInstalled(status)) break;
+                    // Permanent runtime-download failure (no matching release / dead network) → fail the
+                    // attempt FAST instead of polling the full window (BA review 2026-11-17).
+                    // Fail vĩnh viễn của lượt tải runtime → fail lượt thử NGAY thay vì poll đủ cửa sổ
+                    // (review BA 2026-11-17).
+                    if (IsLlmRuntimeDownloadFailed(status))
+                    {
+                        throw new InvalidOperationException("llm runtime download failed (reported by status)");
+                    }
                     // Tiến độ tải zip runtime (spec vòng 2 §9): status có `progress` → đưa vào snapshot
                     // và PUBLISH — không publish thì UI không bao giờ vẽ lại dòng % + ETA.
-                    _downloads = [.. ParseRuntimeDownloads(status)];
+                    var downloads = ParseRuntimeDownloads(status);
+                    _downloads = [.. downloads.Select(d => d with { BytesPerSec = SmoothBps(d.Name, d.BytesPerSec) })];
                     Publish();
                     await Task.Delay(_modelPollInterval, window.Token).ConfigureAwait(false);
                 }
 
+                _emaBps.Clear();
                 _downloads = [];
                 MarkStepDone(SetupStep.DownloadingLlmRuntime);
                 return StepOutcome.Done;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (OperationCanceledException) { /* the download window elapsed — count as a failed attempt */ }
+            catch (OperationCanceledException) { /* the download window elapsed - count as a failed attempt */ }
             catch (Exception ex)
             {
                 _logger?.LogWarning(ex, "setup: tải runtime LLM lần {Attempt}/{Total} thất bại", attempt, MaxRetries + 1);
+            }
+            finally
+            {
+                _emaBps.Clear(); // lượt thử mới đo speed lại từ đầu
             }
         }
 
@@ -1254,6 +1278,29 @@ public sealed class SetupCoordinator
                 "llama.cpp", ReadLong(p, "receivedBytes"), ReadLong(p, "totalBytes"), ReadDouble(p, "bytesPerSec")));
         }
         return downloads;
+    }
+
+    /// <summary>
+    /// EMA (α = 0.3) of one download's bytes/sec: the first sample passes through, later samples are
+    /// smoothed so the ETA does not jump between polls (spec vòng 2 §9). A <see langword="null"/> speed
+    /// keeps the last smoothed value (the UI then shows its reconnect note).
+    /// EMA (α = 0,3) của tốc độ một lượt tải: mẫu đầu đi thẳng, các mẫu sau được làm mượt để ETA không
+    /// nhảy giữa các poll (spec vòng 2 §9). Tốc độ <see langword="null"/> giữ giá trị mượt cuối (UI
+    /// khi đó hiện note đang kết nối lại).
+    /// </summary>
+    /// <param name="name">Download name (EMA key). Tên download (khóa EMA).</param>
+    /// <param name="bytesPerSec">Raw speed of this poll, or <see langword="null"/>. Tốc độ thô của poll này, hoặc <see langword="null"/>.</param>
+    /// <returns>The smoothed speed, or <see langword="null"/> when nothing measured yet. Tốc độ đã mượt, hoặc <see langword="null"/> khi chưa đo được.</returns>
+    private double? SmoothBps(string name, double? bytesPerSec)
+    {
+        if (bytesPerSec is not { } value)
+        {
+            return _emaBps.TryGetValue(name, out double previous) ? previous : null;
+        }
+
+        double smoothed = _emaBps.TryGetValue(name, out double prev) ? 0.3 * value + 0.7 * prev : value;
+        _emaBps[name] = smoothed;
+        return smoothed;
     }
 
     /// <summary>
@@ -1303,6 +1350,18 @@ public sealed class SetupCoordinator
             && obj["installed"] is JsonValue value
             && value.TryGetValue<bool>(out bool installed)
             && installed;
+
+    /// <summary>
+    /// The <c>downloadFailed</c> flag of one <c>llm.runtime.status</c> node; a malformed or missing
+    /// field counts as "not failed" (the poll window remains the backstop).
+    /// Cờ <c>downloadFailed</c> của một node <c>llm.runtime.status</c>; field thiếu hoặc sai định dạng
+    /// coi như "chưa fail" (cửa sổ poll vẫn là chốt an toàn).
+    /// </summary>
+    private static bool IsLlmRuntimeDownloadFailed(JsonNode? status) =>
+        status is JsonObject obj
+            && obj["downloadFailed"] is JsonValue value
+            && value.TryGetValue<bool>(out bool failed)
+            && failed;
 
     /// <summary>
     /// DownloadingModels: downloads every model the saved answers need — the det+rec pair of every
@@ -1365,12 +1424,22 @@ public sealed class SetupCoordinator
                         downloads.AddRange(ParseDownloads(llmList, null));
                     }
 
-                    _downloads = [.. downloads];
+                    // EMA-smooth the speeds and tag each entry with its "model i/N" counter (spec vòng 2
+                    // §9) — position in the needed list, hidden (0/0) for entries outside it.
+                    // Làm mượt tốc độ bằng EMA và gắn bộ đếm "model i/N" (spec vòng 2 §9) — vị trí trong
+                    // danh sách cần tải, ẩn (0/0) với entry ngoài danh sách.
+                    _downloads = [.. downloads.Select(d => d with
+                    {
+                        BytesPerSec = SmoothBps(d.Name, d.BytesPerSec),
+                        Index = needed.Contains(d.Name) ? needed.ToList().IndexOf(d.Name) + 1 : 0,
+                        Total = needed.Contains(d.Name) ? needed.Count : 0,
+                    })];
                     Publish();
                     if (ocrDone && llmDone) break;
                     await Task.Delay(_modelPollInterval, window.Token).ConfigureAwait(false);
                 }
 
+                _emaBps.Clear();
                 _downloads = [];
                 MarkStepDone(SetupStep.DownloadingModels);
                 return StepOutcome.Done;

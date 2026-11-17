@@ -21,6 +21,13 @@ public sealed record LlmRuntimeStatus(string? Tag, bool Installed, string? Serve
     /// có lượt tải đang báo tiến độ.
     /// </summary>
     public LlmDownloadProgress? Progress { get; init; }
+
+    /// <summary>
+    /// The last download attempt failed permanently (no matching release / dead network) — the wizard
+    /// fails the attempt fast instead of polling its full window. Lượt tải gần nhất fail vĩnh viễn
+    /// (không có release khớp / mạng chết) — wizard fail nhanh thay vì poll đủ cửa sổ.
+    /// </summary>
+    public bool DownloadFailed { get; init; }
 }
 
 /// <summary>
@@ -55,6 +62,9 @@ public sealed class LlamaRuntimeManager(
     /// <summary>In-flight zip download progress keyed by asset file name (≤ 1 entry — downloads are serialized). Tiến độ tải zip đang chạy theo tên asset (≤ 1 entry — tải được tuần tự hoá).</summary>
     private readonly Dictionary<string, LlmDownloadProgress> _progress = new();
     private readonly object _progressLock = new();
+
+    /// <summary>Set when the last download attempt failed permanently (status reports it so the wizard fails fast). Bật khi lượt tải gần nhất fail vĩnh viễn (status báo để wizard fail nhanh).</summary>
+    private volatile bool _downloadFailed;
 
     // One download at a time: two overlapping llm.runtime.download calls (setup + Settings, or a
     // double fire) would otherwise extract into the same <tag>/ directory and interleave the
@@ -94,7 +104,11 @@ public sealed class LlamaRuntimeManager(
         {
             progress = _progress.Values.FirstOrDefault();
         }
-        return Task.FromResult(new LlmRuntimeStatus(tag, installed, serverPath) { Progress = progress });
+        return Task.FromResult(new LlmRuntimeStatus(tag, installed, serverPath)
+        {
+            Progress = progress,
+            DownloadFailed = _downloadFailed && !installed,
+        });
     }
 
     /// <summary>
@@ -130,6 +144,7 @@ public sealed class LlamaRuntimeManager(
     public async Task DownloadAsync(string flavor, CancellationToken ct)
     {
         _ = FlavorPattern(flavor); // validate before queueing / kiểm tra flavor trước khi xếp hàng
+        _downloadFailed = false; // new attempt clears the previous failure / lượt mới xoá fail cũ
 
         await _downloadGate.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -149,6 +164,24 @@ public sealed class LlamaRuntimeManager(
             }
 
             WriteTag(release.Value.tag);
+        }
+        catch (OperationCanceledException)
+        {
+            throw; // user/timeout cancellation is surfaced by the poll window, not the flag / hủy do cửa sổ poll, không phải flag
+        }
+        catch (Exception ex)
+        {
+            // The RPC caller is fire-and-forget (Task.Run) — without this flag a permanent failure
+            // (no matching release, dead network) would leave the wizard polling its full 60-minute
+            // window ×4 attempts (BA review 2026-11-17). The exception is re-thrown so direct callers
+            // (tests, zip-slip guard) still see it; the flag survives for the polling wizard.
+            // Caller RPC là fire-and-forget (Task.Run) — không có flag này, fail vĩnh viễn (không có
+            // release khớp, mạng chết) khiến wizard poll đủ cửa sổ 60 phút ×4 lượt (review BA
+            // 2026-11-17). Exception được ném lại để caller trực tiếp (test, guard zip-slip) vẫn thấy;
+            // flag giữ lại cho wizard đang poll.
+            _downloadFailed = true;
+            Console.Error.WriteLine($"llm.runtime.download failed for '{flavor}': {ex.Message}");
+            throw;
         }
         finally
         {

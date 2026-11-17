@@ -1440,6 +1440,26 @@ public class SetupCoordinatorTests : IDisposable
     }
 
     [Fact]
+    public async Task LlmRuntimeDownload_FailedFlag_FailsAttemptFast()
+    {
+        // BA review 17-11 (runtime fail âm thầm): status báo downloadFailed ⇒ lượt thử fail NGAY
+        // (vài lần gọi status) thay vì poll đủ cửa sổ 60 phút.
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":["Hy-MT2-1.8B-UD-Q4_K_XL"]}""");
+        _bridge.LlmRuntimeInstalled = false;
+        _bridge.LlmRuntimeDownloadCompletes = false;
+        _bridge.LlmRuntimeDownloadFailed = true; // Core báo fail vĩnh viễn (không có release / mạng chết)
+        var coordinator = NewCoordinator(modelDownloadTimeout: TimeSpan.FromSeconds(30));
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+        // Fail-fast: ít lần gọi status (1/lượt thử × 4) — nếu vẫn poll thì sẽ là hàng chục.
+        Assert.True(_bridge.Calls.Count(c => c.Method == "llm.runtime.status") <= 8,
+            "wizard vẫn poll sau khi status báo downloadFailed");
+        Assert.NotNull(coordinator.Error);
+    }
+
+    [Fact]
     public async Task CpuSwitch_SyncFails_Retry_DoesNotRePromptFlavorSwitch()
     {
         // BA review 17-11 (I4): sau CPU-switch, sync fail → Retry KHÔNG được hỏi lại
@@ -2002,6 +2022,9 @@ public class SetupCoordinatorTests : IDisposable
         /// <summary>When false, a runtime download records the flavor but never completes (dead network). Khi false, lệnh tải runtime ghi flavor nhưng không bao giờ xong (mạng chết).</summary>
         public bool LlmRuntimeDownloadCompletes { get; set; } = true;
 
+        /// <summary>Optional <c>downloadFailed</c> flag the fake includes in <c>llm.runtime.status</c>. Cờ <c>downloadFailed</c> tuỳ chọn fake nhúng vào <c>llm.runtime.status</c>.</summary>
+        public bool LlmRuntimeDownloadFailed { get; set; }
+
         /// <summary>Optional <c>progress</c> object the fake includes in <c>llm.runtime.status</c> (wizard vòng 2 §9). Object <c>progress</c> tuỳ chọn fake nhúng vào <c>llm.runtime.status</c>.</summary>
         public ReTran.Core.Llm.LlmDownloadProgress? LlmRuntimeProgress { get; set; }
 
@@ -2046,6 +2069,7 @@ public class SetupCoordinatorTests : IDisposable
                     ["serverPath"] = LlmRuntimeInstalled
                         ? @"C:\fake\llm\runtime\b7234\llama-server.exe"
                         : null,
+                    ["downloadFailed"] = LlmRuntimeDownloadFailed,
                     ["progress"] = LlmRuntimeProgress is null
                         ? null
                         : new JsonObject
