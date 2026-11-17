@@ -196,7 +196,7 @@ public sealed class SetupCoordinator
     /// <param name="stateFactory">Loads <c>setup.json</c>; defaults to <c>SetupState.Load()</c>. Tests point it at a temp path. Đọc <c>setup.json</c>; mặc định <c>SetupState.Load()</c>. Test trỏ sang path temp.</param>
     /// <param name="fileExists">File-existence probe for uv.exe (Checking + VerifyingFiles); defaults to <see cref="File.Exists"/>. Probe tồn tại file cho uv.exe (Checking + VerifyingFiles); mặc định <see cref="File.Exists"/>.</param>
     /// <param name="countModelEntries">Counts installed models for the Checking checklist; defaults to the real models directory. Đếm model đã cài cho checklist Checking; mặc định là thư mục models thật.</param>
-    /// <param name="modelDirExists">File-system probe for one model's directory under the models cache, used by the rerun reconcile; defaults to <see cref="Directory.Exists"/>. Probe file-system cho thư mục của một model trong cache model, dùng bởi reconcile khi chạy lại; mặc định <see cref="Directory.Exists"/>.</param>
+    /// <param name="modelDirExists">Installed-probe for one model directory under the models cache, used by the rerun reconcile; defaults to <see cref="IsModelDirInstalled"/> (the sidecar's strict rule — non-empty dir, no <c>.partial</c> marker). Probe "đã cài" cho thư mục của một model trong cache model, dùng bởi reconcile khi chạy lại; mặc định <see cref="IsModelDirInstalled"/> (luật nghiêm của sidecar — thư mục không rỗng, không có marker <c>.partial</c>).</param>
     /// <param name="modelPollInterval">Delay between <c>ocr.models.list</c> polls while models download; default 2 s. Khoảng cách giữa các lần poll <c>ocr.models.list</c> khi đang tải model; mặc định 2 s.</param>
     /// <param name="modelDownloadTimeout">Total window per download attempt; default 60 min. Cửa sổ tổng cho mỗi lượt tải; mặc định 60 phút.</param>
     /// <param name="logger">DI logger, or <see langword="null"/> to log nothing. Logger DI, hoặc <see langword="null"/> để không ghi log.</param>
@@ -235,7 +235,7 @@ public sealed class SetupCoordinator
         _stateFactory = stateFactory ?? (static () => SetupState.Load());
         _fileExists = fileExists ?? File.Exists;
         _countModelEntries = countModelEntries;
-        _modelDirExists = modelDirExists ?? Directory.Exists;
+        _modelDirExists = modelDirExists ?? IsModelDirInstalled;
         _modelPollInterval = modelPollInterval ?? DefaultModelPollInterval;
         _modelDownloadTimeout = modelDownloadTimeout ?? DefaultModelDownloadTimeout;
         _logger = logger;
@@ -388,16 +388,20 @@ public sealed class SetupCoordinator
     /// Starts the wizard: re-runs the system check (it is pure and cheap, and the flavor must follow
     /// the CURRENT hardware), pauses at the first unanswered pre-pipeline question (det/rec models →
     /// languages → LLM), then runs the pipeline from the first not-done step. A completed
-    /// state short-circuits straight to <see cref="SetupStep.Done"/> unless <paramref name="force"/> is
-    /// set (the "re-run setup" path — done steps are still skipped, so an unchanged machine passes
-    /// through in seconds).
+    /// state short-circuits straight to <see cref="SetupStep.Done"/>. With <paramref name="force"/>
+    /// (the Settings "re-run setup" repair path) the run RESTARTS FROM STEP 1 instead: the v2 answers
+    /// and every step marker are cleared (and saved immediately, so a crash mid-rerun leaves a
+    /// consistent "rerunning" state), all three question screens are asked again, and the pipeline
+    /// re-verifies — while genuinely installed models are still not re-downloaded.
     /// Khởi động wizard: chạy lại check system (thuần và rẻ, flavor phải theo phần cứng HIỆN TẠI), dừng
     /// ở câu hỏi pre-pipeline đầu tiên chưa được trả lời (model det/rec → Ngôn ngữ → LLM), rồi
     /// chạy pipeline từ bước chưa done đầu tiên. State đã xong thì nhảy thẳng tới
-    /// <see cref="SetupStep.Done"/> trừ khi đặt <paramref name="force"/> (đường "chạy lại setup" — bước
-    /// đã done vẫn được skip, nên máy không đổi gì sẽ đi qua trong vài giây).
+    /// <see cref="SetupStep.Done"/>. Với <paramref name="force"/> (đường "chạy lại setup" trong
+    /// Settings — để sửa lỗi) lượt chạy CHẠY LẠI TỪ BƯỚC 1: xoá câu trả lời v2 và mọi marker bước
+    /// (ghi file ngay, để crash giữa rerun vẫn là state "đang rerun" nhất quán), hỏi lại cả 3 màn,
+    /// pipeline xác minh lại — còn model ĐÃ CÀI THẬT vẫn không bị tải lại.
     /// </summary>
-    /// <param name="force">Bypasses the <c>IsComplete</c> short-circuit. Bỏ qua nhánh tắt <c>IsComplete</c>.</param>
+    /// <param name="force">Bypasses the <c>IsComplete</c> short-circuit and restarts the wizard from step 1 (answers and markers cleared — the repair rerun). Bỏ qua nhánh tắt <c>IsComplete</c> và chạy lại wizard từ bước 1 (xoá câu trả lời và marker — lượt rerun sửa lỗi).</param>
     /// <param name="ct">Cancellation token; cancelling aborts the run (state is left where it was). Token hủy; hủy sẽ dừng lượt chạy (state giữ nguyên ở chỗ nó đang ở).</param>
     public async Task StartAsync(bool force = false, CancellationToken ct = default)
     {
@@ -417,6 +421,35 @@ public sealed class SetupCoordinator
             }
 
             _state = _stateFactory();
+            if (force)
+            {
+                // The repair rerun restarts from step 1: clear the v2 answers (all three question
+                // screens are asked again) and every step marker (the pipeline re-verifies), then
+                // persist immediately — a crash mid-rerun must leave "rerunning", never the old
+                // "complete" state. What stays: the model download step still skips genuinely
+                // installed models (its bridge catalog is the truth), and Syncing still skips on a
+                // flavor match, so an unchanged machine only pays the questions + re-verification.
+                // Lượt rerun sửa lỗi chạy lại từ bước 1: xoá câu trả lời v2 (cả 3 màn được hỏi lại)
+                // và mọi marker bước (pipeline xác minh lại), rồi lưu NGAY — crash giữa rerun phải
+                // để lại state "đang rerun", không bao giờ là "đã xong" cũ. Cái giữ nguyên: bước tải
+                // vẫn bỏ qua model đã cài THẬT (catalog của bridge là sự thật), Syncing vẫn skip khi
+                // khớp flavor — máy không đổi chỉ trả giá bằng phần hỏi lại + xác minh lại.
+                _state = _state with
+                {
+                    Dets = null,
+                    ActiveDet = null,
+                    Recs = null,
+                    ActiveRec = null,
+                    Langs = null,
+                    ActiveLang = null,
+                    LlmModels = null,
+                    ActiveLlm = null,
+                    Steps = null,
+                    IsComplete = false,
+                };
+                _state.Save();
+            }
+
             if (!force && _state.IsComplete)
             {
                 Step = SetupStep.Done;
@@ -1375,13 +1408,33 @@ public sealed class SetupCoordinator
     }
 
     /// <summary>
-    /// Whether the named model's directory exists under the models cache — a pure file-system check
-    /// that also runs before the sidecar is alive.
-    /// Thư mục của model tên này có nằm trong cache model không — kiểm tra file-system thuần, chạy
-    /// được cả trước khi sidecar sống.
+    /// Whether the named model's directory exists under the models cache - a pure file-system check
+    /// that also runs before the sidecar is alive. The probe is the STRICT sidecar rule
+    /// (<see cref="IsModelDirInstalled"/>), not a bare directory check: a half-downloaded model must
+    /// never count as installed, or a repair rerun would skip re-downloading it.
+    /// Thư mục của model tên này có nằm trong cache model không - kiểm tra file-system thuần, chạy
+    /// được cả trước khi sidecar sống. Probe là luật NGHIÊM của sidecar
+    /// (<see cref="IsModelDirInstalled"/>), không phải kiểm tra thư mục trần: model tải dở tuyệt đối
+    /// không được coi là đã cài, nếu không lượt sửa lỗi sẽ bỏ qua không tải lại.
     /// </summary>
     private bool ModelInstalled(string modelName) =>
         _modelDirExists(Path.Combine(SetupPaths.ModelsDir, SetupState.OfficialModelsSubdir, modelName));
+
+    /// <summary>
+    /// The sidecar's installed rule mirrored (<c>ocr/models.py</c>): the model directory exists, is
+    /// non-empty, and no <c>&lt;name&gt;.partial</c> marker sits next to it. An interrupted download
+    /// leaves both the half-filled directory and the marker, so a bare <c>Directory.Exists</c> counted
+    /// a half-downloaded model as installed and the repair rerun skipped it (BA report 2026-11-17).
+    /// Luật "đã cài" của sidecar được mirror (<c>ocr/models.py</c>): thư mục model tồn tại, không
+    /// rỗng, và không có marker <c>&lt;tên&gt;.partial</c> cạnh nó. Lượt tải dang dở để lại cả thư
+    /// mục nửa vời lẫn marker, nên <c>Directory.Exists</c> trần đã từng coi model tải dở là đã cài và
+    /// lượt sửa lỗi bỏ qua nó (báo cáo BA 2026-11-17).
+    /// </summary>
+    /// <param name="modelDir">Full path of the model directory under <c>official_models</c>. Đường dẫn đầy đủ của thư mục model trong <c>official_models</c>.</param>
+    public static bool IsModelDirInstalled(string modelDir) =>
+        Directory.Exists(modelDir)
+        && Directory.EnumerateFileSystemEntries(modelDir).Any()
+        && !File.Exists(modelDir + ".partial");
 
     /// <summary>
     /// Light consistency pass run at the end of Checking and after every saved answer: when a needed

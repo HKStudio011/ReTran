@@ -416,8 +416,9 @@
 
 @if (Setup.IsComplete || Setup.SkippedForSession)
 {
-    @* "Chạy lại setup" (smoke #8): hiện khi wizard đã xong — bước đã done được skip nên máy không đổi gì
-       sẽ hoàn tất gần tức thì — hoặc user đã "Bỏ qua thiết lập" cho phiên này (spec 2026-11-13, đây là
+    @* "Chạy lại setup" (smoke #8 / BA 17-11): hiện khi wizard đã xong — đây là đường SỬA LỖI chạy lại
+       TỪ BƯỚC 1: xoá câu trả lời + marker, hỏi lại cả 3 màn, pipeline xác minh lại; model đã cài thật
+       vẫn không tải lại. Hoặc user đã "Bỏ qua thiết lập" cho phiên này (spec 2026-11-13, đây là
        đường quay lại setup trong cùng phiên). Khi wizard chưa xong và chưa skip, modal che màn hình. *@
     <section class="rt-sect">
         <h3>@(L["setup.section"])</h3>
@@ -1393,7 +1394,8 @@
         _ = Coordinator.StartUpdateAsync(release);
     }
 
-    // "Chạy lại setup": force wizard — bước đã done được skip, mọi thứ sẵn sàng thì đi qua trong vài giây.
+    // "Chạy lại setup": force wizard = SỬA LỖI chạy lại từ bước 1 (xoá answers + marker, hỏi lại cả
+    // 3 màn, pipeline xác minh lại; model đã cài thật vẫn không tải lại — spec BA 17-11).
     private bool _rerunStarted;
 
     private void RerunSetup()

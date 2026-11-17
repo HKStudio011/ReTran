@@ -1333,6 +1333,71 @@ public class SetupCoordinatorTests : IDisposable
         Assert.Empty(_bridge.Calls);
     }
 
+    // ── "Chạy lại setup" = chạy lại TỪ BƯỚC 1 (BA 17-11 chiều: rerun chỉ-đi-tiếp-bước-thiếu vô nghĩa khi dùng để sửa lỗi) ──
+
+    [Fact]
+    public async Task Rerun_ForceReset_ClearsAnswersAndMarkers_ReasksFromFirstQuestion()
+    {
+        // Máy đã hoàn tất v2: bấm "Chạy lại setup" phải CHẠY LẠI TỪ ĐẦU — xoá câu trả lời + mọi
+        // marker, hỏi lại cả 3 màn (det/rec trước), chạy lại pipeline; model ĐÃ CÀI THẬT thì bước
+        // tải vẫn bỏ qua (không tải lại vô ích).
+        WriteSetupJson("""
+            {
+              "flavor": "gpu",
+              "language": "vi",
+              "dets": ["PP-OCRv6_small_det"],
+              "activeDet": "PP-OCRv6_small_det",
+              "recs": ["PP-OCRv6_small_rec"],
+              "activeRec": "PP-OCRv6_small_rec",
+              "langs": [],
+              "llmModels": [],
+              "isComplete": true,
+              "steps": {
+                "checking": "done",
+                "choosingocrmodels": "done",
+                "choosinglanguages": "done",
+                "choosingllmmodels": "done",
+                "verifyingfiles": "done",
+                "syncing": "done",
+                "verifyingsidecar": "done",
+                "downloadingllmruntime": "done",
+                "downloadingmodels": "done",
+                "applying": "done"
+              }
+            }
+            """);
+        _bridge.Installed.Add(FakeCoreBridge.DetModel);
+        _bridge.Installed.Add(FakeCoreBridge.RecModel);
+        var coordinator = NewCoordinator();
+
+        await coordinator.StartAsync(force: true, ct: TestContext.Current.CancellationToken);
+
+        // Hỏi lại từ màn hỏi ĐẦU TIÊN; file đã reset (crash giữa rerun vẫn là state "đang rerun").
+        Assert.Equal(SetupStep.ChoosingOcrModels, coordinator.Step);
+        SetupState reset = ReadSetupJson();
+        Assert.Null(reset.Dets);
+        Assert.Null(reset.Langs);
+        Assert.Null(reset.LlmModels);
+        Assert.False(reset.IsComplete);
+        // Chỉ marker Checking của LƯỢT NÀY tồn tại — mọi marker pipeline cũ đã bị xoá.
+        Assert.Equal("done", reset.Steps!["checking"]);
+        Assert.False(reset.Steps.ContainsKey("syncing"));
+        Assert.False(reset.Steps.ContainsKey("downloadingmodels"));
+        Assert.False(reset.Steps.ContainsKey("choosingocrmodels"));
+
+        // Trả lời lại cả 3 màn → chạy lại pipeline → Done.
+        await coordinator.ContinueWithOcrModelsAsync([FakeCoreBridge.DetModel], FakeCoreBridge.DetModel,
+            [FakeCoreBridge.RecModel], FakeCoreBridge.RecModel, TestContext.Current.CancellationToken);
+        await coordinator.ContinueWithLanguagesAsync([], null, TestContext.Current.CancellationToken);
+        await coordinator.ContinueWithLlmModelsAsync([], null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        // Pipeline chạy LẠI (marker đã xoá): sidecar được ping/verify lại...
+        Assert.Contains(_bridge.Calls, c => c.Method == "sidecar.ping");
+        // ...nhưng model ĐÃ CÀI THẬT thì không tải lại.
+        Assert.DoesNotContain(_bridge.Calls, c => c.Method == "ocr.models.download");
+    }
+
     // ── khởi tạo Step từ state đã lưu (micro-task 14c) ────────────────────────────────────────────
 
     [Fact]
@@ -1457,10 +1522,12 @@ public class SetupCoordinatorTests : IDisposable
         release.SetResult();
         await startTask.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
-        // The run finished (every step was already done → straight back to Done): IsRunning is false.
-        // Lượt chạy kết thúc (mọi bước đã done → quay thẳng về Done): IsRunning về false.
-        Assert.Equal(SetupStep.Done, coordinator.Step);
-        Assert.True(coordinator.IsComplete);
+        // The run finished: a forced rerun now RESTARTS FROM STEP 1 (answers + markers cleared), so it
+        // pauses at the first question instead of passing straight back to Done — IsRunning is false.
+        // Lượt chạy kết thúc: rerun có force giờ CHẠY LẠI TỪ BƯỚC 1 (xoá answers + marker), nên nó
+        // dừng ở câu hỏi đầu tiên thay vì quay thẳng Done — IsRunning về false.
+        Assert.Equal(SetupStep.ChoosingOcrModels, coordinator.Step);
+        Assert.False(coordinator.IsComplete);
         Assert.False(coordinator.IsRunning);
     }
 
