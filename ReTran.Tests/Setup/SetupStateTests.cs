@@ -93,6 +93,14 @@ public class SetupStateNeedsSetupTests : IDisposable
             Flavor = "gpu",
             Language = "vi",
             IsComplete = true,
+            // Hợp đồng v2: isComplete=true đòi hỏi mọi câu trả lời v2 đã có (màn trống = [], không
+            // phải null) — NormalizeCompletion hạ cờ của file thiếu answer (test riêng phía dưới).
+            Dets = ["PP-OCRv6_small_det"],
+            ActiveDet = "PP-OCRv6_small_det",
+            Recs = ["PP-OCRv6_small_rec"],
+            ActiveRec = "PP-OCRv6_small_rec",
+            Langs = [],
+            LlmModels = [],
             Steps = new Dictionary<string, string> { ["syncing"] = "done" },
         };
         saved.Save();
@@ -313,6 +321,57 @@ public class SetupStateNeedsSetupTests : IDisposable
         Assert.Null(state.ActiveLang);
         Assert.Null(state.LlmModels);
         Assert.Null(state.ActiveLlm);
+    }
+
+    [Fact]
+    public void LegacyCompleteFlag_MissingV2Answers_LoadsIncomplete()
+    {
+        // File 14-11 hoàn tất theo wizard CŨ (isComplete=true, không tiers/dets): wizard v2 còn phải
+        // hỏi det/rec + Ngôn ngữ + LLM — cờ cũ phải hạ xuống để wizard không bị ẩn vĩnh viễn
+        // (constructor map state hoàn tất → Done). Lỗi thật 2026-11-17: "Chạy lại setup" xong det/rec,
+        // Reload app → wizard biến mất dù langs/llmModels null.
+        string json = Temp("setup-old-v5.json");
+        File.WriteAllText(json, """
+            {"flavor":"gpu","language":"auto","isComplete":true,"steps":{"checking":"done","syncing":"done","applying":"done"}}
+            """);
+
+        SetupState state = SetupState.Load(json);
+
+        Assert.False(state.IsComplete);
+        Assert.Null(state.Dets);
+        Assert.Null(state.Langs);
+        Assert.Null(state.LlmModels);
+    }
+
+    [Fact]
+    public void Migration_16_11_TiersFile_DropsCompleteFlag()
+    {
+        // File 16-11 hoàn tất: migration map xong vẫn còn thiếu bước 4 (llmModels null) → isComplete
+        // phải là false để wizard hỏi nốt; Done sẽ tự đặt lại.
+        string json = Temp("setup-old-v6.json");
+        File.WriteAllText(json, """
+            {"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"isComplete":true}
+            """);
+
+        SetupState state = SetupState.Load(json);
+
+        Assert.False(state.IsComplete);
+        Assert.Equal(["PP-OCRv6_small_det"], state.Dets);
+        Assert.Null(state.LlmModels);
+    }
+
+    [Fact]
+    public void V2_AllAnswered_KeepsCompleteFlag()
+    {
+        // State v2 trả lời ĐỦ (trả lời trống = [], không phải null) → cờ hoàn tất giữ nguyên.
+        string json = Temp("setup-v2-complete.json");
+        File.WriteAllText(json, """
+            {"flavor":"gpu","language":"vi","dets":["PP-OCRv6_small_det"],"activeDet":"PP-OCRv6_small_det","recs":["PP-OCRv6_small_rec"],"activeRec":"PP-OCRv6_small_rec","langs":[],"llmModels":[],"isComplete":true,"steps":{"checking":"done","choosingocrmodels":"done","choosinglanguages":"done","choosingllmmodels":"done","verifyingfiles":"done","syncing":"done","verifyingsidecar":"done","downloadingllmruntime":"done","downloadingmodels":"done","applying":"done"}}
+            """);
+
+        SetupState state = SetupState.Load(json);
+
+        Assert.True(state.IsComplete);
     }
 
     /// <summary>

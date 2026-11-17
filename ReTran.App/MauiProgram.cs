@@ -29,6 +29,16 @@ namespace ReTran_App
 
             builder.Services.AddMauiBlazorWebView();
 
+            // File log (mọi build): build Release không có DevTools/TraceLogger — khi Blazor ném
+            // exception render không xử lý, user chỉ thấy banner chung chung ("An unhandled error
+            // has occurred") mà không có stack ở đâu cả (đợt 17-11). Provider này ghi Warning trở
+            // lên vào %LOCALAPPDATA%\ReTran\logs\app-<ngày>.log, gồm cả stack đầy đủ.
+            // File log (all builds): a Release build has neither DevTools nor TraceLogger — when
+            // Blazor throws an unhandled render exception the user sees only the generic banner
+            // ("An unhandled error has occurred") with no stack anywhere (2026-11-17). This provider
+            // appends Warning-and-above (stack included) to %LOCALAPPDATA%\ReTran\logs\app-<date>.log.
+            builder.Logging.AddProvider(new FileLoggerProvider());
+
             builder.Services.AddSingleton<JsInteropService>();
             builder.Services.AddSingleton<I18nService>();
             builder.Services.AddSingleton<ToastService>();

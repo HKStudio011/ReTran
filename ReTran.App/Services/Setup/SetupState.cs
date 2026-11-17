@@ -96,7 +96,7 @@ public sealed record SetupState(
             if (!File.Exists(target)) return new SetupState { BoundPath = target };
             SetupState? state =
                 JsonSerializer.Deserialize<SetupState>(File.ReadAllText(target), SerializerOptions);
-            return Migrate((state ?? new SetupState()) with { BoundPath = target });
+            return NormalizeCompletion(Migrate((state ?? new SetupState()) with { BoundPath = target }));
         }
         catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
         {
@@ -110,6 +110,23 @@ public sealed record SetupState(
     /// Migration MỘT LẦN trong bộ nhớ cho file wizard 16-11 (token cỡ + mã ngôn ngữ + ngôn ngữ
     /// chính) sang field v2 (tên model); file trên đĩa được ghi lại ở lần Save kế tiếp.
     /// </summary>
+    /// <summary>
+    /// Enforces the v2 completeness contract on load: <see cref="IsComplete"/> may only stay true when
+    /// every v2 answer exists (det/rec, languages, LLM — an answered-empty list is non-null). Files
+    /// written by pre-v2 builds can carry a stale <c>isComplete: true</c> while v2 questions remain,
+    /// which would map the constructor to Done and hide the wizard forever; such a file loads as
+    /// incomplete so the wizard re-asks what is missing and re-sets the flag itself at Done.
+    /// Áp dụng hợp đồng hoàn tất v2 khi đọc: <see cref="IsComplete"/> chỉ được giữ true khi mọi câu
+    /// trả lời v2 đều có (det/rec, Ngôn ngữ, LLM — trả lời trống là list rỗng, không phải null). File
+    /// do bản trước v2 ghi có thể mang <c>isComplete: true</c> cũ trong khi vẫn còn câu hỏi v2, khiến
+    /// constructor map sang Done và ẩn wizard vĩnh viễn; file như vậy đọc thành chưa hoàn tất để
+    /// wizard hỏi lại phần thiếu và tự đặt lại cờ ở Done.
+    /// </summary>
+    private static SetupState NormalizeCompletion(SetupState state) =>
+        state.IsComplete && (state.Dets is null || state.Langs is null || state.LlmModels is null)
+            ? state with { IsComplete = false }
+            : state;
+
     private static SetupState Migrate(SetupState state)
     {
         if (state.Dets is not null || state.Tiers is null) return state;

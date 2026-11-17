@@ -1264,10 +1264,53 @@ public class SetupCoordinatorTests : IDisposable
     [Fact]
     public async Task StartAsync_AlreadyComplete_SkipsToDoneWithoutWork()
     {
+        // State v2 hoàn chỉnh (mọi câu trả lời đã có — trả lời trống là [], không phải null).
         WriteSetupJson("""
             {
               "flavor": "gpu",
               "language": "vi",
+              "dets": ["PP-OCRv6_small_det"],
+              "activeDet": "PP-OCRv6_small_det",
+              "recs": ["PP-OCRv6_small_rec"],
+              "activeRec": "PP-OCRv6_small_rec",
+              "langs": [],
+              "llmModels": [],
+              "isComplete": true,
+              "steps": {
+                "checking": "done",
+                "choosingocrmodels": "done",
+                "choosinglanguages": "done",
+                "choosingllmmodels": "done",
+                "verifyingfiles": "done",
+                "syncing": "done",
+                "verifyingsidecar": "done",
+                "downloadingllmruntime": "done",
+                "downloadingmodels": "done",
+                "applying": "done"
+              }
+            }
+            """);
+        var coordinator = NewCoordinator();
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.True(coordinator.IsComplete);
+        Assert.Empty(_uvFake.SyncCalls);
+        Assert.Empty(_bridge.Calls);
+    }
+
+    [Fact]
+    public async Task StartAsync_LegacyCompleteState_RunsWizardForV2Questions()
+    {
+        // File 14-11 hoàn tất theo wizard CŨ (isComplete=true nhưng không có câu trả lời v2): lượt
+        // StartAsync thường phải CHẠY (không short-circuit Done) và dừng ở câu hỏi v2 đầu tiên.
+        // Bug thật 2026-11-17: cờ cũ không bị hạ → Reload app ẩn wizard vĩnh viễn dù langs/llmModels
+        // chưa từng được hỏi (SetupState.NormalizeCompletion).
+        WriteSetupJson("""
+            {
+              "flavor": "gpu",
+              "language": "auto",
               "isComplete": true,
               "steps": {
                 "checking": "done",
@@ -1284,9 +1327,9 @@ public class SetupCoordinatorTests : IDisposable
 
         await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
 
-        Assert.Equal(SetupStep.Done, coordinator.Step);
-        Assert.True(coordinator.IsComplete);
-        Assert.Empty(_uvFake.SyncCalls);
+        Assert.Equal(SetupStep.ChoosingOcrModels, coordinator.Step);
+        Assert.False(coordinator.IsComplete);
+        Assert.Empty(_uvFake.SyncCalls); // chưa đụng pipeline — chỉ dừng hỏi
         Assert.Empty(_bridge.Calls);
     }
 
@@ -1305,13 +1348,22 @@ public class SetupCoordinatorTests : IDisposable
             {
               "flavor": "gpu",
               "language": "vi",
+              "dets": ["PP-OCRv6_small_det"],
+              "activeDet": "PP-OCRv6_small_det",
+              "recs": ["PP-OCRv6_small_rec"],
+              "activeRec": "PP-OCRv6_small_rec",
+              "langs": [],
+              "llmModels": [],
               "isComplete": true,
               "steps": {
                 "checking": "done",
-                "choosinglanguage": "done",
+                "choosingocrmodels": "done",
+                "choosinglanguages": "done",
+                "choosingllmmodels": "done",
                 "verifyingfiles": "done",
                 "syncing": "done",
                 "verifyingsidecar": "done",
+                "downloadingllmruntime": "done",
                 "downloadingmodels": "done",
                 "applying": "done"
               }
