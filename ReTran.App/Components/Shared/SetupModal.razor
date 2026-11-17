@@ -68,8 +68,12 @@
        z-index nó sẽ phủ lên modal — nút "Chạy lại setup" phải để wizard hiện trên sheet. Toasts (z-70)
        vẫn nổi trên cùng. *@
     <div class="fixed inset-0 flex items-center justify-center bg-black/50 p-4" style="z-index: 60;">
+        @* max-height + overflow-y trên KHUNG dialog (BA 17-11: màn bước 4 có 2 nhóm × 6 dòng + hint +
+           tổng + nút — cao hơn cửa sổ, nút "Tiếp tục" trôi khỏi màn): nội dung quá cao thì cả khung
+           cuộn được; các danh sách bên trong vẫn giữ scroll riêng 300px của chúng. *@
         <div role="dialog" aria-modal="true" aria-label="@ModalTitle"
-             class="rt-setup-modal w-full max-w-lg rounded-lg border border-surface bg-background p-4 shadow-xl">
+             class="rt-setup-modal w-full max-w-lg rounded-lg border border-surface bg-background p-4 shadow-xl"
+             style="max-height: calc(100vh - 2rem); overflow-y: auto;">
             <h2 class="mb-3 text-base font-semibold text-surface">@ModalTitle</h2>
 
             @switch (Coordinator.Step)
