@@ -899,8 +899,13 @@ public class PipelineControllerTests : IDisposable
         {
             "llm.runtime.status" => new JsonObject
             {
-                ["tag"] = "b7123", ["installed"] = true,
+                ["tag"] = "b7123", ["installed"] = false,
                 ["serverPath"] = @"C:\llm\runtime\b7123\llama-server.exe",
+                ["downloading"] = true, ["downloadFailed"] = false,
+                ["progress"] = new JsonObject
+                {
+                    ["receivedBytes"] = 100L, ["totalBytes"] = 400L, ["bytesPerSec"] = 50.0,
+                },
             },
             "llm.runtime.check" => new JsonObject { ["current"] = "b7123", ["latest"] = "b7250" },
             _ => null,
@@ -909,17 +914,47 @@ public class PipelineControllerTests : IDisposable
 
         LlmRuntimeStatusInfo status = await controller.GetLlmRuntimeStatusAsync(CancellationToken.None);
         Assert.Equal("b7123", status.Tag);
-        Assert.True(status.Installed);
+        Assert.False(status.Installed);
         Assert.Equal(@"C:\llm\runtime\b7123\llama-server.exe", status.ServerPath);
+        Assert.True(status.Downloading);
+        Assert.False(status.DownloadFailed);
+        Assert.NotNull(status.Progress);
+        Assert.Equal(100, status.Progress!.ReceivedBytes);
+        Assert.Equal(400, status.Progress.TotalBytes);
+        Assert.Equal(50.0, status.Progress.BytesPerSec);
 
-        LlmRuntimeCheckInfo check = await controller.CheckLlmRuntimeAsync(CancellationToken.None);
+        LlmRuntimeCheckInfo check = await controller.CheckLlmRuntimeAsync("cpu", CancellationToken.None);
         Assert.Equal("b7123", check.Current);
         Assert.Equal("b7250", check.Latest);
+        (string Method, JsonNode? Params) checkCall = peer.Calls.Single(c => c.Method == "llm.runtime.check");
+        Assert.Equal("cpu", checkCall.Params!["flavor"]!.GetValue<string>());
 
         await controller.DownloadLlmRuntimeAsync("cpu", CancellationToken.None);
         (string method, JsonNode? @params) = peer.Calls.Last();
         Assert.Equal("llm.runtime.download", method);
         Assert.Equal("cpu", @params!["flavor"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task LlmRuntimeStatus_MapsFailedUpdateWithPreviousInstall()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        peer.Reply = method => method == "llm.runtime.status"
+            ? new JsonObject
+            {
+                ["tag"] = "b7123", ["installed"] = true,
+                ["serverPath"] = @"C:\llm\runtime\b7123\llama-server.exe",
+                ["downloading"] = false, ["downloadFailed"] = true,
+            }
+            : null;
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        LlmRuntimeStatusInfo status = await controller.GetLlmRuntimeStatusAsync(CancellationToken.None);
+
+        Assert.True(status.Installed);
+        Assert.False(status.Downloading);
+        Assert.True(status.DownloadFailed);
+        Assert.Null(status.Progress);
     }
 
     [Fact]

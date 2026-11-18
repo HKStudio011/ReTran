@@ -116,7 +116,17 @@ public sealed record LlmModelInfo(
 /// <param name="Tag">Extracted build tag, or <see langword="null"/>. Tag bản build đã giải nén, hoặc <see langword="null"/>.</param>
 /// <param name="Installed">The server binary exists. Binary server tồn tại.</param>
 /// <param name="ServerPath">Path of <c>llama-server.exe</c>, or <see langword="null"/> when no tag. Đường dẫn <c>llama-server.exe</c>, hoặc <see langword="null"/> khi chưa có tag.</param>
-public sealed record LlmRuntimeStatusInfo(string? Tag, bool Installed, string? ServerPath);
+public sealed record LlmRuntimeStatusInfo(string? Tag, bool Installed, string? ServerPath)
+{
+    /// <summary>In-flight zip download progress, or <see langword="null"/>. Tiến độ zip đang tải, hoặc <see langword="null"/>.</summary>
+    public ReTran_App.Services.Setup.DownloadProgress? Progress { get; init; }
+
+    /// <summary>The latest download/update attempt failed. Lượt tải/cập nhật gần nhất thất bại.</summary>
+    public bool DownloadFailed { get; init; }
+
+    /// <summary>A download/update is in flight. Một lượt tải/cập nhật đang chạy.</summary>
+    public bool Downloading { get; init; }
+}
 
 /// <summary>
 /// Result of <c>llm.runtime.check</c>: the installed tag and the newest downloadable one.
@@ -604,7 +614,12 @@ public sealed class PipelineController : IPipelineControl
         string? tag = result is JsonObject obj ? ReadNullableString(obj, "tag") : null;
         bool installed = result is JsonObject o2 && ReadBool(o2, "installed");
         string? serverPath = result is JsonObject o3 ? ReadNullableString(o3, "serverPath") : null;
-        return new LlmRuntimeStatusInfo(tag, installed, serverPath);
+        return new LlmRuntimeStatusInfo(tag, installed, serverPath)
+        {
+            Progress = result is JsonObject o4 ? ReadProgress(o4) : null,
+            DownloadFailed = result is JsonObject o5 && ReadBool(o5, "downloadFailed"),
+            Downloading = result is JsonObject o6 && ReadBool(o6, "downloading"),
+        };
     }
 
     /// <summary>
@@ -612,13 +627,16 @@ public sealed class PipelineController : IPipelineControl
     /// <c>llm.runtime.check</c>. So sánh runtime llama.cpp đã cài với asset release mới nhất trên
     /// GitHub qua <c>llm.runtime.check</c>.
     /// </summary>
+    /// <param name="flavor"><c>cuda</c> or <c>cpu</c>. <c>cuda</c> hoặc <c>cpu</c>.</param>
     /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
     /// <returns>Installed and latest tags. Tag đã cài và tag mới nhất.</returns>
-    public async Task<LlmRuntimeCheckInfo> CheckLlmRuntimeAsync(CancellationToken ct)
+    /// <exception cref="RpcException">Propagated from Core for an unknown flavor. Đẩy ra từ Core khi flavor lạ.</exception>
+    public async Task<LlmRuntimeCheckInfo> CheckLlmRuntimeAsync(string flavor, CancellationToken ct)
     {
         await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
         EnsureHandlersWired();
-        JsonNode? result = await _peer.CallAsync("llm.runtime.check", null, ct).ConfigureAwait(false);
+        JsonNode? result = await _peer.CallAsync("llm.runtime.check",
+            new JsonObject { ["flavor"] = flavor }, ct).ConfigureAwait(false);
         string? current = result is JsonObject obj ? ReadNullableString(obj, "current") : null;
         string? latest = result is JsonObject o2 ? ReadNullableString(o2, "latest") : null;
         return new LlmRuntimeCheckInfo(current, latest);

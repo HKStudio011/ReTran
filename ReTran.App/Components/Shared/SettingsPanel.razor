@@ -294,10 +294,10 @@
         </div>
         <div class="rt-field-row" style="flex-wrap: wrap; gap: 10px; margin-bottom: 6px;">
             <button type="button" class="rt-btn rt-mini" disabled="@_llmRuntimeBusy" @onclick="CheckLlmRuntimeAsync">@(L["deck.llm.runtime.check"])</button>
-            <button type="button" class="rt-btn rt-mini" disabled="@_llmRuntimeBusy" @onclick="() => DownloadLlmRuntimeAsync(isUpdate: false)">@(L["deck.llm.runtime.download"])</button>
+            <button type="button" class="rt-btn rt-mini" disabled="@_llmRuntimeBusy" @onclick="DownloadLlmRuntimeAsync">@(L["deck.llm.runtime.download"])</button>
             @if (LlmUpdateAvailable)
             {
-                <button type="button" class="rt-btn rt-btn-primary rt-mini" disabled="@_llmRuntimeBusy" @onclick="() => DownloadLlmRuntimeAsync(isUpdate: true)">@(L.Fmt("deck.llm.runtime.update", _llmRuntimeCheck!.Latest!))</button>
+                <button type="button" class="rt-btn rt-btn-primary rt-mini" disabled="@_llmRuntimeBusy" @onclick="DownloadLlmRuntimeAsync">@(L.Fmt("deck.llm.runtime.update", _llmRuntimeCheck!.Latest!))</button>
             }
         </div>
         <p class="rt-hint" style="margin-bottom: 4px;">@LlmRuntimeText</p>
@@ -1115,6 +1115,8 @@
         get
         {
             if (_llmRuntime is null) return L["deck.llm.loading"];
+            if (_llmRuntime.DownloadFailed) return L["deck.llm.runtime.downloadFailed"];
+            if (_llmRuntime.Downloading) return L["deck.llm.runtime.downloading"];
             if (!_llmRuntime.Installed) return L["deck.llm.runtime.notInstalled"];
             string text = L.Fmt("deck.llm.runtime.installed", _llmRuntime.Tag ?? "?");
             if (_llmRuntimeCheck?.Latest is { } latest
@@ -1249,7 +1251,7 @@
         _llmRuntimeBusy = true;
         try
         {
-            _llmRuntimeCheck = await Pipeline.CheckLlmRuntimeAsync(CancellationToken.None);
+            _llmRuntimeCheck = await Pipeline.CheckLlmRuntimeAsync(_llmFlavor, CancellationToken.None);
             await LoadLlmRuntimeAsync();
             if (_llmRuntimeCheck.Latest is not { } latest)
             {
@@ -1275,33 +1277,35 @@
         }
     }
 
-    // Tải runtime (đặt mới hoặc cập nhật) rồi poll trạng thái tới khi cài xong.
-    private async Task DownloadLlmRuntimeAsync(bool isUpdate)
+    // Tải runtime (đặt mới/cập nhật/sửa cùng tag) rồi poll trạng thái thật của lượt tải.
+    private async Task DownloadLlmRuntimeAsync()
     {
         if (_llmRuntimeBusy) return;
         _llmRuntimeBusy = true;
         try
         {
-            string? previousTag = _llmRuntime?.Tag;
             await Pipeline.DownloadLlmRuntimeAsync(_llmFlavor, CancellationToken.None);
             Toast.Show(L.Fmt("deck.llm.runtime.downloadStarted", L["deck.llm.runtime.flavor." + _llmFlavor]));
-            // Tải ngầm phía Core — poll: cài mới xong khi Installed, cập nhật xong khi tag đổi.
             for (int i = 0; i < LlmRuntimePollAttempts; i++)
             {
                 await Task.Delay(LlmRuntimePollInterval);
                 if (_disposed) return;
                 _llmRuntime = await Pipeline.GetLlmRuntimeStatusAsync(CancellationToken.None);
                 StateHasChanged();
-                bool complete = _llmRuntime.Installed
-                    && (previousTag is null
-                        || !string.Equals(_llmRuntime.Tag, previousTag, StringComparison.Ordinal));
-                if (complete)
+                switch (LlmRuntimePoll.Evaluate(_llmRuntime))
                 {
-                    Toast.Show(L["deck.llm.runtime.installedToast"]);
-                    if (isUpdate) _llmRuntimeCheck = null; // tag đổi → nút Cập nhật biến mất.
-                    break;
+                    case LlmRuntimePollOutcome.Failed:
+                        Toast.Show(L["deck.llm.runtime.downloadFailed"], ToastSeverity.Error);
+                        return;
+                    case LlmRuntimePollOutcome.Completed:
+                        // Check lại theo đúng flavor sau MỌI lượt thành công: repair cùng tag không
+                        // làm badge Update bị xoá nhầm, flavor mới không bị so với release CUDA.
+                        _llmRuntimeCheck = await Pipeline.CheckLlmRuntimeAsync(_llmFlavor, CancellationToken.None);
+                        Toast.Show(L["deck.llm.runtime.installedToast"]);
+                        return;
                 }
             }
+            Toast.Show(L["deck.llm.runtime.downloadTimeout"], ToastSeverity.Error);
         }
         catch (Exception ex)
         {
