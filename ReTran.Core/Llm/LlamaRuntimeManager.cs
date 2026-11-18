@@ -28,6 +28,13 @@ public sealed record LlmRuntimeStatus(string? Tag, bool Installed, string? Serve
     /// (không có release khớp / mạng chết) — wizard fail nhanh thay vì poll đủ cửa sổ.
     /// </summary>
     public bool DownloadFailed { get; init; }
+
+    /// <summary>
+    /// A download, extraction, or same-version repair is in flight; an older installed build must not
+    /// be treated as completion of this attempt. Một lượt tải/giải nén/sửa cùng phiên bản đang chạy;
+    /// không được coi bản cũ là dấu hiệu lượt này đã hoàn tất.
+    /// </summary>
+    public bool Downloading { get; init; }
 }
 
 /// <summary>
@@ -66,6 +73,9 @@ public sealed class LlamaRuntimeManager(
     /// <summary>Set when the last download attempt failed permanently (status reports it so the wizard fails fast). Bật khi lượt tải gần nhất fail vĩnh viễn (status báo để wizard fail nhanh).</summary>
     private volatile bool _downloadFailed;
 
+    /// <summary>True from acquisition of the download gate until the attempt finishes. True từ lúc lấy được khóa tải tới khi lượt tải kết thúc.</summary>
+    private volatile bool _downloading;
+
     // One download at a time: two overlapping llm.runtime.download calls (setup + Settings, or a
     // double fire) would otherwise extract into the same <tag>/ directory and interleave the
     // runtime.json write. The second caller waits for the first, then runs its own download.
@@ -75,16 +85,19 @@ public sealed class LlamaRuntimeManager(
     private readonly SemaphoreSlim _downloadGate = new(1, 1);
 
     /// <summary>
-    /// Reports the installed tag and the newest available tag for the CUDA flavor.
-    /// Cho biết tag đã cài và tag mới nhất khả dụng cho nhánh CUDA.
+    /// Reports the installed tag and the newest available tag for the selected flavor.
+    /// Cho biết tag đã cài và tag mới nhất khả dụng cho flavor đã chọn.
     /// </summary>
+    /// <param name="flavor"><c>cuda</c> or <c>cpu</c>. <c>cuda</c> hoặc <c>cpu</c>.</param>
     /// <param name="ct">Token used to cancel the check. Token dùng để hủy kiểm tra.</param>
     /// <returns>(current installed tag, newest matching release tag). (tag đã cài, tag release mới nhất khớp).</returns>
-    public async Task<(string? Current, string? Latest)> CheckAsync(CancellationToken ct)
+    /// <exception cref="RpcMethodException">Thrown for an unknown flavor (-32602). Ném khi flavor lạ (-32602).</exception>
+    public async Task<(string? Current, string? Latest)> CheckAsync(string flavor, CancellationToken ct)
     {
+        _ = FlavorPattern(flavor);
         string? current = ReadTag();
         (string Tag, string MainUrl, string? CudartUrl)? latest =
-            await FindReleaseAsync("cuda", ct).ConfigureAwait(false);
+            await FindReleaseAsync(flavor, ct).ConfigureAwait(false);
         return (current, latest?.Tag);
     }
 
@@ -98,7 +111,7 @@ public sealed class LlamaRuntimeManager(
     {
         string? tag = ReadTag();
         string? serverPath = tag is null ? null : Path.Combine(_rootDir, tag, "llama-server.exe");
-        bool installed = serverPath is not null && File.Exists(serverPath);
+        bool installed = serverPath is not null && File.Exists(serverPath) && !_downloading;
         LlmDownloadProgress? progress;
         lock (_progressLock)
         {
@@ -107,7 +120,8 @@ public sealed class LlamaRuntimeManager(
         return Task.FromResult(new LlmRuntimeStatus(tag, installed, serverPath)
         {
             Progress = progress,
-            DownloadFailed = _downloadFailed && !installed,
+            DownloadFailed = _downloadFailed,
+            Downloading = _downloading,
         });
     }
 
@@ -147,6 +161,7 @@ public sealed class LlamaRuntimeManager(
         _downloadFailed = false; // new attempt clears the previous failure / lượt mới xoá fail cũ
 
         await _downloadGate.WaitAsync(ct).ConfigureAwait(false);
+        _downloading = true;
         try
         {
             (string tag, string mainUrl, string? cudartUrl)? release =
@@ -185,6 +200,7 @@ public sealed class LlamaRuntimeManager(
         }
         finally
         {
+            _downloading = false;
             _downloadGate.Release();
         }
     }

@@ -61,9 +61,10 @@ public static class LlmRpcHandlers
             return JsonSerializer.SerializeToNode(status, JsonOptions);
         });
 
-        server.Register("llm.runtime.check", async _ =>
+        server.Register("llm.runtime.check", async p =>
         {
-            (string? current, string? latest) = await runtime.CheckAsync(CancellationToken.None).ConfigureAwait(false);
+            string flavor = OptionalFlavor(p);
+            (string? current, string? latest) = await runtime.CheckAsync(flavor, CancellationToken.None).ConfigureAwait(false);
             return new JsonObject { ["current"] = current, ["latest"] = latest };
         });
 

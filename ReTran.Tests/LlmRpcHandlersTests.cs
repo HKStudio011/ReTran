@@ -143,6 +143,46 @@ public class LlmRpcHandlersTests
     }
 
     [Fact]
+    public async Task RuntimeCheck_CpuFlavor_UsesCpuAssets()
+    {
+        string dir = NewDir();
+        try
+        {
+            const string releases = """
+                [
+                  {
+                    "tag_name": "b200",
+                    "assets": [ { "name": "llama-b200-bin-win-cpu-x64.zip", "browser_download_url": "http://x/cpu200.zip" } ]
+                  },
+                  {
+                    "tag_name": "b190",
+                    "assets": [
+                      { "name": "llama-b190-bin-win-cuda-x64.zip", "browser_download_url": "http://x/cuda190.zip" },
+                      { "name": "llama-b190-bin-win-avx2-x64.zip", "browser_download_url": "http://x/avx2190.zip" }
+                    ]
+                  }
+                ]
+                """;
+            var server = new JsonRpcServer();
+            var models = new LlmModelManager(
+                Path.Combine(dir, "models"), Path.Combine(dir, "models.json"));
+            var runtime = new LlamaRuntimeManager(
+                Path.Combine(dir, "runtime"), new HttpClient(new GhHandler(releases)));
+            LlmRpcHandlers.Register(server, models, runtime);
+
+            JsonNode response = await InvokeRawAsync(
+                server, "llm.runtime.check", new JsonObject { ["flavor"] = "cpu" });
+
+            Assert.Null(response["error"]);
+            Assert.Equal("b190", response["result"]!["latest"]!.GetValue<string>());
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task RuntimeStatus_BeforeDownload_NotInstalled()
     {
         string dir = NewDir();

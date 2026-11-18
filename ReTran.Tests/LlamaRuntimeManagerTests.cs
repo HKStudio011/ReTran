@@ -89,6 +89,16 @@ public class LlamaRuntimeManagerTests : IDisposable
         }
     }
 
+    private static void WriteRuntimeZip(Uri uri, string target)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+        using FileStream fs = File.Create(target);
+        using var zip = new ZipArchive(fs, ZipArchiveMode.Create);
+        zip.CreateEntry(uri.ToString().Contains("cudart", StringComparison.Ordinal)
+            ? "extra.dll"
+            : "llama-server.exe");
+    }
+
     private (LlamaRuntimeManager manager, RecordingZipDownloader downloader) Create(string json = ReleasesJson)
     {
         var downloader = new RecordingZipDownloader();
@@ -102,10 +112,21 @@ public class LlamaRuntimeManagerTests : IDisposable
     {
         (LlamaRuntimeManager manager, _) = Create();
 
-        (string? current, string? latest) = await manager.CheckAsync(TestContext.Current.CancellationToken);
+        (string? current, string? latest) = await manager.CheckAsync("cuda", TestContext.Current.CancellationToken);
 
         Assert.Null(current);
         Assert.Equal("b190", latest); // b200 chỉ có CPU — phải bỏ qua. b200 is CPU-only and must be skipped.
+    }
+
+    [Fact]
+    public async Task Check_Cpu_PicksNewestReleaseWithAvx2Asset()
+    {
+        (LlamaRuntimeManager manager, _) = Create();
+
+        (string? current, string? latest) = await manager.CheckAsync("cpu", TestContext.Current.CancellationToken);
+
+        Assert.Null(current);
+        Assert.Equal("b190", latest); // b200's cpu-x64 asset is not the supported AVX2 flavor.
     }
 
     [Fact]
@@ -116,7 +137,7 @@ public class LlamaRuntimeManagerTests : IDisposable
             """;
         (LlamaRuntimeManager manager, _) = Create(cpuOnly);
 
-        (_, string? latest) = await manager.CheckAsync(TestContext.Current.CancellationToken);
+        (_, string? latest) = await manager.CheckAsync("cuda", TestContext.Current.CancellationToken);
 
         Assert.Null(latest);
     }
@@ -150,7 +171,7 @@ public class LlamaRuntimeManagerTests : IDisposable
         Assert.True(File.Exists(status.ServerPath));
         Assert.True(File.Exists(Path.Combine(_dir, "b190", "extra.dll")));
 
-        (_, string? latest) = await manager.CheckAsync(TestContext.Current.CancellationToken);
+        (_, string? latest) = await manager.CheckAsync("cuda", TestContext.Current.CancellationToken);
         Assert.Equal("b190", latest); // Current == Latest sau khi tải mới nhất — nothing newer to fetch.
     }
 
@@ -171,6 +192,73 @@ public class LlamaRuntimeManagerTests : IDisposable
 
         await Assert.ThrowsAsync<RpcMethodException>(() =>
             manager.DownloadAsync("vulkan", TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Status_UpdateInFlight_HidesPreviousInstallUntilComplete()
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        bool block = false;
+        var manager = new LlamaRuntimeManager(
+            _dir, new HttpClient(new GhHandler(ReleasesJson)),
+            async (uri, target, ct) =>
+            {
+                if (block)
+                {
+                    started.TrySetResult();
+                    await release.Task.WaitAsync(ct);
+                }
+                WriteRuntimeZip(uri, target);
+            });
+        await manager.DownloadAsync("cpu", TestContext.Current.CancellationToken);
+        block = true;
+
+        Task update = manager.DownloadAsync("cpu", TestContext.Current.CancellationToken);
+        try
+        {
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            LlmRuntimeStatus status = await manager.GetStatusAsync(TestContext.Current.CancellationToken);
+
+            Assert.True(status.Downloading);
+            Assert.False(status.Installed); // the old b190 install must not make this repair look complete
+            Assert.Equal("b190", status.Tag);
+        }
+        finally
+        {
+            release.TrySetResult();
+        }
+        await update;
+
+        LlmRuntimeStatus completed = await manager.GetStatusAsync(TestContext.Current.CancellationToken);
+        Assert.False(completed.Downloading);
+        Assert.True(completed.Installed);
+        Assert.False(completed.DownloadFailed);
+    }
+
+    [Fact]
+    public async Task Status_UpdateFailure_KeepsPreviousInstallAndReportsFailure()
+    {
+        bool fail = false;
+        var manager = new LlamaRuntimeManager(
+            _dir, new HttpClient(new GhHandler(ReleasesJson)),
+            (uri, target, ct) =>
+            {
+                if (fail) throw new HttpRequestException("network down");
+                WriteRuntimeZip(uri, target);
+                return Task.CompletedTask;
+            });
+        await manager.DownloadAsync("cpu", TestContext.Current.CancellationToken);
+        fail = true;
+
+        HttpRequestException error = await Assert.ThrowsAsync<HttpRequestException>(() =>
+            manager.DownloadAsync("cpu", TestContext.Current.CancellationToken));
+
+        LlmRuntimeStatus status = await manager.GetStatusAsync(TestContext.Current.CancellationToken);
+        Assert.Equal("network down", error.Message);
+        Assert.False(status.Downloading);
+        Assert.True(status.Installed); // the previous runtime remains usable after the failed update
+        Assert.True(status.DownloadFailed); // ...but the update itself must not look successful
     }
 
     [Fact]
