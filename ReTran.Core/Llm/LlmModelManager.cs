@@ -24,6 +24,13 @@ public sealed record LlmModelInfo(
     /// reporting. Tiến độ tải đang chạy; <see langword="null"/> trừ khi có lượt tải đang báo tiến độ.
     /// </summary>
     public LlmDownloadProgress? Progress { get; init; }
+
+    /// <summary>
+    /// Error from the latest failed download, or <see langword="null"/> when none failed or a retry
+    /// is in flight. Lỗi của lượt tải gần nhất thất bại, hoặc <see langword="null"/> khi không có
+    /// lỗi hoặc đang thử lại.
+    /// </summary>
+    public string? DownloadError { get; init; }
 }
 
 /// <summary>
@@ -63,6 +70,7 @@ public sealed class LlmModelManager(
     private readonly object _lock = new();
     private readonly Dictionary<string, Thread> _downloads = new();
     private readonly Dictionary<string, LlmDownloadProgress> _progress = new();
+    private readonly Dictionary<string, string> _downloadErrors = new();
     private string? _active = ReadActive(stateFile);
 
     /// <summary>Absolute path of one model's GGUF file. Đường dẫn tuyệt đối file GGUF của một model.</summary>
@@ -106,6 +114,7 @@ public sealed class LlmModelManager(
                     IsInstalled(spec), _active == spec.Name, _downloads.ContainsKey(spec.Name))
                 {
                     Progress = _progress.TryGetValue(spec.Name, out LlmDownloadProgress? p) ? p : null,
+                    DownloadError = _downloadErrors.TryGetValue(spec.Name, out string? error) ? error : null,
                 })
                 .ToList();
         }
@@ -124,6 +133,7 @@ public sealed class LlmModelManager(
         lock (_lock)
         {
             if (_downloads.ContainsKey(name) || IsInstalled(spec)) return false;
+            _downloadErrors.Remove(name);
             var thread = new Thread(() => RunDownload(spec))
             {
                 IsBackground = true,
@@ -157,6 +167,7 @@ public sealed class LlmModelManager(
             string path = Path.Combine(_modelsDir, spec.File);
             File.Delete(path);
             File.Delete(path + ".partial");
+            _downloadErrors.Remove(name);
         }
     }
 
@@ -193,11 +204,18 @@ public sealed class LlmModelManager(
             download(spec, partial, CancellationToken.None).GetAwaiter().GetResult();
             File.Move(partial, path, overwrite: true);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // Keep the target absent so List() stays "not installed"; drop the failed partial.
-            // Giữ đích vắng mặt để List() vẫn là "chưa cài"; xoá file .partial hỏng.
+            // Keep the target absent so List() stays "not installed"; drop the failed partial, but
+            // retain the reason so the RPC catalog and Settings can show why the background job ended.
+            // Giữ đích vắng mặt và xoá .partial hỏng, nhưng lưu lý do để catalog RPC/Settings biết
+            // vì sao job nền kết thúc thay vì nuốt lỗi.
             try { File.Delete(partial); } catch (IOException) { }
+            lock (_lock)
+            {
+                _downloadErrors[spec.Name] = ex.Message;
+            }
+            Console.Error.WriteLine($"llm.models.download failed for '{spec.Name}': {ex.Message}");
         }
         finally
         {

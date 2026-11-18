@@ -59,4 +59,44 @@ public class SettingsPanelSyncTests
         Assert.True(SettingsPanelSync.WizardCompletionTransition(wasComplete: false, isComplete: true));
         Assert.False(SettingsPanelSync.WizardCompletionTransition(wasComplete: true, isComplete: true));
     }
+
+    [Fact]
+    public void LlmCatalogReload_EmptyResponse_KeepsLastValidCatalogAndReportsFailure()
+    {
+        IReadOnlyList<LlmModelInfo> current =
+        [
+            new("Hy-MT2-1.8B-Q4_K_M", "Q4_K_M", "1.8B", 1_170_000_000, true, true, false),
+        ];
+
+        (IReadOnlyList<LlmModelInfo>? models, bool failed) =
+            SettingsPanelSync.LlmCatalogReload(current, []);
+
+        Assert.Same(current, models);
+        Assert.True(failed);
+    }
+
+    [Fact]
+    public void LlmCatalogReload_EmptyFirstResponse_StaysInFailedLoadingState()
+    {
+        (IReadOnlyList<LlmModelInfo>? models, bool failed) =
+            SettingsPanelSync.LlmCatalogReload(current: null, []);
+
+        Assert.Null(models);
+        Assert.True(failed);
+    }
+
+    [Fact]
+    public void LlmCatalogReload_NonEmptyResponse_ReplacesCatalogAndClearsFailure()
+    {
+        IReadOnlyList<LlmModelInfo> incoming =
+        [
+            new("Hy-MT2-1.8B-Q4_K_M", "Q4_K_M", "1.8B", 1_170_000_000, true, true, false),
+        ];
+
+        (IReadOnlyList<LlmModelInfo>? models, bool failed) =
+            SettingsPanelSync.LlmCatalogReload(current: null, incoming);
+
+        Assert.Same(incoming, models);
+        Assert.False(failed);
+    }
 }

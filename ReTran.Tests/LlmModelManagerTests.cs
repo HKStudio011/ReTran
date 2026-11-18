@@ -95,6 +95,36 @@ public class LlmModelManagerTests : IDisposable
     }
 
     [Fact]
+    public async Task FailedDownload_ReportsError_AndRetryClearsIt()
+    {
+        int attempts = 0;
+        var retryGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        LlmModelManager manager = Create(async (spec, path, ct) =>
+        {
+            attempts++;
+            if (attempts == 1) throw new IOException("disk full");
+            await retryGate.Task.WaitAsync(ct);
+            await WriteBytesAsync(spec, path, ct);
+        });
+        const string name = "Hy-MT2-1.8B-Q6_K";
+
+        Assert.True(manager.StartDownload(name));
+        await WaitUntilDownloadStopsAsync(manager, name);
+        LlmModelInfo failed = manager.List().Single(i => i.Name == name);
+        Assert.False(failed.Installed);
+        Assert.False(failed.Downloading);
+        Assert.Equal("disk full", failed.DownloadError);
+
+        Assert.True(manager.StartDownload(name));
+        LlmModelInfo retrying = manager.List().Single(i => i.Name == name);
+        Assert.Null(retrying.DownloadError);
+        Assert.True(retrying.Downloading);
+        retryGate.SetResult();
+        Assert.True(await WaitUntilInstalledAsync(manager, name));
+        Assert.Null(manager.List().Single(i => i.Name == name).DownloadError);
+    }
+
+    [Fact]
     public void Delete_RefusesActive_RefusesDownloading()
     {
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -174,6 +204,17 @@ public class LlmModelManagerTests : IDisposable
         gate.SetResult();
         Assert.True(await WaitUntilInstalledAsync(manager, "Hy-MT2-1.8B-Q6_K"));
         Assert.Null(manager.List().Single(i => i.Name == "Hy-MT2-1.8B-Q6_K").Progress);
+    }
+
+    private static async Task WaitUntilDownloadStopsAsync(LlmModelManager manager, string name)
+    {
+        var sw = Stopwatch.StartNew();
+        while (manager.List().Single(i => i.Name == name).Downloading
+               && sw.Elapsed < TimeSpan.FromSeconds(5))
+        {
+            await Task.Delay(20, TestContext.Current.CancellationToken);
+        }
+        Assert.False(manager.List().Single(i => i.Name == name).Downloading);
     }
 
     private static async Task<bool> WaitUntilInstalledAsync(LlmModelManager manager, string name)

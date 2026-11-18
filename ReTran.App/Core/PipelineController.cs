@@ -107,6 +107,9 @@ public sealed record LlmModelInfo(
     /// reporting. Tiến độ tải đang chạy; <see langword="null"/> trừ khi có lượt tải đang báo tiến độ.
     /// </summary>
     public ReTran_App.Services.Setup.DownloadProgress? Progress { get; init; }
+
+    /// <summary>Error from the latest failed download, or <see langword="null"/>. Lỗi tải gần nhất, hoặc <see langword="null"/>.</summary>
+    public string? DownloadError { get; init; }
 }
 
 /// <summary>
@@ -546,6 +549,7 @@ public sealed class PipelineController : IPipelineControl
                     ReadBool(model, "downloading"))
                 {
                     Progress = ReadProgress(model),
+                    DownloadError = ReadNullableString(model, "downloadError"),
                 });
             }
         }

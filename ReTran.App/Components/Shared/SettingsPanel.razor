@@ -314,6 +314,10 @@
         }
         else
         {
+            @if (_llmModelsFailed)
+            {
+                <p class="rt-hint" style="color: var(--rt-danger);">@(L["deck.llm.loadFailed"])</p>
+            }
             <div class="rt-field-row" style="flex-wrap: wrap; gap: 10px; margin-bottom: 6px;">
                 <span class="rt-hint">@(L.Fmt("deck.llm.activeModel", _llmActiveModel))</span>
                 <button type="button" class="rt-btn rt-mini" disabled="@_llmModelsBusy" @onclick="ReloadLlmModelsAsync">@(L["deck.llm.refresh"])</button>
@@ -352,6 +356,10 @@
                                     @if (m.InUse)
                                     {
                                         <span class="rt-hint" style="color: var(--rt-tally)">· @(L["deck.llm.inUse"])</span>
+                                    }
+                                    @if (!string.IsNullOrWhiteSpace(m.DownloadError))
+                                    {
+                                        <div class="rt-hint" style="color: var(--rt-danger); white-space: normal;">@(L.Fmt("deck.llm.modelDownloadFailed", m.DownloadError))</div>
                                     }
                                 </td>
                                 <td style="padding: 6px 0; text-align: right; vertical-align: top; white-space: nowrap;">
@@ -1156,12 +1164,12 @@
     {
         try
         {
-            _llmModels = await Pipeline.ListLlmModelsAsync(CancellationToken.None);
-            _llmModelsFailed = false;
+            IReadOnlyList<LlmModelInfo> models = await Pipeline.ListLlmModelsAsync(CancellationToken.None);
+            (_llmModels, _llmModelsFailed) = SettingsPanelSync.LlmCatalogReload(_llmModels, models);
         }
         catch (Exception)
         {
-            _llmModelsFailed = true;
+            _llmModelsFailed = true; // giữ catalog hợp lệ cuối (nếu có), hiện lỗi + Refresh
         }
         await InvokeAsync(StateHasChanged);
     }

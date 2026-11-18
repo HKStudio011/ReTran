@@ -850,7 +850,8 @@ public class PipelineControllerTests : IDisposable
                 {
                     ["name"] = "Hy-MT2-7B-Q4_K_M", ["quant"] = "Q4_K_M",
                     ["sizeClass"] = "7B", ["sizeBytes"] = 4780000000L,
-                    ["installed"] = false, ["inUse"] = false, ["downloading"] = true,
+                    ["installed"] = false, ["inUse"] = false, ["downloading"] = false,
+                    ["downloadError"] = "disk full",
                 })
             : null;
         PipelineController controller = CreateController(peer, new OverlayState());
@@ -869,7 +870,9 @@ public class PipelineControllerTests : IDisposable
         Assert.False(models[0].Downloading);
         Assert.Equal("Hy-MT2-7B-Q4_K_M", models[1].Name);
         Assert.False(models[1].Installed);
-        Assert.True(models[1].Downloading);
+        Assert.False(models[1].Downloading);
+        Assert.Equal("disk full", models[1].DownloadError);
+        Assert.Null(models[0].DownloadError);
     }
 
     [Fact]

@@ -30,6 +30,14 @@ internal static class SettingsPanelSync
             ? (incoming, incoming)
             : (current, baseline);
 
+    /// <summary>
+    /// Treats an empty LLM catalog as a failed load and keeps the last valid entries.
+    /// Coi catalog LLM rỗng là nạp lỗi và giữ các mục hợp lệ gần nhất.
+    /// </summary>
+    internal static (IReadOnlyList<LlmModelInfo>? Models, bool Failed) LlmCatalogReload(
+        IReadOnlyList<LlmModelInfo>? current, IReadOnlyList<LlmModelInfo> incoming) =>
+        incoming.Count == 0 ? (current, true) : (incoming, false);
+
     /// <summary>Returns true only for the not-complete to complete edge. Chỉ true ở cạnh chuyển từ chưa hoàn tất sang hoàn tất.</summary>
     internal static bool WizardCompletionTransition(bool wasComplete, bool isComplete) =>
         !wasComplete && isComplete;
