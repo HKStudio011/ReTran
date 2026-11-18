@@ -55,9 +55,12 @@ public static class LlmRpcHandlers
             return Task.FromResult<JsonNode?>(new JsonObject { ["active"] = models.ActiveModel });
         });
 
-        server.Register("llm.runtime.status", async _ =>
+        server.Register("llm.runtime.status", async p =>
         {
-            LlmRuntimeStatus status = await runtime.GetStatusAsync(CancellationToken.None).ConfigureAwait(false);
+            string? flavor = p is JsonObject obj && obj["flavor"] is not null ? OptionalFlavor(p) : null;
+            LlmRuntimeStatus status = flavor is null
+                ? await runtime.GetStatusAsync(CancellationToken.None).ConfigureAwait(false)
+                : await runtime.GetStatusAsync(flavor, CancellationToken.None).ConfigureAwait(false);
             return JsonSerializer.SerializeToNode(status, JsonOptions);
         });
 
@@ -71,10 +74,18 @@ public static class LlmRpcHandlers
         server.Register("llm.runtime.download", p =>
         {
             string flavor = OptionalFlavor(p);
-            // Fire-and-forget: the download can take minutes; callers poll llm.runtime.status.
-            // Chạy nền: lượt tải có thể mất vài phút; nơi gọi poll llm.runtime.status.
-            _ = Task.Run(() => runtime.DownloadAsync(flavor, CancellationToken.None));
-            return Task.FromResult<JsonNode?>(new JsonObject { ["accepted"] = true, ["flavor"] = flavor });
+            // StartDownload registers the attempt synchronously before accepted is returned.
+            // StartDownload đăng ký attempt đồng bộ trước khi accepted được trả về.
+            LlmRuntimeDownload download = runtime.StartDownload(flavor, CancellationToken.None);
+            _ = download.Task.ContinueWith(
+                static t => { _ = t.Exception; },
+                CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+            return Task.FromResult<JsonNode?>(new JsonObject
+            {
+                ["accepted"] = true,
+                ["flavor"] = flavor,
+                ["attempt"] = download.Attempt,
+            });
         });
     }
 

@@ -169,10 +169,29 @@ public class LlamaRuntimeManagerTests : IDisposable
         Assert.Equal("b190", status.Tag);
         Assert.True(status.Installed);
         Assert.True(File.Exists(status.ServerPath));
-        Assert.True(File.Exists(Path.Combine(_dir, "b190", "extra.dll")));
+        Assert.True(File.Exists(Path.Combine(_dir, "cuda", "b190", "extra.dll")));
+        Assert.Equal("cuda", status.Flavor);
 
         (_, string? latest) = await manager.CheckAsync("cuda", TestContext.Current.CancellationToken);
         Assert.Equal("b190", latest); // Current == Latest sau khi tải mới nhất — nothing newer to fetch.
+    }
+
+    [Fact]
+    public async Task CheckAndStatus_SameTagDifferentFlavor_RequiresReinstall()
+    {
+        (LlamaRuntimeManager manager, _) = Create();
+        await manager.DownloadAsync("cuda", TestContext.Current.CancellationToken);
+
+        (string? current, string? latest) = await manager.CheckAsync("cpu", TestContext.Current.CancellationToken);
+        LlmRuntimeStatus cpuStatus = await manager.GetStatusAsync("cpu", TestContext.Current.CancellationToken);
+        LlmRuntimeStatus cudaStatus = await manager.GetStatusAsync(TestContext.Current.CancellationToken);
+
+        Assert.Null(current); // b190 CUDA does not satisfy the CPU flavor, even though the tags match
+        Assert.Equal("b190", latest);
+        Assert.False(cpuStatus.Installed);
+        Assert.True(cudaStatus.Installed);
+        Assert.Equal("cuda", cudaStatus.Flavor);
+        Assert.EndsWith(Path.Combine("cuda", "b190", "llama-server.exe"), cudaStatus.ServerPath);
     }
 
     [Fact]
@@ -262,6 +281,116 @@ public class LlamaRuntimeManagerTests : IDisposable
     }
 
     [Fact]
+    public async Task StartDownload_RegistersAttemptSynchronously_BeforeReturning()
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int calls = 0;
+        var manager = new LlamaRuntimeManager(
+            _dir, new HttpClient(new GhHandler(ReleasesJson)),
+            async (uri, target, ct) =>
+            {
+                calls++;
+                if (calls > 1) await gate.Task.WaitAsync(ct);
+                WriteRuntimeZip(uri, target);
+            });
+        await manager.DownloadAsync("cpu", TestContext.Current.CancellationToken);
+
+        LlmRuntimeDownload download = manager.StartDownload("cpu", TestContext.Current.CancellationToken);
+        LlmRuntimeStatus status = await manager.GetStatusAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(download.Attempt, status.Attempt);
+        Assert.True(status.Downloading); // accepted → immediate poll cannot mistake the old install for completion
+        Assert.False(status.Installed);
+        Assert.False(status.DownloadFailed);
+        gate.SetResult();
+        await download.Task;
+    }
+
+    [Fact]
+    public async Task QueuedAttempt_PreviousFailure_DoesNotFailOrPoisonNextSuccess()
+    {
+        var enteredA = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseA = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var enteredB = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseB = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int calls = 0;
+        var manager = new LlamaRuntimeManager(
+            _dir, new HttpClient(new GhHandler(ReleasesJson)),
+            async (uri, target, ct) =>
+            {
+                int call = Interlocked.Increment(ref calls);
+                if (call == 2)
+                {
+                    enteredA.TrySetResult();
+                    await releaseA.Task.WaitAsync(ct);
+                    throw new HttpRequestException("attempt A failed");
+                }
+                if (call == 3)
+                {
+                    enteredB.TrySetResult();
+                    await releaseB.Task.WaitAsync(ct);
+                }
+                WriteRuntimeZip(uri, target);
+            });
+        await manager.DownloadAsync("cpu", TestContext.Current.CancellationToken); // initial install, call 1
+
+        LlmRuntimeDownload a = manager.StartDownload("cpu", TestContext.Current.CancellationToken);
+        await enteredA.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        LlmRuntimeDownload b = manager.StartDownload("cpu", TestContext.Current.CancellationToken);
+        Assert.NotEqual(a.Attempt, b.Attempt);
+        releaseA.SetResult();
+        await Assert.ThrowsAsync<HttpRequestException>(() => a.Task);
+
+        LlmRuntimeStatus queued = await manager.GetStatusAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(b.Attempt, queued.Attempt);
+        Assert.True(queued.Downloading);
+        Assert.False(queued.DownloadFailed); // failure belongs to A, not queued B
+
+        releaseB.SetResult();
+        await enteredB.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await b.Task;
+        LlmRuntimeStatus completed = await manager.GetStatusAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(b.Attempt, completed.Attempt);
+        Assert.True(completed.Installed);
+        Assert.False(completed.Downloading);
+        Assert.False(completed.DownloadFailed);
+    }
+
+    [Fact]
+    public async Task StartDownload_CancelledWhileQueued_ClearsDownloading()
+    {
+        var enteredA = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseA = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int calls = 0;
+        var manager = new LlamaRuntimeManager(
+            _dir, new HttpClient(new GhHandler(ReleasesJson)),
+            async (uri, target, ct) =>
+            {
+                if (Interlocked.Increment(ref calls) == 1)
+                {
+                    enteredA.TrySetResult();
+                    await releaseA.Task.WaitAsync(ct);
+                }
+                WriteRuntimeZip(uri, target);
+            });
+
+        LlmRuntimeDownload a = manager.StartDownload("cpu", TestContext.Current.CancellationToken);
+        await enteredA.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        using var cancelB = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        LlmRuntimeDownload b = manager.StartDownload("cpu", cancelB.Token);
+        cancelB.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => b.Task);
+        releaseA.SetResult();
+        await a.Task;
+
+        LlmRuntimeStatus status = await manager.GetStatusAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(b.Attempt, status.Attempt);
+        Assert.False(status.Downloading);
+        Assert.False(status.DownloadFailed);
+        Assert.True(status.Installed); // A completed; B was cancelled, not failed
+    }
+
+    [Fact]
     public async Task Download_ConcurrentCalls_SerializeExtraction()
     {
         // Reviewer finding #1: hai lượt tải chồng nhau từng giải nén đè cùng thư mục <tag>/ và ghi
@@ -292,6 +421,46 @@ public class LlamaRuntimeManagerTests : IDisposable
         await Task.WhenAll(first, second);
 
         Assert.Equal(1, maxActive);
+    }
+
+    [Fact]
+    public async Task Download_FailureAfterMainExtraction_PreservesPreviousInstall()
+    {
+        bool failCudart = false;
+        bool replacement = false;
+        var manager = new LlamaRuntimeManager(
+            _dir, new HttpClient(new GhHandler(ReleasesJson)),
+            (uri, target, ct) =>
+            {
+                if (failCudart && uri.ToString().Contains("cudart", StringComparison.Ordinal))
+                {
+                    throw new IOException("cudart failed");
+                }
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                using FileStream fs = File.Create(target);
+                using var zip = new ZipArchive(fs, ZipArchiveMode.Create);
+                bool isCudart = uri.ToString().Contains("cudart", StringComparison.Ordinal);
+                ZipArchiveEntry entry = zip.CreateEntry(isCudart ? "extra.dll" : "llama-server.exe");
+                using var writer = new StreamWriter(entry.Open());
+                writer.Write(replacement
+                    ? isCudart ? "new-cudart" : "new-server"
+                    : isCudart ? "old-cudart" : "old-server");
+                return Task.CompletedTask;
+            });
+        await manager.DownloadAsync("cuda", TestContext.Current.CancellationToken);
+        replacement = true;
+        failCudart = true;
+
+        await Assert.ThrowsAsync<IOException>(() =>
+            manager.DownloadAsync("cuda", TestContext.Current.CancellationToken));
+
+        string server = Path.Combine(_dir, "cuda", "b190", "llama-server.exe");
+        string cudart = Path.Combine(_dir, "cuda", "b190", "extra.dll");
+        Assert.Equal("old-server", File.ReadAllText(server));
+        Assert.Equal("old-cudart", File.ReadAllText(cudart));
+        LlmRuntimeStatus status = await manager.GetStatusAsync(TestContext.Current.CancellationToken);
+        Assert.True(status.Installed);
+        Assert.True(status.DownloadFailed);
     }
 
     [Fact]

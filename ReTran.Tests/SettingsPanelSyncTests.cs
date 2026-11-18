@@ -125,6 +125,22 @@ public class SettingsPanelSyncTests
     }
 
     [Theory]
+    [InlineData(true, 1, false)]
+    [InlineData(false, -1, false)]
+    [InlineData(false, 0, false)]
+    [InlineData(false, 1, true)]
+    public void CanSaveOcrParams_RequiresTrustedNonEmptySchema(
+        bool schemaFailed, int schemaCount, bool expected)
+    {
+        IReadOnlyList<OcrParamSpec>? schema = schemaCount < 0
+            ? null
+            : Enumerable.Range(0, schemaCount).Select(i =>
+                new OcrParamSpec($"k{i}", "det", "string", null, false, [], null, null, null, null)).ToList();
+
+        Assert.Equal(expected, SettingsPanelSync.CanSaveOcrParams(schema, schemaFailed));
+    }
+
+    [Theory]
     [InlineData(false, true)]
     [InlineData(true, false)]
     public void ShouldRender_DisposedPanelBlocksRender(bool disposed, bool expected)

@@ -1098,6 +1098,22 @@ public class SetupCoordinatorTests : IDisposable
     }
 
     [Fact]
+    public async Task LlmRuntime_AcceptedUpdate_OldInstallDoesNotCompleteBeforeAttempt()
+    {
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":["Hy-MT2-1.8B-UD-Q4_K_XL"],"steps":{"checking":"done","verifyingfiles":"done","syncing":"done","verifyingsidecar":"done","downloadingmodels":"done","applying":"done"}}""");
+        _bridge.LlmRuntimeInstalled = true;
+        _bridge.LlmRuntimeTag = "b7000";
+        _bridge.LlmRuntimeLatestTag = "b7234";
+        _bridge.LlmRuntimeDownloadCompletes = false;
+        var coordinator = NewCoordinator(modelDownloadTimeout: TimeSpan.FromMilliseconds(150));
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Failed, coordinator.Step); // accepted + old install is not completion of the new attempt
+        Assert.Equal(SetupCoordinator.MaxRetries + 1, _bridge.LlmRuntimeDownloads.Count);
+    }
+
+    [Fact]
     public async Task LlmRuntime_ResumeFromOldSetupJson_RunsTheNewStep()
     {
         _bridge.Installed.Add(FakeCoreBridge.DetModel);
@@ -2040,6 +2056,10 @@ public class SetupCoordinatorTests : IDisposable
         /// <summary>When false, a runtime download records the flavor but never completes (dead network). Khi false, lệnh tải runtime ghi flavor nhưng không bao giờ xong (mạng chết).</summary>
         public bool LlmRuntimeDownloadCompletes { get; set; } = true;
 
+        /// <summary>Whether the latest accepted runtime attempt is queued/in-flight. Attempt runtime mới nhận còn đang xếp hàng/chạy hay không.</summary>
+        public bool LlmRuntimeDownloading { get; set; }
+        private long _llmRuntimeAttempt;
+
         /// <summary>Optional <c>downloadFailed</c> flag the fake includes in <c>llm.runtime.status</c>. Cờ <c>downloadFailed</c> tuỳ chọn fake nhúng vào <c>llm.runtime.status</c>.</summary>
         public bool LlmRuntimeDownloadFailed { get; set; }
 
@@ -2091,6 +2111,8 @@ public class SetupCoordinatorTests : IDisposable
                         ? @"C:\fake\llm\runtime\b7234\llama-server.exe"
                         : null,
                     ["downloadFailed"] = LlmRuntimeDownloadFailed,
+                    ["downloading"] = LlmRuntimeDownloading,
+                    ["attempt"] = _llmRuntimeAttempt,
                     ["progress"] = LlmRuntimeProgress is null
                         ? null
                         : new JsonObject
@@ -2120,8 +2142,14 @@ public class SetupCoordinatorTests : IDisposable
         private Task<JsonNode?> DownloadLlmRuntime(JsonNode? @params)
         {
             LlmRuntimeDownloads.Add(@params!["flavor"]!.GetValue<string>());
+            _llmRuntimeAttempt++;
+            LlmRuntimeDownloading = !LlmRuntimeDownloadCompletes;
             if (LlmRuntimeDownloadCompletes) LlmRuntimeInstalled = true; // fast network unless disabled
-            return Task.FromResult<JsonNode?>(new JsonObject { ["accepted"] = true });
+            return Task.FromResult<JsonNode?>(new JsonObject
+            {
+                ["accepted"] = true,
+                ["attempt"] = _llmRuntimeAttempt,
+            });
         }
 
         private Task<JsonNode?> CheckLlmRuntime(JsonNode? @params)

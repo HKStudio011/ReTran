@@ -35,6 +35,17 @@ public class LlmRuntimePollTests
     }
 
     [Fact]
+    public void Evaluate_NewerAttemptSupersedesPolledAttempt()
+    {
+        var status = new LlmRuntimeStatusInfo("b190", true, @"C:\llm\b190\llama-server.exe")
+        {
+            Attempt = 2,
+        };
+
+        Assert.Equal(LlmRuntimePollOutcome.Superseded, LlmRuntimePoll.Evaluate(status, attempt: 1));
+    }
+
+    [Fact]
     public void Evaluate_NotInstalledYet_Waits()
     {
         var status = new LlmRuntimeStatusInfo(null, false, null);

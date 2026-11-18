@@ -35,7 +35,21 @@ public sealed record LlmRuntimeStatus(string? Tag, bool Installed, string? Serve
     /// không được coi bản cũ là dấu hiệu lượt này đã hoàn tất.
     /// </summary>
     public bool Downloading { get; init; }
+
+    /// <summary>Flavor of the active installation (<c>cuda</c>/<c>cpu</c>), or <see langword="null"/> for a legacy/unknown state. Flavor của bản đang active (<c>cuda</c>/<c>cpu</c>), hoặc <see langword="null"/> khi state cũ/không rõ.</summary>
+    public string? Flavor { get; init; }
+
+    /// <summary>Latest registered download attempt ID; 0 before the first download. ID lượt tải gần nhất được đăng ký; 0 trước lượt đầu.</summary>
+    public long Attempt { get; init; }
 }
+
+/// <summary>
+/// One synchronously registered runtime download and its completion task.
+/// Một lượt tải runtime được đăng ký đồng bộ và task hoàn tất của nó.
+/// </summary>
+/// <param name="Attempt">Unique ID within this manager instance. ID duy nhất trong instance manager.</param>
+/// <param name="Task">Completion of the download/extraction/commit. Task hoàn tất tải/giải nén/commit.</param>
+public sealed record LlmRuntimeDownload(long Attempt, Task Task);
 
 /// <summary>
 /// Manages the llama.cpp runtime: checks the newest Windows build that has a matching asset on
@@ -70,11 +84,12 @@ public sealed class LlamaRuntimeManager(
     private readonly Dictionary<string, LlmDownloadProgress> _progress = new();
     private readonly object _progressLock = new();
 
-    /// <summary>Set when the last download attempt failed permanently (status reports it so the wizard fails fast). Bật khi lượt tải gần nhất fail vĩnh viễn (status báo để wizard fail nhanh).</summary>
-    private volatile bool _downloadFailed;
-
-    /// <summary>True from acquisition of the download gate until the attempt finishes. True từ lúc lấy được khóa tải tới khi lượt tải kết thúc.</summary>
-    private volatile bool _downloading;
+    // Attempt state is registered synchronously before StartDownload returns, including queued work.
+    // Trạng thái attempt được đăng ký đồng bộ trước khi StartDownload trả về, kể cả lượt đang xếp hàng.
+    private readonly object _attemptLock = new();
+    private long _attempt;
+    private long? _failedAttempt;
+    private bool _downloading;
 
     // One download at a time: two overlapping llm.runtime.download calls (setup + Settings, or a
     // double fire) would otherwise extract into the same <tag>/ directory and interleave the
@@ -95,7 +110,8 @@ public sealed class LlamaRuntimeManager(
     public async Task<(string? Current, string? Latest)> CheckAsync(string flavor, CancellationToken ct)
     {
         _ = FlavorPattern(flavor);
-        string? current = ReadTag();
+        (string? tag, string? installedFlavor) = ReadState();
+        string? current = installedFlavor == flavor ? tag : null;
         (string Tag, string MainUrl, string? CudartUrl)? latest =
             await FindReleaseAsync(flavor, ct).ConfigureAwait(false);
         return (current, latest?.Tag);
@@ -107,11 +123,39 @@ public sealed class LlamaRuntimeManager(
     /// </summary>
     /// <param name="ct">Unused; present for symmetry. Không dùng; giữ cho đồng bộ chữ ký.</param>
     /// <returns>The current status. Trạng thái hiện tại.</returns>
-    public Task<LlmRuntimeStatus> GetStatusAsync(CancellationToken ct)
+    public Task<LlmRuntimeStatus> GetStatusAsync(CancellationToken ct) => GetStatusCoreAsync(null);
+
+    /// <summary>
+    /// Reads whether the selected flavor is installed, independently of another flavor with the same tag.
+    /// Đọc flavor được chọn đã cài hay chưa, độc lập với flavor khác có cùng tag.
+    /// </summary>
+    /// <param name="flavor"><c>cuda</c> or <c>cpu</c>. <c>cuda</c> hoặc <c>cpu</c>.</param>
+    /// <param name="ct">Unused; present for symmetry. Không dùng; giữ cho đồng bộ chữ ký.</param>
+    /// <returns>The flavor-selected status. Trạng thái theo flavor đã chọn.</returns>
+    /// <exception cref="RpcMethodException">Thrown for an unknown flavor (-32602). Ném khi flavor lạ (-32602).</exception>
+    public Task<LlmRuntimeStatus> GetStatusAsync(string flavor, CancellationToken ct)
     {
-        string? tag = ReadTag();
-        string? serverPath = tag is null ? null : Path.Combine(_rootDir, tag, "llama-server.exe");
-        bool installed = serverPath is not null && File.Exists(serverPath) && !_downloading;
+        _ = FlavorPattern(flavor);
+        return GetStatusCoreAsync(flavor);
+    }
+
+    private Task<LlmRuntimeStatus> GetStatusCoreAsync(string? requestedFlavor)
+    {
+        (string? tag, string? activeFlavor) = ReadState();
+        bool flavorMatches = requestedFlavor is null || requestedFlavor == activeFlavor;
+        string? serverPath = flavorMatches && tag is not null && activeFlavor is not null
+            ? Path.Combine(_rootDir, activeFlavor, tag, "llama-server.exe")
+            : null;
+        long attempt;
+        bool downloading;
+        bool downloadFailed;
+        lock (_attemptLock)
+        {
+            attempt = _attempt;
+            downloading = _downloading;
+            downloadFailed = _failedAttempt == _attempt;
+        }
+        bool installed = serverPath is not null && File.Exists(serverPath) && !downloading;
         LlmDownloadProgress? progress;
         lock (_progressLock)
         {
@@ -120,8 +164,10 @@ public sealed class LlamaRuntimeManager(
         return Task.FromResult(new LlmRuntimeStatus(tag, installed, serverPath)
         {
             Progress = progress,
-            DownloadFailed = _downloadFailed,
-            Downloading = _downloading,
+            DownloadFailed = downloadFailed,
+            Downloading = downloading,
+            Flavor = activeFlavor,
+            Attempt = attempt,
         });
     }
 
@@ -155,30 +201,57 @@ public sealed class LlamaRuntimeManager(
     /// <param name="ct">Token used to cancel the download. Token dùng để hủy tải.</param>
     /// <exception cref="RpcMethodException">Thrown for an unknown flavor (-32602). Khi flavor lạ (-32602).</exception>
     /// <exception cref="InvalidOperationException">Thrown when no release carries a matching asset. Khi không release nào có asset khớp.</exception>
-    public async Task DownloadAsync(string flavor, CancellationToken ct)
-    {
-        _ = FlavorPattern(flavor); // validate before queueing / kiểm tra flavor trước khi xếp hàng
-        _downloadFailed = false; // new attempt clears the previous failure / lượt mới xoá fail cũ
+    public Task DownloadAsync(string flavor, CancellationToken ct) => StartDownload(flavor, ct).Task;
 
-        await _downloadGate.WaitAsync(ct).ConfigureAwait(false);
-        _downloading = true;
+    /// <summary>
+    /// Registers a queued/in-flight attempt before returning, then downloads and commits its build.
+    /// Đăng ký attempt đang xếp hàng/chạy trước khi trả về, rồi tải và commit bản build.
+    /// </summary>
+    /// <param name="flavor"><c>cuda</c> or <c>cpu</c>. <c>cuda</c> hoặc <c>cpu</c>.</param>
+    /// <param name="ct">Token used to cancel the download. Token dùng để hủy tải.</param>
+    /// <returns>The attempt ID and its completion task. ID attempt và task hoàn tất của nó.</returns>
+    /// <exception cref="RpcMethodException">Thrown for an unknown flavor (-32602). Ném khi flavor lạ (-32602).</exception>
+    public LlmRuntimeDownload StartDownload(string flavor, CancellationToken ct)
+    {
+        _ = FlavorPattern(flavor);
+        long attempt;
+        lock (_attemptLock)
+        {
+            attempt = ++_attempt;
+            _downloading = true;
+        }
+        return new LlmRuntimeDownload(attempt, DownloadAttemptAsync(flavor, attempt, ct));
+    }
+
+    private async Task DownloadAttemptAsync(string flavor, long attempt, CancellationToken ct)
+    {
+        bool gateHeld = false;
         try
         {
+            await _downloadGate.WaitAsync(ct).ConfigureAwait(false);
+            gateHeld = true;
             (string tag, string mainUrl, string? cudartUrl)? release =
                 await FindReleaseAsync(flavor, ct).ConfigureAwait(false)
                 ?? throw new InvalidOperationException(
                     $"No llama.cpp release with a Windows asset matching '{FlavorPattern(flavor)}' was found.");
 
-            string targetDir = Path.Combine(_rootDir, release.Value.tag);
-            Directory.CreateDirectory(targetDir);
-
-            await DownloadAndExtractAsync(release.Value.mainUrl, targetDir, ct).ConfigureAwait(false);
-            if (release.Value.cudartUrl is not null)
+            string stagingDir = Path.Combine(
+                _rootDir, ".staging", $"{flavor}-{release.Value.tag}-{Guid.NewGuid():N}");
+            string finalDir = Path.Combine(_rootDir, flavor, release.Value.tag);
+            Directory.CreateDirectory(stagingDir);
+            try
             {
-                await DownloadAndExtractAsync(release.Value.cudartUrl, targetDir, ct).ConfigureAwait(false);
+                await DownloadAndExtractAsync(release.Value.mainUrl, stagingDir, ct).ConfigureAwait(false);
+                if (release.Value.cudartUrl is not null)
+                {
+                    await DownloadAndExtractAsync(release.Value.cudartUrl, stagingDir, ct).ConfigureAwait(false);
+                }
+                CommitStagedDirectory(stagingDir, finalDir, release.Value.tag, flavor);
             }
-
-            WriteTag(release.Value.tag);
+            finally
+            {
+                TryDeleteDirectory(stagingDir);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -186,22 +259,24 @@ public sealed class LlamaRuntimeManager(
         }
         catch (Exception ex)
         {
-            // The RPC caller is fire-and-forget (Task.Run) — without this flag a permanent failure
-            // (no matching release, dead network) would leave the wizard polling its full 60-minute
-            // window ×4 attempts (BA review 2026-11-17). The exception is re-thrown so direct callers
-            // (tests, zip-slip guard) still see it; the flag survives for the polling wizard.
-            // Caller RPC là fire-and-forget (Task.Run) — không có flag này, fail vĩnh viễn (không có
-            // release khớp, mạng chết) khiến wizard poll đủ cửa sổ 60 phút ×4 lượt (review BA
-            // 2026-11-17). Exception được ném lại để caller trực tiếp (test, guard zip-slip) vẫn thấy;
-            // flag giữ lại cho wizard đang poll.
-            _downloadFailed = true;
+            // The RPC observes the background task's fault; the attempt flag lets each caller fail fast
+            // without inheriting a different attempt's failure. Direct callers still see the exception.
+            // RPC quan sát lỗi task nền; cờ theo attempt giúp từng caller fail nhanh mà không kế thừa
+            // lỗi của attempt khác. Caller trực tiếp vẫn nhận exception như cũ.
+            lock (_attemptLock)
+            {
+                _failedAttempt = attempt;
+            }
             Console.Error.WriteLine($"llm.runtime.download failed for '{flavor}': {ex.Message}");
             throw;
         }
         finally
         {
-            _downloading = false;
-            _downloadGate.Release();
+            lock (_attemptLock)
+            {
+                if (_attempt == attempt) _downloading = false;
+            }
+            if (gateHeld) _downloadGate.Release();
         }
     }
 
@@ -216,7 +291,7 @@ public sealed class LlamaRuntimeManager(
     {
         var uri = new Uri(url);
         string assetName = Path.GetFileName(uri.LocalPath);
-        string zipPath = Path.Combine(_rootDir, assetName);
+        string zipPath = Path.Combine(targetDir, assetName);
         try
         {
             Func<Uri, string, CancellationToken, Task> download = _downloader ?? DefaultDownloadAsync;
@@ -236,6 +311,49 @@ public sealed class LlamaRuntimeManager(
                 _progress.Remove(assetName);
             }
             try { File.Delete(zipPath); } catch (IOException) { }
+        }
+    }
+
+    private void CommitStagedDirectory(string stagingDir, string finalDir, string tag, string flavor)
+    {
+        string? backupDir = null;
+        bool oldMoved = false;
+        bool newMoved = false;
+        Directory.CreateDirectory(Path.GetDirectoryName(finalDir)!);
+        try
+        {
+            if (Directory.Exists(finalDir))
+            {
+                backupDir = finalDir + ".backup-" + Guid.NewGuid().ToString("N");
+                Directory.Move(finalDir, backupDir);
+                oldMoved = true;
+            }
+            Directory.Move(stagingDir, finalDir);
+            newMoved = true;
+            WriteState(tag, flavor);
+        }
+        catch
+        {
+            if (newMoved && Directory.Exists(finalDir)) Directory.Delete(finalDir, recursive: true);
+            if (oldMoved && backupDir is not null && Directory.Exists(backupDir) && !Directory.Exists(finalDir))
+            {
+                Directory.Move(backupDir, finalDir);
+            }
+            throw;
+        }
+        if (backupDir is not null) TryDeleteDirectory(backupDir);
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Orphan staging/backup data is never active; leave it for the next manual cleanup.
+            // Dữ liệu staging/backup mồ côi không bao giờ active; để user dọn thủ công sau.
         }
     }
 
@@ -321,24 +439,28 @@ public sealed class LlamaRuntimeManager(
 
     private string StatePath => Path.Combine(_rootDir, "runtime.json");
 
-    private string? ReadTag()
+    private (string? Tag, string? Flavor) ReadState()
     {
         try
         {
-            if (!File.Exists(StatePath)) return null;
+            if (!File.Exists(StatePath)) return (null, null);
             JsonNode? root = JsonNode.Parse(File.ReadAllText(StatePath));
-            return root?["tag"]?.GetValue<string>();
+            return (root?["tag"]?.GetValue<string>(), root?["flavor"]?.GetValue<string>());
         }
         catch (Exception ex) when (ex is JsonException or IOException or InvalidOperationException or FormatException)
         {
-            return null;
+            return (null, null);
         }
     }
 
-    private void WriteTag(string tag)
+    private void WriteState(string tag, string flavor)
     {
         Directory.CreateDirectory(_rootDir);
-        File.WriteAllText(StatePath, new JsonObject { ["tag"] = tag }.ToJsonString());
+        File.WriteAllText(StatePath, new JsonObject
+        {
+            ["tag"] = tag,
+            ["flavor"] = flavor,
+        }.ToJsonString());
     }
 
     private async Task DefaultDownloadAsync(Uri uri, string target, CancellationToken ct)

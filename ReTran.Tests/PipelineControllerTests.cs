@@ -804,6 +804,31 @@ public class PipelineControllerTests : IDisposable
     }
 
     [Fact]
+    public async Task Start_LlmLocal_MissingActiveModel_KeepsRecoveryError()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        peer.Reply = method => method == "llm.models.set"
+            ? throw new RpcException(-32602, "model is not installed: Hy-MT2-1.8B-UD-Q4_K_XL")
+            : null;
+        new AppSettingsService(_settingsPath).Save(AppSettings.Default with
+        {
+            Provider = "llm",
+            LlmMode = "local",
+            LlmActiveModel = "Hy-MT2-1.8B-UD-Q4_K_XL",
+        });
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        RpcException ex = await Assert.ThrowsAsync<RpcException>(() =>
+            controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None));
+
+        Assert.Equal(-32603, ex.Code);
+        Assert.Equal("llm-model-missing: Hy-MT2-1.8B-UD-Q4_K_XL", ex.Message);
+        Assert.True(PipelineController.IsLlmComponentMissing(ex));
+        Assert.Single(peer.Calls); // core.start is not sent after the failed preflight
+        Assert.Equal("llm.models.set", peer.Calls[0].Method);
+    }
+
+    [Fact]
     public async Task Start_LlmApi_SendsEndpointFieldsAndPromptOverrides()
     {
         var peer = new FakeCorePeer { IsStarted = true };
@@ -952,22 +977,27 @@ public class PipelineControllerTests : IDisposable
                 ["tag"] = "b7123", ["installed"] = false,
                 ["serverPath"] = @"C:\llm\runtime\b7123\llama-server.exe",
                 ["downloading"] = true, ["downloadFailed"] = false,
+                ["attempt"] = 42L, ["flavor"] = "cpu",
                 ["progress"] = new JsonObject
                 {
                     ["receivedBytes"] = 100L, ["totalBytes"] = 400L, ["bytesPerSec"] = 50.0,
                 },
             },
             "llm.runtime.check" => new JsonObject { ["current"] = "b7123", ["latest"] = "b7250" },
+            "llm.runtime.download" => new JsonObject { ["accepted"] = true, ["attempt"] = 42L },
             _ => null,
         };
         PipelineController controller = CreateController(peer, new OverlayState());
 
-        LlmRuntimeStatusInfo status = await controller.GetLlmRuntimeStatusAsync(CancellationToken.None);
+        LlmRuntimeStatusInfo status = await controller.GetLlmRuntimeStatusAsync(CancellationToken.None, "cpu");
+        Assert.Equal("cpu", peer.Calls[0].Params!["flavor"]!.GetValue<string>());
         Assert.Equal("b7123", status.Tag);
         Assert.False(status.Installed);
         Assert.Equal(@"C:\llm\runtime\b7123\llama-server.exe", status.ServerPath);
         Assert.True(status.Downloading);
         Assert.False(status.DownloadFailed);
+        Assert.Equal(42, status.Attempt);
+        Assert.Equal("cpu", status.Flavor);
         Assert.NotNull(status.Progress);
         Assert.Equal(100, status.Progress!.ReceivedBytes);
         Assert.Equal(400, status.Progress.TotalBytes);
@@ -979,7 +1009,8 @@ public class PipelineControllerTests : IDisposable
         (string Method, JsonNode? Params) checkCall = peer.Calls.Single(c => c.Method == "llm.runtime.check");
         Assert.Equal("cpu", checkCall.Params!["flavor"]!.GetValue<string>());
 
-        await controller.DownloadLlmRuntimeAsync("cpu", CancellationToken.None);
+        long acceptedAttempt = await controller.DownloadLlmRuntimeAsync("cpu", CancellationToken.None);
+        Assert.Equal(42, acceptedAttempt);
         (string method, JsonNode? @params) = peer.Calls.Last();
         Assert.Equal("llm.runtime.download", method);
         Assert.Equal("cpu", @params!["flavor"]!.GetValue<string>());
@@ -1105,6 +1136,30 @@ public class PipelineControllerTests : IDisposable
         Assert.Null(minimal.Max);
         Assert.Null(minimal.Step);
         Assert.Null(minimal.Placeholder);
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("empty")]
+    [InlineData("scalar")]
+    [InlineData("nonObjectEntry")]
+    public async Task OcrConfigSchema_MalformedOrEmptyReply_ThrowsInsteadOfReturningEmptySchema(string shape)
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        peer.Reply = _ => shape switch
+        {
+            "missing" => new JsonObject(),
+            "empty" => new JsonObject { ["params"] = new JsonArray() },
+            "scalar" => new JsonObject { ["params"] = 1 },
+            _ => new JsonObject { ["params"] = new JsonArray(JsonValue.Create(1)) },
+        };
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        RpcException ex = await Assert.ThrowsAsync<RpcException>(
+            () => controller.GetOcrConfigSchemaAsync(CancellationToken.None));
+
+        Assert.Equal(-32603, ex.Code);
+        Assert.Contains("ocr-config-schema-invalid", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

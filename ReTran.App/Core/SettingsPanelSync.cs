@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Text.Json.Nodes;
 using ReTran_App.Services;
 
@@ -72,6 +73,10 @@ internal static class SettingsPanelSync
     internal static bool LlmUserPromptValid(string provider, string prompt) =>
         !string.Equals(provider, "llm", StringComparison.OrdinalIgnoreCase)
         || (!string.IsNullOrWhiteSpace(prompt) && prompt.Contains("{source_text}", StringComparison.Ordinal));
+
+    /// <summary>Allows OCR replacement saves only with a trusted, non-empty schema. Chỉ cho Save thay thế OCR khi schema đáng tin và không rỗng.</summary>
+    internal static bool CanSaveOcrParams([NotNullWhen(true)] IReadOnlyList<OcrParamSpec>? schema, bool schemaFailed) =>
+        !schemaFailed && schema is { Count: > 0 };
 
     /// <summary>Returns whether a component may render after its disposal state changes. Cho biết component còn được render sau khi trạng thái dispose thay đổi.</summary>
     internal static bool ShouldRender(bool disposed) => !disposed;

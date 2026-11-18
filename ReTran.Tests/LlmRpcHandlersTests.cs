@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Text.Json.Nodes;
 using ReTran.Core.JsonRpc;
 using ReTran.Core.Llm;
@@ -178,6 +179,57 @@ public class LlmRpcHandlersTests
         }
         finally
         {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RuntimeDownload_AcceptReturnsAttempt_AndImmediateStatusIsDownloading()
+    {
+        string dir = NewDir();
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            bool block = false;
+            var runtime = new LlamaRuntimeManager(
+                Path.Combine(dir, "runtime"), new HttpClient(new GhHandler("""
+                    [ { "tag_name": "b190", "assets": [ { "name": "llama-b190-bin-win-avx2-x64.zip", "browser_download_url": "http://x/avx2190.zip" } ] } ]
+                    """)),
+                async (uri, target, ct) =>
+                {
+                    if (block) await gate.Task.WaitAsync(ct);
+                    Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                    using FileStream fs = File.Create(target);
+                    using var zip = new ZipArchive(fs, ZipArchiveMode.Create);
+                    zip.CreateEntry("llama-server.exe");
+                });
+            await runtime.DownloadAsync("cpu", TestContext.Current.CancellationToken);
+            block = true;
+            var server = new JsonRpcServer();
+            var models = new LlmModelManager(Path.Combine(dir, "models"), Path.Combine(dir, "models.json"));
+            LlmRpcHandlers.Register(server, models, runtime);
+
+            JsonNode accepted = await InvokeRawAsync(
+                server, "llm.runtime.download", new JsonObject { ["flavor"] = "cpu" });
+            long attempt = accepted["result"]!["attempt"]!.GetValue<long>();
+            JsonNode status = await InvokeRawAsync(server, "llm.runtime.status", null);
+
+            Assert.True(attempt > 0);
+            Assert.Equal(attempt, status["result"]!["attempt"]!.GetValue<long>());
+            Assert.True(status["result"]!["downloading"]!.GetValue<bool>());
+            Assert.False(status["result"]!["installed"]!.GetValue<bool>());
+            gate.SetResult();
+            var deadline = DateTime.UtcNow.AddSeconds(5);
+            while (!(await runtime.GetStatusAsync(TestContext.Current.CancellationToken)).Installed
+                   && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(20, TestContext.Current.CancellationToken);
+            }
+            Assert.True((await runtime.GetStatusAsync(TestContext.Current.CancellationToken)).Installed);
+        }
+        finally
+        {
+            gate.TrySetResult();
             Directory.Delete(dir, recursive: true);
         }
     }

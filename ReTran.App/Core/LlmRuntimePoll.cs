@@ -6,6 +6,7 @@ internal enum LlmRuntimePollOutcome
     Waiting,
     Completed,
     Failed,
+    Superseded,
 }
 
 /// <summary>
@@ -18,8 +19,9 @@ internal static class LlmRuntimePoll
     /// Classifies one status snapshot; a failed update fails even when an older install remains usable.
     /// Phân loại một snapshot; update lỗi vẫn fail kể cả khi bản cũ còn dùng được.
     /// </summary>
-    internal static LlmRuntimePollOutcome Evaluate(LlmRuntimeStatusInfo status)
+    internal static LlmRuntimePollOutcome Evaluate(LlmRuntimeStatusInfo status, long attempt = 0)
     {
+        if (attempt > 0 && status.Attempt != attempt) return LlmRuntimePollOutcome.Superseded;
         if (status.DownloadFailed) return LlmRuntimePollOutcome.Failed;
         if (status.Downloading) return LlmRuntimePollOutcome.Waiting;
         return status.Installed ? LlmRuntimePollOutcome.Completed : LlmRuntimePollOutcome.Waiting;

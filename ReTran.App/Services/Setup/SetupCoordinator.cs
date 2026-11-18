@@ -1199,7 +1199,7 @@ public sealed class SetupCoordinator
         {
             try
             {
-                if (await IsLlmRuntimeInstalledAsync(ct).ConfigureAwait(false))
+                if (await IsLlmRuntimeInstalledAsync(runtimeFlavor, ct).ConfigureAwait(false))
                 {
                     // Đã cài: chỉ cập nhật khi Core tra được bản mới hơn (mất mạng ⇒ coi bản hiện tại là ok).
                     (string? current, string? latest) = await CheckLlmRuntimeAsync(runtimeFlavor, ct).ConfigureAwait(false);
@@ -1211,24 +1211,30 @@ public sealed class SetupCoordinator
                     _logger?.LogInformation("setup: runtime llama.cpp tag {Current} cũ hơn {Latest} — cập nhật", current, latest);
                 }
 
-                await _bridge
+                JsonNode? accepted = await _bridge
                     .CallAsync("llm.runtime.download", new JsonObject { ["flavor"] = runtimeFlavor }, ct)
                     .ConfigureAwait(false);
+                long downloadAttempt = accepted is JsonObject acceptedObj ? ReadLong(acceptedObj, "attempt") : 0;
 
                 using var window = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 window.CancelAfter(_modelDownloadTimeout);
                 while (true)
                 {
-                    JsonNode? status = await _bridge.CallAsync("llm.runtime.status", null, ct).ConfigureAwait(false);
-                    if (IsLlmRuntimeInstalled(status)) break;
-                    // Permanent runtime-download failure (no matching release / dead network) → fail the
-                    // attempt FAST instead of polling the full window (BA review 2026-11-17).
-                    // Fail vĩnh viễn của lượt tải runtime → fail lượt thử NGAY thay vì poll đủ cửa sổ
-                    // (review BA 2026-11-17).
+                    JsonNode? status = await _bridge.CallAsync("llm.runtime.status",
+                        new JsonObject { ["flavor"] = runtimeFlavor }, ct).ConfigureAwait(false);
+                    if (IsLlmRuntimeAttemptSuperseded(status, downloadAttempt))
+                    {
+                        throw new InvalidOperationException("llm runtime download superseded by a newer attempt");
+                    }
+                    // Failure of THIS attempt wins over any previous install; a queued/in-flight attempt
+                    // cannot complete from that old binary either.
+                    // Lỗi của attempt NÀY thắng mọi bản cũ; attempt xếp hàng/đang chạy cũng không
+                    // được hoàn tất nhờ binary cũ.
                     if (IsLlmRuntimeDownloadFailed(status))
                     {
                         throw new InvalidOperationException("llm runtime download failed (reported by status)");
                     }
+                    if (!IsLlmRuntimeDownloading(status) && IsLlmRuntimeInstalled(status)) break;
                     // Tiến độ tải zip runtime (spec vòng 2 §9): status có `progress` → đưa vào snapshot
                     // và PUBLISH — không publish thì UI không bao giờ vẽ lại dòng % + ETA.
                     var downloads = ParseRuntimeDownloads(status);
@@ -1334,11 +1340,21 @@ public sealed class SetupCoordinator
     /// <c>llm.runtime.status</c> có báo runtime đã cài không (binary server tồn tại trên đĩa); field
     /// thiếu hoặc sai định dạng coi như chưa cài.
     /// </summary>
-    private async Task<bool> IsLlmRuntimeInstalledAsync(CancellationToken ct)
+    private async Task<bool> IsLlmRuntimeInstalledAsync(string runtimeFlavor, CancellationToken ct)
     {
-        JsonNode? status = await _bridge.CallAsync("llm.runtime.status", null, ct).ConfigureAwait(false);
+        JsonNode? status = await _bridge.CallAsync("llm.runtime.status",
+            new JsonObject { ["flavor"] = runtimeFlavor }, ct).ConfigureAwait(false);
         return IsLlmRuntimeInstalled(status);
     }
+
+    private static bool IsLlmRuntimeDownloading(JsonNode? status) =>
+        status is JsonObject obj
+        && obj["downloading"] is JsonValue value
+        && value.TryGetValue<bool>(out bool downloading)
+        && downloading;
+
+    private static bool IsLlmRuntimeAttemptSuperseded(JsonNode? status, long attempt) =>
+        attempt > 0 && status is JsonObject obj && ReadLong(obj, "attempt") != attempt;
 
     /// <summary>
     /// The <c>installed</c> flag of one <c>llm.runtime.status</c> node; a malformed or missing field

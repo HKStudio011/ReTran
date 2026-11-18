@@ -175,6 +175,10 @@
     else
     {
         <h4 class="rt-hint" style="margin: 12px 0 6px;">@(L["deck.ocr.params.title"])</h4>
+        @if (_ocrSchemaFailed)
+        {
+            <p class="rt-hint" style="color: var(--rt-danger);">@(L["deck.ocr.params.loadFailed"])</p>
+        }
         @foreach (IGrouping<string, OcrParamSpec> group in _ocrSchema.GroupBy(p => p.Group))
         {
             <details open="@(group.Key is not ("device" or "models"))"
@@ -282,8 +286,8 @@
             <p class="rt-hint">@(L["deck.ocr.mergeOverlap.hint"])</p>
         </div>
         <div class="rt-field-row" style="flex-wrap: wrap; gap: 10px; margin-top: 10px; position: sticky; bottom: 0; z-index: 1; background: var(--rt-panel); padding: 8px 0; border-top: 1px solid var(--rt-line);">
-            <button type="button" class="rt-btn rt-btn-primary" disabled="@_ocrParamsBusy" @onclick="SaveOcrParamsAsync">@(L["deck.ocr.params.save"])</button>
-            <button type="button" class="rt-btn rt-mini" disabled="@_ocrParamsBusy" @onclick="RestoreOcrParamsAsync">@(L["deck.ocr.params.restore"])</button>
+            <button type="button" class="rt-btn rt-btn-primary" disabled="@(_ocrParamsBusy || !SettingsPanelSync.CanSaveOcrParams(_ocrSchema, _ocrSchemaFailed))" @onclick="SaveOcrParamsAsync">@(L["deck.ocr.params.save"])</button>
+            <button type="button" class="rt-btn rt-mini" disabled="@(_ocrParamsBusy || !SettingsPanelSync.CanSaveOcrParams(_ocrSchema, _ocrSchemaFailed))" @onclick="RestoreOcrParamsAsync">@(L["deck.ocr.params.restore"])</button>
             @if (_ocrStatusText.Length > 0)
             {
                 <span class="rt-hint" style="@(_ocrStatusError ? "color: var(--rt-danger)" : "")">@_ocrStatusText</span>
@@ -311,7 +315,7 @@
         <div class="rt-srow">
             <span>@(L["deck.llm.runtime.title"])</span>
             <div class="rt-select">
-                <select @bind="_llmFlavor" aria-label="@(L["deck.llm.runtime.flavor"])">
+                <select value="@_llmFlavor" @onchange="OnLlmFlavorChanged" aria-label="@(L["deck.llm.runtime.flavor"])">
                     <option value="cuda">@(L["deck.llm.runtime.flavor.cuda"])</option>
                     <option value="cpu">@(L["deck.llm.runtime.flavor.cpu"])</option>
                 </select>
@@ -1010,7 +1014,7 @@
     // Lưu cả khối: validate → ocr.config.set → chỉ ghi settings.json khi set thành công (C14).
     private async Task SaveOcrParamsAsync()
     {
-        if (_ocrParamsBusy || _ocrSchema is null) return;
+        if (_ocrParamsBusy || !SettingsPanelSync.CanSaveOcrParams(_ocrSchema, _ocrSchemaFailed)) return;
         _ocrParamsBusy = true;
         try
         {
@@ -1079,7 +1083,7 @@
     // ngưỡng/cờ gộp dòng là settings độc lập, phải giữ nguyên giá trị user đang chọn.
     private async Task RestoreOcrParamsAsync()
     {
-        if (_ocrParamsBusy) return;
+        if (_ocrParamsBusy || !SettingsPanelSync.CanSaveOcrParams(_ocrSchema, _ocrSchemaFailed)) return;
         _ocrValues.Clear();
         ApplyOcrValuesToControls();
         await SaveOcrParamsAsync();
@@ -1294,7 +1298,7 @@
     {
         try
         {
-            _llmRuntime = await Pipeline.GetLlmRuntimeStatusAsync(CancellationToken.None);
+            _llmRuntime = await Pipeline.GetLlmRuntimeStatusAsync(CancellationToken.None, _llmFlavor);
         }
         catch (Exception)
         {
@@ -1390,6 +1394,16 @@
         }
     }
 
+    private void OnLlmFlavorChanged(ChangeEventArgs args)
+    {
+        string selected = args.Value?.ToString() == "cpu" ? "cpu" : "cuda";
+        if (selected == _llmFlavor) return;
+        _llmFlavor = selected;
+        _llmRuntimeCheck = null; // kết quả check thuộc flavor cũ
+        _llmRuntime = null;
+        _ = LoadLlmRuntimeAsync();
+    }
+
     private async Task CheckLlmRuntimeAsync()
     {
         if (_llmRuntimeBusy) return;
@@ -1429,16 +1443,19 @@
         _llmRuntimeBusy = true;
         try
         {
-            await Pipeline.DownloadLlmRuntimeAsync(_llmFlavor, CancellationToken.None);
+            long downloadAttempt = await Pipeline.DownloadLlmRuntimeAsync(_llmFlavor, CancellationToken.None);
             Toast.Show(L.Fmt("deck.llm.runtime.downloadStarted", L["deck.llm.runtime.flavor." + _llmFlavor]));
             for (int i = 0; i < LlmRuntimePollAttempts; i++)
             {
                 await Task.Delay(LlmRuntimePollInterval);
                 if (_disposed) return;
-                _llmRuntime = await Pipeline.GetLlmRuntimeStatusAsync(CancellationToken.None);
+                _llmRuntime = await Pipeline.GetLlmRuntimeStatusAsync(CancellationToken.None, _llmFlavor);
                 RequestRender();
-                switch (LlmRuntimePoll.Evaluate(_llmRuntime))
+                switch (LlmRuntimePoll.Evaluate(_llmRuntime, downloadAttempt))
                 {
+                    case LlmRuntimePollOutcome.Superseded:
+                        Toast.Show(L["deck.llm.runtime.downloadSuperseded"], ToastSeverity.Error);
+                        return;
                     case LlmRuntimePollOutcome.Failed:
                         Toast.Show(L["deck.llm.runtime.downloadFailed"], ToastSeverity.Error);
                         return;

@@ -135,6 +135,12 @@ public sealed record LlmRuntimeStatusInfo(string? Tag, bool Installed, string? S
 
     /// <summary>A download/update is in flight. Một lượt tải/cập nhật đang chạy.</summary>
     public bool Downloading { get; init; }
+
+    /// <summary>Latest registered attempt ID; 0 for an older Core. ID attempt mới nhất; 0 với Core cũ.</summary>
+    public long Attempt { get; init; }
+
+    /// <summary>Active runtime flavor, or <see langword="null"/> for a legacy/unknown state. Flavor runtime active, hoặc <see langword="null"/> khi state cũ/không rõ.</summary>
+    public string? Flavor { get; init; }
 }
 
 /// <summary>
@@ -385,8 +391,19 @@ public sealed class PipelineController : IPipelineControl
             // table's InUse state cannot keep pointing at a model from an older session.
             // Settings là nguồn sự thật: đồng bộ con trỏ catalog của Core trước start để trạng thái
             // InUse không giữ model của một phiên cũ.
-            await _peer.CallAsync("llm.models.set",
-                new JsonObject { ["name"] = settings.LlmActiveModel }, ct).ConfigureAwait(false);
+            try
+            {
+                await _peer.CallAsync("llm.models.set",
+                    new JsonObject { ["name"] = settings.LlmActiveModel }, ct).ConfigureAwait(false);
+            }
+            catch (RpcException ex) when (ex.Message.StartsWith("model is not installed:", StringComparison.Ordinal))
+            {
+                // Keep the same recovery contract as Core's factory: Home opens the model/runtime
+                // guidance only for this code, not for a raw preflight -32602.
+                // Giữ recovery contract như factory của Core: Home chỉ mở hướng dẫn model/runtime
+                // cho code này, không phải lỗi preflight -32602 thô.
+                throw new RpcException(-32603, $"llm-model-missing: {settings.LlmActiveModel}");
+            }
         }
         await _peer.CallAsync("core.start", @params, ct).ConfigureAwait(false);
         IsRunning = true;
@@ -656,12 +673,14 @@ public sealed class PipelineController : IPipelineControl
     /// Đọc trạng thái runtime llama.cpp qua <c>llm.runtime.status</c>.
     /// </summary>
     /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <param name="flavor">Optional flavor selection (<c>cuda</c>/<c>cpu</c>). Flavor tuỳ chọn cần kiểm tra (<c>cuda</c>/<c>cpu</c>).</param>
     /// <returns>The runtime status. Trạng thái runtime.</returns>
-    public async Task<LlmRuntimeStatusInfo> GetLlmRuntimeStatusAsync(CancellationToken ct)
+    public async Task<LlmRuntimeStatusInfo> GetLlmRuntimeStatusAsync(CancellationToken ct, string? flavor = null)
     {
         await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
         EnsureHandlersWired();
-        JsonNode? result = await _peer.CallAsync("llm.runtime.status", null, ct).ConfigureAwait(false);
+        JsonObject? request = flavor is null ? null : new JsonObject { ["flavor"] = flavor };
+        JsonNode? result = await _peer.CallAsync("llm.runtime.status", request, ct).ConfigureAwait(false);
         string? tag = result is JsonObject obj ? ReadNullableString(obj, "tag") : null;
         bool installed = result is JsonObject o2 && ReadBool(o2, "installed");
         string? serverPath = result is JsonObject o3 ? ReadNullableString(o3, "serverPath") : null;
@@ -670,6 +689,8 @@ public sealed class PipelineController : IPipelineControl
             Progress = result is JsonObject o4 ? ReadProgress(o4) : null,
             DownloadFailed = result is JsonObject o5 && ReadBool(o5, "downloadFailed"),
             Downloading = result is JsonObject o6 && ReadBool(o6, "downloading"),
+            Attempt = result is JsonObject o7 ? ReadLong(o7, "attempt") : 0,
+            Flavor = result is JsonObject o8 ? ReadNullableString(o8, "flavor") : null,
         };
     }
 
@@ -700,13 +721,15 @@ public sealed class PipelineController : IPipelineControl
     /// </summary>
     /// <param name="flavor"><c>cuda</c> or <c>cpu</c>. <c>cuda</c> hoặc <c>cpu</c>.</param>
     /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <returns>The accepted attempt ID, or 0 for an older Core. ID attempt được chấp nhận, hoặc 0 với Core cũ.</returns>
     /// <exception cref="RpcException">Propagated from Core for an unknown flavor. Đẩy ra từ Core khi flavor lạ.</exception>
-    public async Task DownloadLlmRuntimeAsync(string flavor, CancellationToken ct)
+    public async Task<long> DownloadLlmRuntimeAsync(string flavor, CancellationToken ct)
     {
         await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
         EnsureHandlersWired();
-        await _peer.CallAsync("llm.runtime.download",
+        JsonNode? result = await _peer.CallAsync("llm.runtime.download",
             new JsonObject { ["flavor"] = flavor }, ct).ConfigureAwait(false);
+        return result is JsonObject obj ? ReadLong(obj, "attempt") : 0;
     }
 
     /// <summary>
@@ -818,34 +841,38 @@ public sealed class PipelineController : IPipelineControl
     /// </summary>
     /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
     /// <returns>The schema entries in sidecar order. Các mục schema theo thứ tự sidecar.</returns>
-    /// <exception cref="RpcException">Propagated unchanged from Core when the sidecar is unavailable (-32603). Đẩy ra nguyên vẹn từ Core khi sidecar không sẵn sàng (-32603).</exception>
+    /// <exception cref="RpcException">Propagated when the sidecar is unavailable, or raised for a malformed/empty schema (-32603). Đẩy ra khi sidecar không sẵn sàng hoặc schema hỏng/rỗng (-32603).</exception>
     public async Task<IReadOnlyList<OcrParamSpec>> GetOcrConfigSchemaAsync(CancellationToken ct)
     {
         await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
         EnsureHandlersWired();
 
         JsonNode? result = await _peer.CallAsync("ocr.config.schema", null, ct).ConfigureAwait(false);
-        var specs = new List<OcrParamSpec>();
-        if (result?["params"] is JsonArray paramArray)
+        if (result is not JsonObject root || root["params"] is not JsonArray paramArray || paramArray.Count == 0)
         {
-            foreach (JsonNode? node in paramArray)
-            {
-                if (node is not JsonObject param) continue;
-                specs.Add(new OcrParamSpec(
-                    ReadString(param, "key"),
-                    ReadString(param, "group"),
-                    ReadString(param, "type"),
-                    param["default"],
-                    ReadBool(param, "reloadRequired"),
-                    ReadStringArray(param["values"]),
-                    ReadNullableDouble(param, "min"),
-                    ReadNullableDouble(param, "max"),
-                    ReadNullableDouble(param, "step"),
-                    ReadNullableString(param, "placeholder")));
-            }
+            throw InvalidOcrSchema();
+        }
+        var specs = new List<OcrParamSpec>();
+        foreach (JsonNode? node in paramArray)
+        {
+            if (node is not JsonObject param) throw InvalidOcrSchema();
+            specs.Add(new OcrParamSpec(
+                ReadString(param, "key"),
+                ReadString(param, "group"),
+                ReadString(param, "type"),
+                param["default"],
+                ReadBool(param, "reloadRequired"),
+                ReadStringArray(param["values"]),
+                ReadNullableDouble(param, "min"),
+                ReadNullableDouble(param, "max"),
+                ReadNullableDouble(param, "step"),
+                ReadNullableString(param, "placeholder")));
         }
         return specs;
     }
+
+    private static RpcException InvalidOcrSchema() =>
+        new(-32603, "ocr-config-schema-invalid: expected a non-empty 'params' array of objects.");
 
     /// <summary>
     /// Ensures the core process is running, then replaces the sidecar's engine override map
