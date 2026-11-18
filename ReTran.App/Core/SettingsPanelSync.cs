@@ -1,3 +1,6 @@
+using System.Text.Json.Nodes;
+using ReTran_App.Services;
+
 namespace ReTran_App.Core;
 
 /// <summary>
@@ -37,6 +40,38 @@ internal static class SettingsPanelSync
     internal static (IReadOnlyList<LlmModelInfo>? Models, bool Failed) LlmCatalogReload(
         IReadOnlyList<LlmModelInfo>? current, IReadOnlyList<LlmModelInfo> incoming) =>
         incoming.Count == 0 ? (current, true) : (incoming, false);
+
+    /// <summary>
+    /// Builds the settings saved after a successful OCR config update, preserving unrelated fields.
+    /// Dựng settings sau khi cập nhật OCR thành công, giữ nguyên các field không liên quan.
+    /// </summary>
+    internal static AppSettings WithOcrParams(
+        AppSettings current,
+        Dictionary<string, JsonNode?> engine,
+        int ocrFps,
+        int captureFps,
+        bool mergeLines,
+        double mergeGap,
+        double mergeHeight,
+        double mergeOverlap) =>
+        current with
+        {
+            OcrEngine = engine,
+            OcrFps = ocrFps,
+            CaptureFps = captureFps,
+            OcrMergeLines = mergeLines,
+            OcrMergeGap = mergeGap,
+            OcrMergeHeight = mergeHeight,
+            OcrMergeOverlap = mergeOverlap,
+        };
+
+    /// <summary>
+    /// Requires a non-blank user template containing <c>{source_text}</c> for the LLM provider.
+    /// Với provider LLM, bắt buộc template user không trắng và chứa <c>{source_text}</c>.
+    /// </summary>
+    internal static bool LlmUserPromptValid(string provider, string prompt) =>
+        !string.Equals(provider, "llm", StringComparison.OrdinalIgnoreCase)
+        || (!string.IsNullOrWhiteSpace(prompt) && prompt.Contains("{source_text}", StringComparison.Ordinal));
 
     /// <summary>Returns true only for the not-complete to complete edge. Chỉ true ở cạnh chuyển từ chưa hoàn tất sang hoàn tất.</summary>
     internal static bool WizardCompletionTransition(bool wasComplete, bool isComplete) =>

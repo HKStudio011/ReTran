@@ -212,10 +212,13 @@ def test_download_success_marks_installed(cache):
     # Mid-download: files already exist but the .partial marker hides them.
     assert (cache / "official_models" / REC / "inference.pdmodel").exists()
     assert not entry(manager, REC)["installed"]
+    assert entry(manager, REC)["downloading"] is True
+    assert "downloadError" not in entry(manager, REC)
 
     downloader.release.set()
     join_download(manager, REC)
     assert entry(manager, REC)["installed"]
+    assert entry(manager, REC)["downloading"] is False
     assert not (cache / "official_models" / f"{REC}.partial").exists()
     assert downloader.names == [REC]
 
@@ -228,6 +231,8 @@ def test_download_failure_stays_not_installed(cache):
     downloader.release.set()
     join_download(manager, REC)
     assert not entry(manager, REC)["installed"]
+    assert entry(manager, REC)["downloading"] is False
+    assert entry(manager, REC)["downloadError"] == "download boom"
     # the marker survives the failure — partial files must not count
     assert (cache / "official_models" / f"{REC}.partial").exists()
 

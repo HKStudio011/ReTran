@@ -692,6 +692,18 @@ public class PipelineControllerTests : IDisposable
                         ["name"] = "korean_PP-OCRv5_mobile_rec", ["kind"] = "rec",
                         ["langs"] = new JsonArray("ko", "en"),
                         ["sizeMb"] = 14.0, ["installed"] = false, ["inUse"] = false,
+                        ["downloading"] = true,
+                        ["progress"] = new JsonObject
+                        {
+                            ["receivedBytes"] = 100L, ["totalBytes"] = 400L, ["bytesPerSec"] = 50.0,
+                        },
+                    },
+                    new JsonObject
+                    {
+                        ["name"] = "arabic_PP-OCRv5_mobile_rec", ["kind"] = "rec",
+                        ["langs"] = new JsonArray("ar", "en"),
+                        ["sizeMb"] = 14.0, ["installed"] = false, ["inUse"] = false,
+                        ["downloading"] = false, ["downloadError"] = "download boom",
                     }),
                 ["active"] = new JsonObject { ["det"] = "PP-OCRv6_small_det", ["rec"] = "PP-OCRv6_small_rec" },
             }
@@ -704,7 +716,7 @@ public class PipelineControllerTests : IDisposable
         Assert.Equal("ocr.models.list", call.Method);
         Assert.Null(call.Params);
 
-        Assert.Equal(2, models.Count);
+        Assert.Equal(3, models.Count);
         OcrModelInfo det = models[0];
         Assert.Equal("PP-OCRv6_small_det", det.Name);
         Assert.Equal("det", det.Kind);
@@ -719,6 +731,16 @@ public class PipelineControllerTests : IDisposable
         Assert.Equal(14.0, rec.SizeMb);
         Assert.False(rec.Installed);
         Assert.False(rec.InUse);
+        Assert.True(rec.Downloading);
+        Assert.NotNull(rec.Progress);
+        Assert.Equal(100, rec.Progress!.ReceivedBytes);
+        Assert.Equal(400, rec.Progress.TotalBytes);
+        Assert.Equal(50.0, rec.Progress.BytesPerSec);
+        Assert.Null(rec.DownloadError);
+        OcrModelInfo failed = models[2];
+        Assert.False(failed.Downloading);
+        Assert.Equal("download boom", failed.DownloadError);
+        Assert.Null(failed.Progress);
     }
 
     [Fact]
@@ -766,9 +788,13 @@ public class PipelineControllerTests : IDisposable
 
         await controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None);
 
-        // Local: đúng {mode, model}; prompt null (chưa ghi đè) không đi wire — Core giữ mặc định
-        // Hy-MT2; field API cũng không được lẫn vào (spec D1/D10).
-        JsonObject llm = Assert.Single(peer.Calls).Params!["translate"]!["llm"]!.AsObject();
+        // Local: đồng bộ con trỏ active của catalog TRƯỚC core.start để InUse khớp model phiên;
+        // prompt null không đi wire và field API không lẫn vào (spec D1/D10).
+        Assert.Equal(2, peer.Calls.Count);
+        Assert.Equal("llm.models.set", peer.Calls[0].Method);
+        Assert.Equal("Hy-MT2-1.8B-UD-Q4_K_XL", peer.Calls[0].Params!["name"]!.GetValue<string>());
+        Assert.Equal("core.start", peer.Calls[1].Method);
+        JsonObject llm = peer.Calls[1].Params!["translate"]!["llm"]!.AsObject();
         Assert.Equal("local", llm["mode"]!.GetValue<string>());
         Assert.Equal("Hy-MT2-1.8B-UD-Q4_K_XL", llm["model"]!.GetValue<string>());
         Assert.Null(llm["baseUrl"]);
@@ -892,6 +918,27 @@ public class PipelineControllerTests : IDisposable
         Assert.Equal("Hy-MT2-7B-Q6_K", peer.Calls[1].Params!["name"]!.GetValue<string>());
         Assert.Equal("llm.models.set", peer.Calls[2].Method);
         Assert.Equal("Hy-MT2-1.8B-UD-Q4_K_XL", peer.Calls[2].Params!["name"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task LlmServerStatus_MapsWireShape()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        peer.Reply = method => method == "llm.server.status"
+            ? new JsonObject
+            {
+                ["state"] = "error", ["model"] = "Hy-MT2-1.8B-Q4_K_M",
+                ["error"] = "health timeout",
+            }
+            : null;
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        LlmServerStatusInfo status = await controller.GetLlmServerStatusAsync(CancellationToken.None);
+
+        Assert.Equal("llm.server.status", Assert.Single(peer.Calls).Method);
+        Assert.Equal("error", status.State);
+        Assert.Equal("Hy-MT2-1.8B-Q4_K_M", status.Model);
+        Assert.Equal("health timeout", status.Error);
     }
 
     [Fact]

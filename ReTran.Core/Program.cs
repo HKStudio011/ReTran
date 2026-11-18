@@ -131,7 +131,7 @@ public static class Program
             ILlamaServerHost serverRef = llmServers.GetOrCreate(modelName, runtime.ServerPath, modelPath);
             return new LlmTranslator(chat, llmSettings, async ct =>
             {
-                await serverRef.EnsureStartedAsync(ct).ConfigureAwait(false);
+                await llmServers.EnsureStartedAsync(serverRef, ct).ConfigureAwait(false);
                 return serverRef.BaseUrl;
             });
         }
@@ -172,6 +172,16 @@ public static class Program
         // llm.*: runtime + model của provider LLM, quản lý phía Core — setup wizard và Settings
         // dùng chung một đường RPC với các verb khác.
         LlmRpcHandlers.Register(server, llmModels, llmRuntime);
+        server.Register("llm.server.status", _ =>
+        {
+            LlamaServerStatus status = llmServers.Status;
+            return Task.FromResult<JsonNode?>(new JsonObject
+            {
+                ["state"] = status.State,
+                ["model"] = status.Model,
+                ["error"] = status.Error,
+            });
+        });
         // ocr.config.* proxies: the Settings UI reads the engine-parameter schema and saves
         // values through the core; the core forces deferReload from the session state.
         // Proxy ocr.config.*: UI Settings đọc schema tham số engine và lưu giá trị qua core;

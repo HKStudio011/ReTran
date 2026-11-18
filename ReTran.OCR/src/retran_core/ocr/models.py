@@ -170,6 +170,7 @@ class ModelManager:
         self._lock = threading.Lock()
         self._threads: dict[str, threading.Thread] = {}
         self._progress: dict[str, dict] = {}
+        self._download_errors: dict[str, str] = {}
         if engine is not None:
             self._det: str = engine.det_model
             self._rec: str = engine.rec_model
@@ -220,16 +221,20 @@ class ModelManager:
         """Return catalog states and the active pair for the UI.
 
         Returns:
-            ``{"catalog": [{name, kind, langs, sizeMb, installed, inUse[,
-            progress]}], "active": {"det": ..., "rec": ...}}`` — one entry per
-            catalog model in catalog order. ``inUse`` is true only for the two
-            models of the active pair; ``installed`` is derived from the
-            filesystem. ``progress`` (``receivedBytes``/``totalBytes``/
-            ``bytesPerSec``) appears only while a download is running and the
-            model directory is growing (wizard vòng 2 §9 — % + ETA).
+            ``{"catalog": [{name, kind, langs, sizeMb, installed, inUse,
+            downloading, downloadError?, progress?}], "active": {"det": ...,
+            "rec": ...}}`` — one entry per catalog model in catalog order.
+            ``inUse`` is true only for the two models of the active pair;
+            ``installed`` is derived from the filesystem. ``progress``
+            (``receivedBytes``/``totalBytes``/``bytesPerSec``) appears only
+            while a download is running and the model directory is growing
+            (wizard vòng 2 §9 — % + ETA). ``downloadError`` retains the latest
+            background failure until a retry or delete clears it.
         """
         with self._lock:
             progress_by_name = dict(self._progress)
+            downloading = set(self._threads)
+            errors = dict(self._download_errors)
         entries = []
         for m in self._catalog:
             item = {
@@ -239,7 +244,10 @@ class ModelManager:
                 "sizeMb": m.size_mb,
                 "installed": self._installed(m.name),
                 "inUse": m.name == self._det or m.name == self._rec,
+                "downloading": m.name in downloading,
             }
+            if m.name in errors:
+                item["downloadError"] = errors[m.name]
             progress = progress_by_name.get(m.name)
             if progress is not None:
                 item["progress"] = progress
@@ -268,6 +276,7 @@ class ModelManager:
         with self._lock:
             if name in self._threads or self._installed(name):
                 return  # already downloading, or nothing to do
+            self._download_errors.pop(name, None)
             self._official_dir().mkdir(parents=True, exist_ok=True)
             self._marker(name).write_text("", encoding="utf-8")
             thread = threading.Thread(
@@ -297,6 +306,8 @@ class ModelManager:
                 shutil.rmtree(model_dir, ignore_errors=True)
             self._downloader(name)
         except Exception as exc:  # noqa: BLE001 - report, keep marker, stay alive
+            with self._lock:
+                self._download_errors[name] = str(exc)
             print(
                 f"ocr.models.download failed for '{name}': {exc}",
                 file=sys.stderr,
@@ -365,6 +376,8 @@ class ModelManager:
         if model_dir.is_dir():
             shutil.rmtree(model_dir)
         self._marker(name).unlink(missing_ok=True)
+        with self._lock:
+            self._download_errors.pop(name, None)
 
     def set_pair(self, det: str, rec: str) -> None:
         """Switch the active det/rec pair.

@@ -1,4 +1,6 @@
+using System.Text.Json.Nodes;
 using ReTran_App.Core;
+using ReTran_App.Services;
 
 namespace ReTran.Tests;
 
@@ -98,5 +100,39 @@ public class SettingsPanelSyncTests
 
         Assert.Same(incoming, models);
         Assert.False(failed);
+    }
+
+    [Fact]
+    public void OcrParamsSave_EmptyEngineRestore_PreservesRhythmAndMergeSettings()
+    {
+        AppSettings current = AppSettings.Default with
+        {
+            OcrEngine = new Dictionary<string, JsonNode?> { ["device"] = JsonValue.Create("gpu:0") },
+        };
+
+        AppSettings saved = SettingsPanelSync.WithOcrParams(
+            current, new Dictionary<string, JsonNode?>(), ocrFps: 7, captureFps: 13,
+            mergeLines: false, mergeGap: 1.2, mergeHeight: 1.8, mergeOverlap: 0.7);
+
+        Assert.NotNull(saved.OcrEngine);
+        Assert.Empty(saved.OcrEngine);
+        Assert.Equal(7, saved.OcrFps);
+        Assert.Equal(13, saved.CaptureFps);
+        Assert.False(saved.OcrMergeLines);
+        Assert.Equal(1.2, saved.OcrMergeGap);
+        Assert.Equal(1.8, saved.OcrMergeHeight);
+        Assert.Equal(0.7, saved.OcrMergeOverlap);
+    }
+
+    [Theory]
+    [InlineData("google", "", true)]
+    [InlineData("llm", "", false)]
+    [InlineData("llm", "   ", false)]
+    [InlineData("llm", "Translate this text", false)]
+    [InlineData("llm", "Translate: {source_text}", true)]
+    public void LlmUserPromptValid_RequiresNonBlankTemplateWithSourcePlaceholder(
+        string provider, string prompt, bool expected)
+    {
+        Assert.Equal(expected, SettingsPanelSync.LlmUserPromptValid(provider, prompt));
     }
 }

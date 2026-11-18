@@ -50,6 +50,12 @@ public sealed record OcrModelInfo(
     /// reporting. Tiến độ tải đang chạy; <see langword="null"/> trừ khi có lượt tải đang báo tiến độ.
     /// </summary>
     public ReTran_App.Services.Setup.DownloadProgress? Progress { get; init; }
+
+    /// <summary>A background model download is running. Có lượt tải model nền đang chạy.</summary>
+    public bool Downloading { get; init; }
+
+    /// <summary>Latest background download error, or <see langword="null"/>. Lỗi tải nền gần nhất, hoặc <see langword="null"/>.</summary>
+    public string? DownloadError { get; init; }
 }
 
 /// <summary>
@@ -138,6 +144,15 @@ public sealed record LlmRuntimeStatusInfo(string? Tag, bool Installed, string? S
 /// <param name="Current">Installed tag, or <see langword="null"/>. Tag đã cài, hoặc <see langword="null"/>.</param>
 /// <param name="Latest">Newest matching release tag, or <see langword="null"/> when none matches. Tag release khớp mới nhất, hoặc <see langword="null"/> khi không có.</param>
 public sealed record LlmRuntimeCheckInfo(string? Current, string? Latest);
+
+/// <summary>
+/// Lazy local llama.cpp server state (<c>llm.server.status</c>).
+/// Trạng thái server llama.cpp local khởi động lười (<c>llm.server.status</c>).
+/// </summary>
+/// <param name="State"><c>stopped</c>, <c>loading</c>, <c>ready</c> or <c>error</c>. Trạng thái vòng đời server.</param>
+/// <param name="Model">Active local model, or <see langword="null"/> when stopped. Model local đang dùng, hoặc <see langword="null"/> khi đã dừng.</param>
+/// <param name="Error">Startup/health error, or <see langword="null"/>. Lỗi khởi động/health, hoặc <see langword="null"/>.</param>
+public sealed record LlmServerStatusInfo(string State, string? Model, string? Error);
 
 /// <summary>
 /// App-side orchestrator over <see cref="ICorePeer"/>: starts/stops the Core pipeline
@@ -273,7 +288,10 @@ public sealed class PipelineController : IPipelineControl
     /// Mỗi lần start phiên sẽ xoá guard seq trên wire trước khi gửi <c>core.start</c>, vì Core
     /// khởi động lại seq <c>frame.annotated</c> từ 1 cho mỗi phiên. Guard seqlock của vùng nhớ
     /// không bị reset: writer gieo bộ đếm từ vùng nhớ nên seq MMF chạy liên tục giữa các thế hệ
-    /// writer.
+    /// writer. Local LLM starts also send <c>llm.models.set</c> for the saved active model before
+    /// <c>core.start</c>, keeping Core's catalog pointer aligned with settings.
+    /// Lần start LLM local cũng gửi <c>llm.models.set</c> cho model active đã lưu trước
+    /// <c>core.start</c> để con trỏ catalog của Core khớp settings.
     /// </remarks>
     /// <param name="source">Capture source for the session. Nguồn capture cho phiên.</param>
     /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
@@ -360,6 +378,16 @@ public sealed class PipelineController : IPipelineControl
         // cho tới khi có lần ghi mới.
         _lastPreviewSeq = 0;
 
+        if (string.Equals(settings.Provider, "llm", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(settings.LlmMode, "local", StringComparison.OrdinalIgnoreCase))
+        {
+            // Settings is the source of truth: align Core's catalog pointer before starting so the
+            // table's InUse state cannot keep pointing at a model from an older session.
+            // Settings là nguồn sự thật: đồng bộ con trỏ catalog của Core trước start để trạng thái
+            // InUse không giữ model của một phiên cũ.
+            await _peer.CallAsync("llm.models.set",
+                new JsonObject { ["name"] = settings.LlmActiveModel }, ct).ConfigureAwait(false);
+        }
         await _peer.CallAsync("core.start", @params, ct).ConfigureAwait(false);
         IsRunning = true;
         ActiveSource = source;
@@ -491,6 +519,8 @@ public sealed class PipelineController : IPipelineControl
                     ReadBool(model, "inUse"))
                 {
                     Progress = ReadProgress(model),
+                    Downloading = ReadBool(model, "downloading"),
+                    DownloadError = ReadNullableString(model, "downloadError"),
                 });
             }
         }
@@ -602,6 +632,23 @@ public sealed class PipelineController : IPipelineControl
         EnsureHandlersWired();
         await _peer.CallAsync("llm.models.set",
             new JsonObject { ["name"] = name }, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reads the lazy local llama.cpp server state via <c>llm.server.status</c>.
+    /// Đọc trạng thái server llama.cpp local khởi động lười qua <c>llm.server.status</c>.
+    /// </summary>
+    /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
+    /// <returns>The server lifecycle state. Trạng thái vòng đời server.</returns>
+    public async Task<LlmServerStatusInfo> GetLlmServerStatusAsync(CancellationToken ct)
+    {
+        await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
+        EnsureHandlersWired();
+        JsonNode? result = await _peer.CallAsync("llm.server.status", null, ct).ConfigureAwait(false);
+        return new LlmServerStatusInfo(
+            result is JsonObject obj ? ReadNullableString(obj, "state") ?? "stopped" : "stopped",
+            result is JsonObject o2 ? ReadNullableString(o2, "model") : null,
+            result is JsonObject o3 ? ReadNullableString(o3, "error") : null);
     }
 
     /// <summary>

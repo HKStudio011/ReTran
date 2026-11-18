@@ -131,14 +131,25 @@
                                 <div class="rt-hint">@OcrMetaText(m)</div>
                             </td>
                             <td style="padding: 6px 8px; vertical-align: top;">
-                                <span class="rt-hint" style="@(m.Installed ? "" : "color: var(--rt-danger)")">@(m.Installed ? L["deck.ocr.installed"] : L["deck.ocr.notInstalled"])</span>
+                                @if (m.Downloading)
+                                {
+                                    <span class="rt-hint">@OcrProgressText(m)</span>
+                                }
+                                else
+                                {
+                                    <span class="rt-hint" style="@(m.Installed ? "" : "color: var(--rt-danger)")">@(m.Installed ? L["deck.ocr.installed"] : L["deck.ocr.notInstalled"])</span>
+                                }
                                 @if (m.InUse)
                                 {
                                     <span class="rt-hint" style="color: var(--rt-tally)">· @(L["deck.ocr.inUse"])</span>
                                 }
+                                @if (!string.IsNullOrWhiteSpace(m.DownloadError))
+                                {
+                                    <div class="rt-hint" style="color: var(--rt-danger); white-space: normal;">@(L.Fmt("deck.ocr.downloadFailed", m.DownloadError))</div>
+                                }
                             </td>
                             <td style="padding: 6px 0; text-align: right; vertical-align: top; white-space: nowrap;">
-                                <button type="button" class="rt-btn rt-mini" disabled="@(m.Installed || _ocrBusy)" @onclick="() => DownloadOcrModelAsync(m)">@(L["deck.ocr.download"])</button>
+                                <button type="button" class="rt-btn rt-mini" disabled="@(m.Installed || m.Downloading || _ocrBusy)" @onclick="() => DownloadOcrModelAsync(m)">@(L["deck.ocr.download"])</button>
                                 <button type="button" class="rt-btn rt-mini" disabled="@(m.InUse || !m.Installed || _ocrBusy)" @onclick="() => DeleteOcrModelAsync(m)">@(L["deck.ocr.delete"])</button>
                             </td>
                         </tr>
@@ -191,6 +202,13 @@
                                     <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
                                 </div>
                             }
+                            else if (p.Type == "json")
+                            {
+                                <textarea class="rt-input rt-mono" rows="3"
+                                          style="height: auto; min-height: 68px; padding: 7px 10px; resize: vertical; line-height: 1.4;"
+                                          placeholder="@OcrPlaceholder(p)" @bind="_ocrText[p.Key]" @bind:event="oninput"
+                                          aria-label="@label" aria-invalid="@(_ocrFieldErrors.ContainsKey(p.Key))"></textarea>
+                            }
                             else if (p.Type is "int" or "float")
                             {
                                 <input type="number" class="rt-input rt-mono"
@@ -203,6 +221,10 @@
                                        @bind="_ocrText[p.Key]" aria-label="@label" />
                             }
                             <p class="rt-hint">@(L["ocr.param." + p.Key + ".hint"])</p>
+                            @if (_ocrFieldErrors.TryGetValue(p.Key, out string? fieldError))
+                            {
+                                <p class="rt-hint" style="color: var(--rt-danger);">@(L["ocr.param.error." + fieldError])</p>
+                            }
                         </div>
                     }
                 </div>
@@ -301,6 +323,10 @@
             }
         </div>
         <p class="rt-hint" style="margin-bottom: 4px;">@LlmRuntimeText</p>
+        <div class="rt-field-row" style="flex-wrap: wrap; gap: 8px; margin-bottom: 4px;">
+            <p class="rt-hint" style="@(_llmServerStatusFailed || _llmServerStatus?.State == "error" ? "color: var(--rt-danger);" : "")">@LlmServerStatusText</p>
+            <button type="button" class="rt-btn rt-mini" disabled="@_llmServerStatusBusy" @onclick="LoadLlmServerStatusAsync">@(L["deck.llm.refresh"])</button>
+        </div>
         <p class="rt-hint" style="margin-bottom: 10px;">@(L["deck.llm.note.vram"])</p>
 
         @* Bảng model GGUF: tên/quant/size + trạng thái + Tải/Xoá/Đặt (mirror bảng OCR). *@
@@ -353,7 +379,7 @@
                                     {
                                         <span class="rt-hint" style="@(m.Installed ? "" : "color: var(--rt-danger)")">@(m.Installed ? L["deck.llm.installed"] : L["deck.llm.notInstalled"])</span>
                                     }
-                                    @if (m.InUse)
+                                    @if (IsLlmActive(m))
                                     {
                                         <span class="rt-hint" style="color: var(--rt-tally)">· @(L["deck.llm.inUse"])</span>
                                     }
@@ -364,8 +390,8 @@
                                 </td>
                                 <td style="padding: 6px 0; text-align: right; vertical-align: top; white-space: nowrap;">
                                     <button type="button" class="rt-btn rt-mini" disabled="@(m.Installed || m.Downloading || _llmModelsBusy)" @onclick="() => DownloadLlmModelAsync(m)">@(L["deck.llm.download"])</button>
-                                    <button type="button" class="rt-btn rt-mini" disabled="@(m.InUse || m.Downloading || !m.Installed || _llmModelsBusy)" @onclick="() => DeleteLlmModelAsync(m)">@(L["deck.llm.delete"])</button>
-                                    <button type="button" class="rt-btn rt-mini" disabled="@(m.InUse || m.Downloading || !m.Installed || _llmModelsBusy)" @onclick="() => UseLlmModelAsync(m)">@(L["deck.llm.use"])</button>
+                                    <button type="button" class="rt-btn rt-mini" disabled="@(IsLlmActive(m) || m.Downloading || !m.Installed || _llmModelsBusy)" @onclick="() => DeleteLlmModelAsync(m)">@(L["deck.llm.delete"])</button>
+                                    <button type="button" class="rt-btn rt-mini" disabled="@(IsLlmActive(m) || m.Downloading || !m.Installed || _llmModelsBusy)" @onclick="() => UseLlmModelAsync(m)">@(L["deck.llm.use"])</button>
                                 </td>
                             </tr>
                         }
@@ -519,6 +545,8 @@
     private bool _appearanceLoaded;
 
     // OCR model manager: null = chưa nạp catalog; _ocrBusy chặn bấm chồng khi RPC đang chạy.
+    private static readonly TimeSpan OcrDownloadPollInterval = TimeSpan.FromSeconds(2);
+    private const int OcrDownloadPollAttempts = 300;
     private IReadOnlyList<OcrModelInfo>? _ocrModels;
     private bool _ocrLoadFailed;
     private bool _ocrBusy;
@@ -534,6 +562,7 @@
     private bool _ocrParamsBusy;
     private readonly Dictionary<string, string> _ocrText = new();
     private readonly Dictionary<string, bool> _ocrBool = new();
+    private readonly Dictionary<string, string> _ocrFieldErrors = new();
     // Key user đã đặt trong settings.json — nguồn cho control; {} = mọi giá trị về mặc định (C5).
     private Dictionary<string, JsonNode?> _ocrValues = new();
     private string _ocrFpsText = "3";
@@ -563,6 +592,9 @@
     private LlmRuntimeStatusInfo? _llmRuntime;
     private LlmRuntimeCheckInfo? _llmRuntimeCheck;
     private bool _llmRuntimeBusy;
+    private LlmServerStatusInfo? _llmServerStatus;
+    private bool _llmServerStatusFailed;
+    private bool _llmServerStatusBusy;
     private bool _wasSetupComplete;
     private bool _setupResyncBusy;
     private bool _disposed;
@@ -607,11 +639,13 @@
         L.Changed += OnStateChanged;
         Js.OnWebViewReady += OnStateChanged;
         Setup.Changed += OnSetupChanged; // theo dõi wizard để hiện/ẩn section + resync sau completion
+        Pipeline.StateChanged += OnPipelineChanged;
         _wasSetupComplete = Setup.IsComplete;
         _ = LoadOcrModelsAsync(syncFromActive: true); // lần đầu: hiển thị cặp sidecar đang dùng thật
         _ = LoadOcrSchemaAsync(); // nạp schema tham số engine từ Core (fire-and-forget)
         _ = LoadLlmModelsAsync(); // nạp catalog GGUF từ Core (fire-and-forget)
         _ = LoadLlmRuntimeAsync(); // nạp trạng thái runtime llama.cpp từ Core (fire-and-forget)
+        _ = LoadLlmServerStatusAsync(); // trạng thái server local lazy (loading/ready/error/stopped)
         base.OnInitialized();
     }
 
@@ -625,6 +659,13 @@
     {
         await LoadAppearanceAsync();
         StateHasChanged();
+    });
+
+    private void OnPipelineChanged() => _ = InvokeAsync(async () =>
+    {
+        if (_disposed) return;
+        await LoadLlmServerStatusAsync();
+        if (!_disposed) StateHasChanged();
     });
 
     // Theme/accent sống trong localStorage của WebView — đọc lại sau khi JS bridge sẵn sàng.
@@ -647,11 +688,9 @@
 
     private void Save()
     {
-        // Prompt LLM: chỉ bắt buộc {source_text} khi provider đang là llm — Core từ chối ở core.start
-        // nếu thiếu (spec D1); chặn ngay tại đây để user sửa trước khi lưu. Ô trống = mặc định Hy-MT2.
-        if (_model.Provider == "llm"
-            && !string.IsNullOrWhiteSpace(_llmUserPromptText)
-            && !_llmUserPromptText.Contains("{source_text}", StringComparison.Ordinal))
+        // Prompt LLM: ô trắng hoặc thiếu {source_text} đều lỗi ngay tại Settings — không để Core
+        // âm thầm đổi hành vi user vừa nhập thành prompt mặc định ở lần Start kế tiếp (spec D1).
+        if (!SettingsPanelSync.LlmUserPromptValid(_model.Provider, _llmUserPromptText))
         {
             _statusKind = "llmPromptInvalid";
             return;
@@ -702,6 +741,23 @@
 
     private string OcrMetaText(OcrModelInfo m) =>
         $"{m.Kind} · {L.Fmt("deck.ocr.langsCount", m.Langs.Count)} · {CompactLangs(m)} · {m.SizeMb:0.#} MB";
+
+    private string OcrProgressText(OcrModelInfo m)
+    {
+        if (m.Progress is not { } progress) return L["deck.ocr.downloading"];
+        (int? percent, TimeSpan? eta) = ReTran_App.Services.Setup.DownloadProgressText.Format(
+            progress.ReceivedBytes, progress.TotalBytes, progress.BytesPerSec);
+        if (percent is not int value) return L["deck.ocr.downloading"];
+        string text = L.Fmt("deck.ocr.progress", value);
+        if (eta is { } remaining) text += " · " + L.Fmt("setup.progress.eta", FormatEta(remaining));
+        else if (progress.BytesPerSec is null or <= 0) text += " · " + L["setup.progress.retry"];
+        return text;
+    }
+
+    private string FormatEta(TimeSpan eta) =>
+        eta.TotalMinutes < 1
+            ? L.Fmt("setup.progress.seconds", Math.Max(1, Math.Ceiling(eta.TotalSeconds)).ToString("0"))
+            : L.Fmt("setup.progress.minutes", Math.Ceiling(eta.TotalMinutes).ToString("0"));
 
     // Nhóm bảng model OCR (spec 17-11 §11): họ OCR v6 trước, rồi rec legacy (nhóm "Ngôn ngữ"),
     // phần còn lại (det ngoài họ v6…) vào "Khác". Thứ tự catalog giữ nguyên trong từng nhóm.
@@ -786,7 +842,25 @@
         {
             await Pipeline.DownloadOcrModelAsync(model.Name, CancellationToken.None);
             Toast.Show(L.Fmt("deck.ocr.downloadStarted", model.Name));
-            await LoadOcrModelsAsync(); // model tải ngầm phía sidecar — Làm mới để thấy Đã cài.
+            for (int i = 0; i < OcrDownloadPollAttempts; i++)
+            {
+                await LoadOcrModelsAsync();
+                OcrModelInfo? current = _ocrModels?.FirstOrDefault(m => m.Name == model.Name);
+                if (current?.Installed == true)
+                {
+                    Toast.Show(L.Fmt("deck.ocr.downloaded", model.Name));
+                    return;
+                }
+                if (current?.Downloading == false)
+                {
+                    string error = current.DownloadError ?? L["deck.ocr.downloadEnded"];
+                    Toast.Show(L.Fmt("deck.ocr.actionFailed", error), ToastSeverity.Error);
+                    return;
+                }
+                await Task.Delay(OcrDownloadPollInterval);
+                if (_disposed) return;
+            }
+            Toast.Show(L["deck.ocr.downloadTimeout"], ToastSeverity.Error);
         }
         catch (Exception ex)
         {
@@ -903,6 +977,7 @@
         if (_ocrSchema is null) return;
         _ocrText.Clear();
         _ocrBool.Clear();
+        _ocrFieldErrors.Clear();
         foreach (OcrParamSpec spec in _ocrSchema)
         {
             JsonNode? value = _ocrValues.TryGetValue(spec.Key, out JsonNode? stored) && stored is not null
@@ -926,12 +1001,14 @@
         _ocrParamsBusy = true;
         try
         {
+            _ocrFieldErrors.Clear();
             var map = new Dictionary<string, JsonNode?>();
             foreach (OcrParamSpec spec in _ocrSchema)
             {
                 string? error = BuildOcrWireValue(spec, out JsonNode? value);
                 if (error is not null)
                 {
+                    _ocrFieldErrors[spec.Key] = error;
                     SetOcrStatus(L.Fmt("deck.ocr.params.invalid", L["ocr.param." + spec.Key + ".label"],
                         L["ocr.param.error." + error]), isError: true);
                     return;
@@ -964,16 +1041,9 @@
             }
 
             OcrConfigSetResult result = await Pipeline.SetOcrConfigAsync(map, CancellationToken.None);
-            SettingsStore.Save(SettingsStore.Load() with
-            {
-                OcrEngine = map,
-                OcrFps = ocrFps,
-                CaptureFps = captureFps,
-                OcrMergeLines = _mergeLines,
-                OcrMergeGap = mergeGap,
-                OcrMergeHeight = mergeHeight,
-                OcrMergeOverlap = mergeOverlap,
-            });
+            SettingsStore.Save(SettingsPanelSync.WithOcrParams(
+                SettingsStore.Load(), map, ocrFps, captureFps,
+                _mergeLines, mergeGap, mergeHeight, mergeOverlap));
             _ocrValues = new Dictionary<string, JsonNode?>(map);
             SetOcrStatus(L[result.Deferred.Count > 0 ? "deck.ocr.params.deferred" : "deck.ocr.params.applied"],
                 isError: false);
@@ -992,16 +1062,13 @@
         }
     }
 
-    // Khôi phục mặc định: control về default schema rồi lưu như thường — map rỗng = sidecar reset (C12).
+    // Khôi phục mặc định CHỈ khối ocrEngine: map rỗng = sidecar reset (C5/C12). FPS và các
+    // ngưỡng/cờ gộp dòng là settings độc lập, phải giữ nguyên giá trị user đang chọn.
     private async Task RestoreOcrParamsAsync()
     {
         if (_ocrParamsBusy) return;
         _ocrValues.Clear();
         ApplyOcrValuesToControls();
-        _mergeLines = AppSettings.Default.OcrMergeLines; // restore đưa cả cờ gộp dòng về mặc định.
-        _mergeGapText = FormatThreshold(OcrMergeThresholds.DefaultGap);
-        _mergeHeightText = FormatThreshold(OcrMergeThresholds.DefaultHeight);
-        _mergeOverlapText = FormatThreshold(OcrMergeThresholds.DefaultOverlap);
         await SaveOcrParamsAsync();
     }
 
@@ -1152,6 +1219,25 @@
         }
     }
 
+    private string LlmServerStatusText
+    {
+        get
+        {
+            if (_llmServerStatusFailed) return L["deck.llm.server.loadFailed"];
+            if (_llmServerStatus is null) return L["deck.llm.loading"];
+            return _llmServerStatus.State switch
+            {
+                "loading" => L.Fmt("deck.llm.server.loading", _llmServerStatus.Model ?? "?"),
+                "ready" => L.Fmt("deck.llm.server.ready", _llmServerStatus.Model ?? "?"),
+                "error" => L.Fmt("deck.llm.server.error", _llmServerStatus.Error ?? "?"),
+                _ => L["deck.llm.server.stopped"],
+            };
+        }
+    }
+
+    private bool IsLlmActive(LlmModelInfo model) =>
+        string.Equals(model.Name, _llmActiveModel, StringComparison.Ordinal);
+
     private string LlmMetaText(LlmModelInfo m) =>
         $"{m.SizeClass} · {m.Quant} · {FormatSize(m.SizeBytes)}";
 
@@ -1182,6 +1268,7 @@
         {
             await LoadLlmModelsAsync();
             await LoadLlmRuntimeAsync();
+            await LoadLlmServerStatusAsync();
         }
         finally
         {
@@ -1199,6 +1286,26 @@
         catch (Exception)
         {
             // Core chưa sẵn sàng — giữ trạng thái cũ; Kiểm tra/Làm mới thử lại.
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task LoadLlmServerStatusAsync()
+    {
+        if (_llmServerStatusBusy) return;
+        _llmServerStatusBusy = true;
+        try
+        {
+            _llmServerStatus = await Pipeline.GetLlmServerStatusAsync(CancellationToken.None);
+            _llmServerStatusFailed = false;
+        }
+        catch (Exception)
+        {
+            _llmServerStatusFailed = true; // giữ snapshot cũ, Refresh/đợi Pipeline.StateChanged sau
+        }
+        finally
+        {
+            _llmServerStatusBusy = false;
         }
         await InvokeAsync(StateHasChanged);
     }
@@ -1477,6 +1584,7 @@
         await LoadOcrModelsAsync();
         await LoadLlmModelsAsync();
         await LoadLlmRuntimeAsync();
+        await LoadLlmServerStatusAsync();
     }
 
     public void Dispose()
@@ -1485,5 +1593,6 @@
         L.Changed -= OnStateChanged;
         Js.OnWebViewReady -= OnStateChanged;
         Setup.Changed -= OnSetupChanged;
+        Pipeline.StateChanged -= OnPipelineChanged;
     }
 }
