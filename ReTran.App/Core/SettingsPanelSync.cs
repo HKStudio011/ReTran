@@ -73,6 +73,9 @@ internal static class SettingsPanelSync
         !string.Equals(provider, "llm", StringComparison.OrdinalIgnoreCase)
         || (!string.IsNullOrWhiteSpace(prompt) && prompt.Contains("{source_text}", StringComparison.Ordinal));
 
+    /// <summary>Returns whether a component may render after its disposal state changes. Cho biết component còn được render sau khi trạng thái dispose thay đổi.</summary>
+    internal static bool ShouldRender(bool disposed) => !disposed;
+
     /// <summary>Returns true only for the not-complete to complete edge. Chỉ true ở cạnh chuyển từ chưa hoàn tất sang hoàn tất.</summary>
     internal static bool WizardCompletionTransition(bool wasComplete, bool isComplete) =>
         !wasComplete && isComplete;

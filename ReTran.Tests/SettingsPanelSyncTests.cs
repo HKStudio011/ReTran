@@ -125,6 +125,14 @@ public class SettingsPanelSyncTests
     }
 
     [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public void ShouldRender_DisposedPanelBlocksRender(bool disposed, bool expected)
+    {
+        Assert.Equal(expected, SettingsPanelSync.ShouldRender(disposed));
+    }
+
+    [Theory]
     [InlineData("google", "", true)]
     [InlineData("llm", "", false)]
     [InlineData("llm", "   ", false)]

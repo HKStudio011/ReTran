@@ -172,6 +172,8 @@ public sealed class AppSettingsService(string? path = null)
     /// </summary>
     /// <param name="s">Settings to persist. Cài đặt cần lưu.</param>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="s"/> is null. Ném khi <paramref name="s"/> là null.</exception>
+    /// <exception cref="IOException">Thrown when the temporary or destination file cannot be written or replaced. Ném khi không ghi hoặc thay thế được file tạm/đích.</exception>
+    /// <exception cref="UnauthorizedAccessException">Thrown when the settings directory or file denies access. Ném khi thư mục hoặc file settings từ chối quyền truy cập.</exception>
     public void Save(AppSettings s)
     {
         ArgumentNullException.ThrowIfNull(s);

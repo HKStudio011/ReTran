@@ -69,9 +69,13 @@
 
 <section class="rt-sect">
     <h3>@(L["deck.settings.section.ocr"])</h3>
-    @if (_ocrModels is null)
+    @if (_ocrModels is null || _ocrModels.Count == 0)
     {
-        <p class="rt-hint">@(_ocrLoadFailed ? L["deck.ocr.loadFailed"] : L["deck.ocr.loading"])</p>
+        <p class="rt-hint">@(_ocrLoadFailed ? L["deck.ocr.loadFailed"] : _ocrModels is null ? L["deck.ocr.loading"] : L["deck.ocr.empty"])</p>
+        @if (_ocrModels is not null || _ocrLoadFailed)
+        {
+            <button type="button" class="rt-btn rt-mini" style="margin-top: 6px;" disabled="@_ocrBusy" @onclick="ReloadOcrModelsAsync">@(L["deck.ocr.refresh"])</button>
+        }
     }
     else
     {
@@ -108,7 +112,7 @@
             <button type="button" class="rt-btn rt-mini" disabled="@_ocrBusy" @onclick="ReloadOcrModelsAsync">@(L["deck.ocr.refresh"])</button>
         </div>
         <p class="rt-hint" style="margin-bottom: 10px;">@OcrActivePairText @(L["deck.ocr.downloadHint"])</p>
-        <table style="width: 100%; border-collapse: collapse; font-size: 11.5px;">
+        <table class="rt-model-table">
             <thead>
                 <tr style="color: var(--rt-dim); text-align: left;">
                     <th style="font-weight: 500; padding: 4px 8px 4px 0;">@(L["deck.ocr.col.model"])</th>
@@ -121,7 +125,7 @@
                 @foreach ((string groupKey, List<OcrModelInfo> group) in OcrTableGroups())
                 {
                     <tr>
-                        <td colspan="3" style="padding: 8px 0 2px; color: var(--rt-dim); font-size: 11px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase;">@(L[groupKey])</td>
+                        <td colspan="3" class="rt-model-group">@(L[groupKey])</td>
                     </tr>
                     @foreach (OcrModelInfo m in group)
                     {
@@ -174,7 +178,7 @@
         @foreach (IGrouping<string, OcrParamSpec> group in _ocrSchema.GroupBy(p => p.Group))
         {
             <details open="@(group.Key is not ("device" or "models"))"
-                     style="border: 1px solid var(--rt-line); border-radius: var(--rt-r2); padding: 8px 10px; margin-bottom: 8px;">
+                     class="rt-subcard" style="margin-bottom: 8px;">
                 <summary style="cursor: pointer; font-size: 11.5px; color: var(--rt-dim); letter-spacing: .02em;">@(L["ocr.group." + group.Key])</summary>
                 <div style="margin-top: 10px;">
                     @foreach (OcrParamSpec p in group)
@@ -232,7 +236,7 @@
         }
         @* Nhịp OCR: 2 tham số pipeline (không thuộc schema sidecar), chỉ áp dụng ở core.start kế tiếp. *@
         <details open="true"
-                 style="border: 1px solid var(--rt-line); border-radius: var(--rt-r2); padding: 8px 10px; margin-bottom: 8px;">
+                 class="rt-subcard" style="margin-bottom: 8px;">
             <summary style="cursor: pointer; font-size: 11.5px; color: var(--rt-dim); letter-spacing: .02em;">@(L["ocr.group.rhythm"])</summary>
             <div style="margin-top: 10px;">
                 <div class="rt-srow">
@@ -348,7 +352,7 @@
                 <span class="rt-hint">@(L.Fmt("deck.llm.activeModel", _llmActiveModel))</span>
                 <button type="button" class="rt-btn rt-mini" disabled="@_llmModelsBusy" @onclick="ReloadLlmModelsAsync">@(L["deck.llm.refresh"])</button>
             </div>
-            <table style="width: 100%; border-collapse: collapse; font-size: 11.5px;">
+            <table class="rt-model-table">
                 <thead>
                     <tr style="color: var(--rt-dim); text-align: left;">
                         <th style="font-weight: 500; padding: 4px 8px 4px 0;">@(L["deck.llm.col.model"])</th>
@@ -361,7 +365,7 @@
                     @foreach (IGrouping<string, LlmModelInfo> group in _llmModels.GroupBy(m => m.SizeClass))
                     {
                         <tr>
-                            <td colspan="3" style="padding: 8px 0 2px; color: var(--rt-dim); font-size: 11px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase;">@(L.Fmt("deck.llm.group", group.Key))</td>
+                            <td colspan="3" class="rt-model-group">@(L.Fmt("deck.llm.group", group.Key))</td>
                         </tr>
                         @foreach (LlmModelInfo m in group)
                         {
@@ -421,7 +425,7 @@
     }
 
     @* Khối prompt: hiển thị mặc định Hy-MT2 khi chưa ghi đè (D11); khôi phục = nạp lại mặc định. *@
-    <details open="true" style="border: 1px solid var(--rt-line); border-radius: var(--rt-r2); padding: 8px 10px; margin-top: 10px;">
+    <details open="true" class="rt-subcard" style="margin-top: 10px;">
         <summary style="cursor: pointer; font-size: 11.5px; color: var(--rt-dim); letter-spacing: .02em;">@(L["deck.llm.prompt.title"])</summary>
         <div style="margin-top: 10px;">
             <div class="rt-srow">
@@ -609,6 +613,15 @@
 
     private static string Pressed(bool value) => value ? "true" : "false";
 
+    // Mọi callback/poll đi qua gate này: unsubscribe không đủ vì một await có thể hoàn tất sau Dispose.
+    private void RequestRender()
+    {
+        if (SettingsPanelSync.ShouldRender(_disposed)) StateHasChanged();
+    }
+
+    private Task RequestRenderAsync() =>
+        SettingsPanelSync.ShouldRender(_disposed) ? InvokeAsync(StateHasChanged) : Task.CompletedTask;
+
     protected override void OnInitialized()
     {
         AppSettings current = SettingsStore.Load();
@@ -658,14 +671,14 @@
     private void OnStateChanged() => _ = InvokeAsync(async () =>
     {
         await LoadAppearanceAsync();
-        StateHasChanged();
+        RequestRender();
     });
 
     private void OnPipelineChanged() => _ = InvokeAsync(async () =>
     {
         if (_disposed) return;
         await LoadLlmServerStatusAsync();
-        if (!_disposed) StateHasChanged();
+        if (!_disposed) RequestRender();
     });
 
     // Theme/accent sống trong localStorage của WebView — đọc lại sau khi JS bridge sẵn sàng.
@@ -816,7 +829,7 @@
             // Core chưa sẵn sàng — giữ danh sách cũ/placeholder, bấm Làm mới thử lại.
             _ocrLoadFailed = true;
         }
-        await InvokeAsync(StateHasChanged);
+        await RequestRenderAsync();
     }
 
     private async Task ReloadOcrModelsAsync()
@@ -830,7 +843,7 @@
         finally
         {
             _ocrBusy = false;
-            StateHasChanged();
+            RequestRender();
         }
     }
 
@@ -869,7 +882,7 @@
         finally
         {
             _ocrBusy = false;
-            StateHasChanged();
+            RequestRender();
         }
     }
 
@@ -890,7 +903,7 @@
         finally
         {
             _ocrBusy = false;
-            StateHasChanged();
+            RequestRender();
         }
     }
 
@@ -919,7 +932,7 @@
         finally
         {
             _ocrBusy = false;
-            StateHasChanged();
+            RequestRender();
         }
     }
 
@@ -938,7 +951,7 @@
             // Core/sidecar chưa sẵn sàng — giữ schema cũ (nếu có), bấm Làm mới thử lại.
             _ocrSchemaFailed = true;
         }
-        await InvokeAsync(StateHasChanged);
+        await RequestRenderAsync();
     }
 
     private async Task ReloadOcrSchemaAsync()
@@ -952,7 +965,7 @@
         finally
         {
             _ocrParamsBusy = false;
-            StateHasChanged();
+            RequestRender();
         }
     }
 
@@ -1058,7 +1071,7 @@
         finally
         {
             _ocrParamsBusy = false;
-            StateHasChanged();
+            RequestRender();
         }
     }
 
@@ -1257,7 +1270,7 @@
         {
             _llmModelsFailed = true; // giữ catalog hợp lệ cuối (nếu có), hiện lỗi + Refresh
         }
-        await InvokeAsync(StateHasChanged);
+        await RequestRenderAsync();
     }
 
     private async Task ReloadLlmModelsAsync()
@@ -1273,7 +1286,7 @@
         finally
         {
             _llmModelsBusy = false;
-            StateHasChanged();
+            RequestRender();
         }
     }
 
@@ -1287,7 +1300,7 @@
         {
             // Core chưa sẵn sàng — giữ trạng thái cũ; Kiểm tra/Làm mới thử lại.
         }
-        await InvokeAsync(StateHasChanged);
+        await RequestRenderAsync();
     }
 
     private async Task LoadLlmServerStatusAsync()
@@ -1307,7 +1320,7 @@
         {
             _llmServerStatusBusy = false;
         }
-        await InvokeAsync(StateHasChanged);
+        await RequestRenderAsync();
     }
 
     private async Task DownloadLlmModelAsync(LlmModelInfo model)
@@ -1327,7 +1340,7 @@
         finally
         {
             _llmModelsBusy = false;
-            StateHasChanged();
+            RequestRender();
         }
     }
 
@@ -1348,7 +1361,7 @@
         finally
         {
             _llmModelsBusy = false;
-            StateHasChanged();
+            RequestRender();
         }
     }
 
@@ -1373,7 +1386,7 @@
         finally
         {
             _llmModelsBusy = false;
-            StateHasChanged();
+            RequestRender();
         }
     }
 
@@ -1405,7 +1418,7 @@
         finally
         {
             _llmRuntimeBusy = false;
-            StateHasChanged();
+            RequestRender();
         }
     }
 
@@ -1423,7 +1436,7 @@
                 await Task.Delay(LlmRuntimePollInterval);
                 if (_disposed) return;
                 _llmRuntime = await Pipeline.GetLlmRuntimeStatusAsync(CancellationToken.None);
-                StateHasChanged();
+                RequestRender();
                 switch (LlmRuntimePoll.Evaluate(_llmRuntime))
                 {
                     case LlmRuntimePollOutcome.Failed:
@@ -1446,7 +1459,7 @@
         finally
         {
             _llmRuntimeBusy = false;
-            StateHasChanged();
+            RequestRender();
         }
     }
 
@@ -1567,7 +1580,7 @@
                 _setupResyncBusy = false;
             }
         }
-        if (!_disposed) StateHasChanged();
+        if (!_disposed) RequestRender();
     });
 
     // Wizard chỉ ghi OcrDet/OcrRec/LlmActiveModel. Merge từng field theo baseline để edit chưa lưu

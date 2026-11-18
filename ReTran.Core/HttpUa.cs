@@ -32,6 +32,8 @@ internal static class HttpUa
     /// Gán các header mặc định giống trình duyệt cho <paramref name="client"/> (User-Agent +
     /// Accept-Language) rồi trả về để nối chuỗi.
     /// </summary>
+    /// <param name="client">Client whose default request headers are updated. Client cần cập nhật default request headers.</param>
+    /// <returns>The same client for chaining. Chính client đầu vào để nối chuỗi.</returns>
     public static HttpClient Apply(HttpClient client)
     {
         client.DefaultRequestHeaders.UserAgent.ParseAdd(BrowserUserAgent);
@@ -43,5 +45,6 @@ internal static class HttpUa
     /// Creates an <see cref="HttpClient"/> with the browser-like default headers applied.
     /// Tạo <see cref="HttpClient"/> đã gán sẵn các header mặc định giống trình duyệt.
     /// </summary>
+    /// <returns>A new client with the browser-like headers. Client mới đã có header giống trình duyệt.</returns>
     public static HttpClient CreateClient() => Apply(new HttpClient());
 }

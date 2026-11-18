@@ -65,6 +65,18 @@ public class I18nServiceTests
     }
 
     [Fact]
+    public void SaveScopeNote_MentionsLlmAndSeparateOcrSaveButtons()
+    {
+        var svc = Create();
+        svc.Set("vi");
+        Assert.Contains("LLM", svc["settings.note.saveScope"]);
+        Assert.Contains("OCR", svc["settings.note.saveScope"]);
+        svc.Set("en");
+        Assert.Contains("LLM", svc["settings.note.saveScope"]);
+        Assert.Contains("OCR", svc["settings.note.saveScope"]);
+    }
+
+    [Fact]
     public void LanguageNames_HaveNativeTamilTelugu()
     {
         Assert.Equal("தமிழ்", I18nStrings.LanguageName("ta"));
