@@ -1026,6 +1026,7 @@ public class PipelineControllerTests : IDisposable
                 ["tag"] = "b7123", ["installed"] = true,
                 ["serverPath"] = @"C:\llm\runtime\b7123\llama-server.exe",
                 ["downloading"] = false, ["downloadFailed"] = true,
+                ["downloadError"] = "No llama.cpp release with a Windows x64 asset for flavor 'cpu'.",
             }
             : null;
         PipelineController controller = CreateController(peer, new OverlayState());
@@ -1035,6 +1036,7 @@ public class PipelineControllerTests : IDisposable
         Assert.True(status.Installed);
         Assert.False(status.Downloading);
         Assert.True(status.DownloadFailed);
+        Assert.Equal("No llama.cpp release with a Windows x64 asset for flavor 'cpu'.", status.DownloadError);
         Assert.Null(status.Progress);
     }
 

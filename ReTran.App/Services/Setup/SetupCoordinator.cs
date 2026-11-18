@@ -1195,10 +1195,12 @@ public sealed class SetupCoordinator
         }
 
         string runtimeFlavor = Flavor == OcrFlavor.Gpu ? "cuda" : "cpu";
+        string? downloadError = null;
         for (int attempt = 1; attempt <= MaxRetries + 1; attempt++)
         {
             try
             {
+                downloadError = null;
                 if (await IsLlmRuntimeInstalledAsync(runtimeFlavor, ct).ConfigureAwait(false))
                 {
                     // Đã cài: chỉ cập nhật khi Core tra được bản mới hơn (mất mạng ⇒ coi bản hiện tại là ok).
@@ -1232,6 +1234,7 @@ public sealed class SetupCoordinator
                     // được hoàn tất nhờ binary cũ.
                     if (IsLlmRuntimeDownloadFailed(status))
                     {
+                        downloadError = ReadString(status, "downloadError");
                         throw new InvalidOperationException("llm runtime download failed (reported by status)");
                     }
                     if (!IsLlmRuntimeDownloading(status) && IsLlmRuntimeInstalled(status)) break;
@@ -1262,8 +1265,8 @@ public sealed class SetupCoordinator
 
         _downloads = [];
         Publish();
-        Error = SetupMessage.Of("setup.fail.llmRuntime",
-            (MaxRetries + 1).ToString(), _modelDownloadTimeout.TotalMinutes.ToString("0"));
+        Error = SetupMessage.Of(downloadError is null ? "setup.fail.llmRuntime" : "setup.fail.llmRuntimeDetail",
+            (MaxRetries + 1).ToString(), _modelDownloadTimeout.TotalMinutes.ToString("0"), downloadError!);
         return StepOutcome.Failed;
     }
 

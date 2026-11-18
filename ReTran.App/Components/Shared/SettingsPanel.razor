@@ -1223,7 +1223,9 @@
         get
         {
             if (_llmRuntime is null) return L["deck.llm.loading"];
-            if (_llmRuntime.DownloadFailed) return L["deck.llm.runtime.downloadFailed"];
+            if (_llmRuntime.DownloadFailed) return _llmRuntime.DownloadError is { } error
+                ? L.Fmt("deck.llm.runtime.downloadFailedDetail", error)
+                : L["deck.llm.runtime.downloadFailed"];
             if (_llmRuntime.Downloading) return L["deck.llm.runtime.downloading"];
             if (!_llmRuntime.Installed) return L["deck.llm.runtime.notInstalled"];
             string text = L.Fmt("deck.llm.runtime.installed", _llmRuntime.Tag ?? "?");
@@ -1457,7 +1459,9 @@
                         Toast.Show(L["deck.llm.runtime.downloadSuperseded"], ToastSeverity.Error);
                         return;
                     case LlmRuntimePollOutcome.Failed:
-                        Toast.Show(L["deck.llm.runtime.downloadFailed"], ToastSeverity.Error);
+                        Toast.Show(_llmRuntime.DownloadError is { } error
+                            ? L.Fmt("deck.llm.runtime.downloadFailedDetail", error)
+                            : L["deck.llm.runtime.downloadFailed"], ToastSeverity.Error);
                         return;
                     case LlmRuntimePollOutcome.Completed:
                         // Check lại theo đúng flavor sau MỌI lượt thành công: repair cùng tag không

@@ -175,7 +175,7 @@ public class LlmRpcHandlersTests
                 server, "llm.runtime.check", new JsonObject { ["flavor"] = "cpu" });
 
             Assert.Null(response["error"]);
-            Assert.Equal("b190", response["result"]!["latest"]!.GetValue<string>());
+            Assert.Equal("b200", response["result"]!["latest"]!.GetValue<string>());
         }
         finally
         {

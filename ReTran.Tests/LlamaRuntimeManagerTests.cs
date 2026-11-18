@@ -48,6 +48,44 @@ public class LlamaRuntimeManagerTests : IDisposable
         ]
         """;
 
+    private const string LegacyAvx2ReleaseJson = """
+        [
+          {
+            "tag_name": "b190",
+            "assets": [
+              { "name": "llama-b190-bin-win-avx2-x64.zip", "browser_download_url": "http://x/avx2190.zip" }
+            ]
+          }
+        ]
+        """;
+
+    private const string VersionedReleasesJson = """
+        [
+          {
+            "tag_name": "b12503",
+            "assets": [
+              { "name": "cudart-llama-b12503-bin-ubuntu-cuda-12.8-x64.tar.gz", "browser_download_url": "http://x/ubuntu-cudart.tar.gz" },
+              { "name": "cudart-llama-bin-win-cuda-12.4-x64.zip", "browser_download_url": "http://x/cudart124.zip" },
+              { "name": "cudart-llama-bin-win-cuda-13.5-x64.zip", "browser_download_url": "http://x/cudart135.zip" },
+              { "name": "llama-b12503-bin-win-cpu-x64.zip", "browser_download_url": "http://x/cpu12503.zip" },
+              { "name": "llama-b12503-bin-win-cuda-12.4-x64.zip", "browser_download_url": "http://x/cuda124.zip" },
+              { "name": "llama-b12503-bin-win-cuda-13.5-x64.zip", "browser_download_url": "http://x/cuda135.zip" }
+            ]
+          }
+        ]
+        """;
+
+    [Fact]
+    public async Task Download_Cuda_PrefersCuda124AndMatchingWindowsCudart()
+    {
+        (LlamaRuntimeManager manager, RecordingZipDownloader downloader) = Create(VersionedReleasesJson);
+
+        await manager.DownloadAsync("cuda", TestContext.Current.CancellationToken);
+
+        Assert.Equal(new[] { "http://x/cuda124.zip", "http://x/cudart124.zip" },
+            downloader.Uris.Select(u => u.ToString()));
+    }
+
     [Fact]
     public async Task Status_CarriesProgress_WhileDownloading_AndClearsAfter()
     {
@@ -119,14 +157,14 @@ public class LlamaRuntimeManagerTests : IDisposable
     }
 
     [Fact]
-    public async Task Check_Cpu_PicksNewestReleaseWithAvx2Asset()
+    public async Task Check_Cpu_PicksNewestReleaseWithCurrentCpuAsset()
     {
         (LlamaRuntimeManager manager, _) = Create();
 
         (string? current, string? latest) = await manager.CheckAsync("cpu", TestContext.Current.CancellationToken);
 
         Assert.Null(current);
-        Assert.Equal("b190", latest); // b200's cpu-x64 asset is not the supported AVX2 flavor.
+        Assert.Equal("b200", latest); // current upstream uses win-cpu-x64, not win-avx2-x64
     }
 
     [Fact]
@@ -187,7 +225,7 @@ public class LlamaRuntimeManagerTests : IDisposable
         LlmRuntimeStatus cudaStatus = await manager.GetStatusAsync(TestContext.Current.CancellationToken);
 
         Assert.Null(current); // b190 CUDA does not satisfy the CPU flavor, even though the tags match
-        Assert.Equal("b190", latest);
+        Assert.Equal("b200", latest);
         Assert.False(cpuStatus.Installed);
         Assert.True(cudaStatus.Installed);
         Assert.Equal("cuda", cudaStatus.Flavor);
@@ -197,7 +235,7 @@ public class LlamaRuntimeManagerTests : IDisposable
     [Fact]
     public async Task Download_Cpu_UsesAvx2Asset()
     {
-        (LlamaRuntimeManager manager, RecordingZipDownloader downloader) = Create();
+        (LlamaRuntimeManager manager, RecordingZipDownloader downloader) = Create(LegacyAvx2ReleaseJson);
 
         await manager.DownloadAsync("cpu", TestContext.Current.CancellationToken);
 
@@ -240,8 +278,8 @@ public class LlamaRuntimeManagerTests : IDisposable
             LlmRuntimeStatus status = await manager.GetStatusAsync(TestContext.Current.CancellationToken);
 
             Assert.True(status.Downloading);
-            Assert.False(status.Installed); // the old b190 install must not make this repair look complete
-            Assert.Equal("b190", status.Tag);
+            Assert.False(status.Installed); // the old b200 install must not make this repair look complete
+            Assert.Equal("b200", status.Tag);
         }
         finally
         {
@@ -278,6 +316,7 @@ public class LlamaRuntimeManagerTests : IDisposable
         Assert.False(status.Downloading);
         Assert.True(status.Installed); // the previous runtime remains usable after the failed update
         Assert.True(status.DownloadFailed); // ...but the update itself must not look successful
+        Assert.Equal("network down", status.DownloadError);
     }
 
     [Fact]

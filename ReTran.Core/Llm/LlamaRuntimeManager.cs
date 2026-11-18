@@ -30,6 +30,12 @@ public sealed record LlmRuntimeStatus(string? Tag, bool Installed, string? Serve
     public bool DownloadFailed { get; init; }
 
     /// <summary>
+    /// Detailed error of the current failed attempt, or <see langword="null"/>. Lỗi chi tiết của
+    /// attempt đang fail, hoặc <see langword="null"/> khi attempt hiện tại không fail.
+    /// </summary>
+    public string? DownloadError { get; init; }
+
+    /// <summary>
     /// A download, extraction, or same-version repair is in flight; an older installed build must not
     /// be treated as completion of this attempt. Một lượt tải/giải nén/sửa cùng phiên bản đang chạy;
     /// không được coi bản cũ là dấu hiệu lượt này đã hoàn tất.
@@ -89,6 +95,7 @@ public sealed class LlamaRuntimeManager(
     private readonly object _attemptLock = new();
     private long _attempt;
     private long? _failedAttempt;
+    private string? _downloadError;
     private bool _downloading;
 
     // One download at a time: two overlapping llm.runtime.download calls (setup + Settings, or a
@@ -149,11 +156,13 @@ public sealed class LlamaRuntimeManager(
         long attempt;
         bool downloading;
         bool downloadFailed;
+        string? downloadError;
         lock (_attemptLock)
         {
             attempt = _attempt;
             downloading = _downloading;
             downloadFailed = _failedAttempt == _attempt;
+            downloadError = downloadFailed ? _downloadError : null;
         }
         bool installed = serverPath is not null && File.Exists(serverPath) && !downloading;
         LlmDownloadProgress? progress;
@@ -165,6 +174,7 @@ public sealed class LlamaRuntimeManager(
         {
             Progress = progress,
             DownloadFailed = downloadFailed,
+            DownloadError = downloadError,
             Downloading = downloading,
             Flavor = activeFlavor,
             Attempt = attempt,
@@ -218,6 +228,7 @@ public sealed class LlamaRuntimeManager(
         lock (_attemptLock)
         {
             attempt = ++_attempt;
+            _downloadError = null;
             _downloading = true;
         }
         return new LlmRuntimeDownload(attempt, DownloadAttemptAsync(flavor, attempt, ct));
@@ -233,7 +244,7 @@ public sealed class LlamaRuntimeManager(
             (string tag, string mainUrl, string? cudartUrl)? release =
                 await FindReleaseAsync(flavor, ct).ConfigureAwait(false)
                 ?? throw new InvalidOperationException(
-                    $"No llama.cpp release with a Windows asset matching '{FlavorPattern(flavor)}' was found.");
+                    $"No llama.cpp release with a Windows x64 asset for flavor '{flavor}'.");
 
             string stagingDir = Path.Combine(
                 _rootDir, ".staging", $"{flavor}-{release.Value.tag}-{Guid.NewGuid():N}");
@@ -266,6 +277,7 @@ public sealed class LlamaRuntimeManager(
             lock (_attemptLock)
             {
                 _failedAttempt = attempt;
+                _downloadError = ex.Message;
             }
             Console.Error.WriteLine($"llm.runtime.download failed for '{flavor}': {ex.Message}");
             throw;
@@ -360,7 +372,7 @@ public sealed class LlamaRuntimeManager(
     private async Task<(string Tag, string MainUrl, string? CudartUrl)?> FindReleaseAsync(
         string flavor, CancellationToken ct)
     {
-        string pattern = FlavorPattern(flavor);
+        _ = FlavorPattern(flavor);
         using var request = new HttpRequestMessage(HttpMethod.Get, ReleasesUrl);
         // GitHub API's documented preference for release lookups; the browser-like User-Agent is
         // already the client default (a UA-less client is answered 403).
@@ -400,8 +412,8 @@ public sealed class LlamaRuntimeManager(
                     continue;
                 }
 
-                string? mainUrl = null;
-                string? cudartUrl = null;
+                (string Name, string Url)? main = null;
+                var cudartCandidates = new List<(string Name, string Url)>();
                 foreach (JsonElement asset in assets.EnumerateArray())
                 {
                     if (!asset.TryGetProperty("name", out JsonElement nameNode)
@@ -414,27 +426,60 @@ public sealed class LlamaRuntimeManager(
 
                     string name = nameNode.GetString()!;
                     string url = urlNode.GetString()!;
-                    if (mainUrl is null && name.StartsWith("llama-b", StringComparison.Ordinal)
-                        && name.EndsWith(pattern, StringComparison.Ordinal))
+                    if (IsMainRuntimeAsset(name, flavor)
+                        && (main is null || (flavor == "cuda" && CudaVersion(name) == "12.4")))
                     {
-                        mainUrl = url;
+                        main = (name, url);
                     }
-                    else if (flavor == "cuda" && cudartUrl is null
-                        && name.StartsWith("cudart-llama-bin", StringComparison.Ordinal)
-                        && name.Contains("cuda", StringComparison.Ordinal))
+                    else if (flavor == "cuda"
+                        && name.StartsWith("cudart-llama-bin-win-cuda-", StringComparison.Ordinal)
+                        && name.EndsWith("-x64.zip", StringComparison.Ordinal))
                     {
-                        cudartUrl = url;
+                        cudartCandidates.Add((name, url));
                     }
                 }
 
-                if (mainUrl is not null)
+                if (main is not null)
                 {
-                    return (tagNode.GetString()!, mainUrl, cudartUrl);
+                    string? cudartUrl = null;
+                    if (flavor == "cuda")
+                    {
+                        string? version = CudaVersion(main.Value.Name);
+                        cudartUrl = version is null
+                            ? cudartCandidates.FirstOrDefault().Url
+                            : cudartCandidates.FirstOrDefault(a =>
+                                a.Name == $"cudart-llama-bin-win-cuda-{version}-x64.zip").Url;
+                        if (version is not null && cudartUrl is null) continue;
+                    }
+                    return (tagNode.GetString()!, main.Value.Url, cudartUrl);
                 }
             }
         }
 
         return null;
+    }
+
+    private static bool IsMainRuntimeAsset(string name, string flavor)
+    {
+        if (!name.StartsWith("llama-b", StringComparison.Ordinal)) return false;
+        if (flavor == "cpu")
+        {
+            return name.EndsWith("-bin-win-cpu-x64.zip", StringComparison.Ordinal)
+                || name.EndsWith("-bin-win-avx2-x64.zip", StringComparison.Ordinal);
+        }
+        return name.Contains("-bin-win-cuda-", StringComparison.Ordinal)
+            && name.EndsWith("-x64.zip", StringComparison.Ordinal);
+    }
+
+    private static string? CudaVersion(string name)
+    {
+        const string marker = "-bin-win-cuda-";
+        const string suffix = "-x64.zip";
+        int start = name.IndexOf(marker, StringComparison.Ordinal);
+        if (start < 0) return null;
+        start += marker.Length;
+        int end = name.IndexOf(suffix, start, StringComparison.Ordinal);
+        return end > start ? name[start..end] : null;
     }
 
     private string StatePath => Path.Combine(_rootDir, "runtime.json");

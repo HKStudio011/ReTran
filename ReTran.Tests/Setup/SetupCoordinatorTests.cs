@@ -1491,6 +1491,7 @@ public class SetupCoordinatorTests : IDisposable
         Assert.True(_bridge.Calls.Count(c => c.Method == "llm.runtime.status") <= 8,
             "wizard vẫn poll sau khi status báo downloadFailed");
         Assert.NotNull(coordinator.Error);
+        Assert.Contains("fake release has no matching asset", Text(coordinator.Error), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2063,6 +2064,9 @@ public class SetupCoordinatorTests : IDisposable
         /// <summary>Optional <c>downloadFailed</c> flag the fake includes in <c>llm.runtime.status</c>. Cờ <c>downloadFailed</c> tuỳ chọn fake nhúng vào <c>llm.runtime.status</c>.</summary>
         public bool LlmRuntimeDownloadFailed { get; set; }
 
+        /// <summary>Detailed error exposed as <c>downloadError</c> when <see cref="LlmRuntimeDownloadFailed"/> is set. Lỗi chi tiết phơi qua <c>downloadError</c> khi <see cref="LlmRuntimeDownloadFailed"/> bật.</summary>
+        public string? LlmRuntimeDownloadError { get; set; } = "fake release has no matching asset";
+
         /// <summary>Optional <c>progress</c> object the fake includes in <c>llm.runtime.status</c> (wizard vòng 2 §9). Object <c>progress</c> tuỳ chọn fake nhúng vào <c>llm.runtime.status</c>.</summary>
         public ReTran.Core.Llm.LlmDownloadProgress? LlmRuntimeProgress { get; set; }
 
@@ -2111,6 +2115,7 @@ public class SetupCoordinatorTests : IDisposable
                         ? @"C:\fake\llm\runtime\b7234\llama-server.exe"
                         : null,
                     ["downloadFailed"] = LlmRuntimeDownloadFailed,
+                    ["downloadError"] = LlmRuntimeDownloadFailed ? LlmRuntimeDownloadError : null,
                     ["downloading"] = LlmRuntimeDownloading,
                     ["attempt"] = _llmRuntimeAttempt,
                     ["progress"] = LlmRuntimeProgress is null

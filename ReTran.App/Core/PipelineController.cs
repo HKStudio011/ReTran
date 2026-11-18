@@ -133,6 +133,9 @@ public sealed record LlmRuntimeStatusInfo(string? Tag, bool Installed, string? S
     /// <summary>The latest download/update attempt failed. Lượt tải/cập nhật gần nhất thất bại.</summary>
     public bool DownloadFailed { get; init; }
 
+    /// <summary>Detailed error of the current failed attempt, or <see langword="null"/>. Lỗi chi tiết của attempt đang fail, hoặc <see langword="null"/>.</summary>
+    public string? DownloadError { get; init; }
+
     /// <summary>A download/update is in flight. Một lượt tải/cập nhật đang chạy.</summary>
     public bool Downloading { get; init; }
 
@@ -688,6 +691,7 @@ public sealed class PipelineController : IPipelineControl
         {
             Progress = result is JsonObject o4 ? ReadProgress(o4) : null,
             DownloadFailed = result is JsonObject o5 && ReadBool(o5, "downloadFailed"),
+            DownloadError = result is JsonObject o5b ? ReadNullableString(o5b, "downloadError") : null,
             Downloading = result is JsonObject o6 && ReadBool(o6, "downloading"),
             Attempt = result is JsonObject o7 ? ReadLong(o7, "attempt") : 0,
             Flavor = result is JsonObject o8 ? ReadNullableString(o8, "flavor") : null,
