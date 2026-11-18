@@ -516,6 +516,9 @@
     private bool _ocrBusy;
     private string _ocrDetPick = "PP-OCRv6_small_det";
     private string _ocrRecPick = "PP-OCRv6_small_rec";
+    // Baseline của lần gán programmatic gần nhất — phân biệt edit chưa lưu với giá trị wizard ghi.
+    private string _ocrDetBaseline = "PP-OCRv6_small_det";
+    private string _ocrRecBaseline = "PP-OCRv6_small_rec";
 
     // Tham số máy OCR: schema nạp từ Core (null = đang tải hoặc lỗi); control text/bool theo key.
     private IReadOnlyList<OcrParamSpec>? _ocrSchema;
@@ -542,6 +545,7 @@
     private string _llmApiKey = "";
     private string _llmApiModel = "Hy-MT2-1.8B";
     private string _llmActiveModel = "Hy-MT2-1.8B-UD-Q4_K_XL";
+    private string _llmActiveModelBaseline = "Hy-MT2-1.8B-UD-Q4_K_XL";
     private string _llmSystemPromptText = LlmPromptDefaults.SystemPrompt;
     private string _llmUserPromptText = LlmPromptDefaults.UserPrompt;
     private string _llmFlavor = "cuda";
@@ -551,6 +555,8 @@
     private LlmRuntimeStatusInfo? _llmRuntime;
     private LlmRuntimeCheckInfo? _llmRuntimeCheck;
     private bool _llmRuntimeBusy;
+    private bool _wasSetupComplete;
+    private bool _setupResyncBusy;
     private bool _disposed;
 
     private string StatusText => _statusKind switch
@@ -572,6 +578,8 @@
         _model.ApiKey = current.ApiKey;
         _ocrDetPick = current.OcrDet;
         _ocrRecPick = current.OcrRec;
+        _ocrDetBaseline = current.OcrDet;
+        _ocrRecBaseline = current.OcrRec;
         _mergeLines = current.OcrMergeLines;
         _mergeGapText = FormatThreshold(current.OcrMergeGap);
         _mergeHeightText = FormatThreshold(current.OcrMergeHeight);
@@ -581,6 +589,7 @@
         _llmApiKey = current.LlmApiKey ?? string.Empty;
         _llmApiModel = current.LlmApiModel;
         _llmActiveModel = current.LlmActiveModel;
+        _llmActiveModelBaseline = current.LlmActiveModel;
         _llmSystemPromptText = current.LlmSystemPrompt ?? LlmPromptDefaults.SystemPrompt;
         _llmUserPromptText = current.LlmUserPrompt ?? LlmPromptDefaults.UserPrompt;
         _appVersion = AppVersionFormatter.Format(Updates.CurrentVersion);
@@ -589,8 +598,9 @@
         if (Array.IndexOf(_dstOptions, current.Dst) < 0) _dstOptions = [current.Dst, .. _dstOptions];
         L.Changed += OnStateChanged;
         Js.OnWebViewReady += OnStateChanged;
-        Setup.Changed += OnSetupChanged; // theo dõi wizard để hiện/ẩn section + bật lại nút rerun
-        _ = LoadOcrModelsAsync(); // nạp catalog model từ Core (fire-and-forget như Home)
+        Setup.Changed += OnSetupChanged; // theo dõi wizard để hiện/ẩn section + resync sau completion
+        _wasSetupComplete = Setup.IsComplete;
+        _ = LoadOcrModelsAsync(syncFromActive: true); // lần đầu: hiển thị cặp sidecar đang dùng thật
         _ = LoadOcrSchemaAsync(); // nạp schema tham số engine từ Core (fire-and-forget)
         _ = LoadLlmModelsAsync(); // nạp catalog GGUF từ Core (fire-and-forget)
         _ = LoadLlmRuntimeAsync(); // nạp trạng thái runtime llama.cpp từ Core (fire-and-forget)
@@ -655,6 +665,7 @@
                 LlmSystemPrompt = NormalizeLlmPrompt(_llmSystemPromptText, LlmPromptDefaults.SystemPrompt),
                 LlmUserPrompt = NormalizeLlmPrompt(_llmUserPromptText, LlmPromptDefaults.UserPrompt),
             });
+            _llmActiveModelBaseline = _llmActiveModel;
             _statusKind = "saved";
             Toast.Show(L["settings.status.saved"]);
         }
@@ -719,19 +730,22 @@
         }
     }
 
-    // Nạp catalog model từ Core; lỗi → giữ placeholder, Làm mới thử lại.
-    private async Task LoadOcrModelsAsync()
+    // Nạp catalog model từ Core; lỗi → giữ placeholder, Làm mới thử lại. Chỉ lần đầu/apply-ngay/
+    // resync chủ động mới lấy InUse ghi đè pick; reload thường giữ lựa chọn deferred của user (C8).
+    private async Task LoadOcrModelsAsync(bool syncFromActive = false)
     {
         try
         {
             IReadOnlyList<OcrModelInfo> models = await Pipeline.ListOcrModelsAsync(CancellationToken.None);
             _ocrModels = models;
             _ocrLoadFailed = false;
-            // Select chạy theo cặp đang dùng thật của sidecar (InUse), không theo guesses.
-            OcrModelInfo? activeDet = models.FirstOrDefault(m => m.Kind == "det" && m.InUse);
-            OcrModelInfo? activeRec = models.FirstOrDefault(m => m.Kind == "rec" && m.InUse);
-            if (activeDet is not null) _ocrDetPick = activeDet.Name;
-            if (activeRec is not null) _ocrRecPick = activeRec.Name;
+            (_ocrDetPick, _ocrRecPick) = SettingsPanelSync.OcrPicks(
+                models, _ocrDetPick, _ocrRecPick, syncFromActive);
+            if (syncFromActive)
+            {
+                _ocrDetBaseline = _ocrDetPick;
+                _ocrRecBaseline = _ocrRecPick;
+            }
         }
         catch (Exception)
         {
@@ -807,12 +821,14 @@
             // Cặp đã chọn phải vào settings.json trước tiên — core.start lần sau gửi đúng cặp
             // này kể cả khi bên dưới bị hoãn (đang chạy thì không đổi model giữa phiên, C8).
             SettingsStore.Save(SettingsStore.Load() with { OcrDet = _ocrDetPick, OcrRec = _ocrRecPick });
+            _ocrDetBaseline = _ocrDetPick;
+            _ocrRecBaseline = _ocrRecPick;
             // C8: pipeline đang chạy → không gọi ocr.models.set (sidecar giữ predictor đang
             // nạp; đổi giữa phiên tốn nạp lại cả model, đo được tới 27,1 s) — cặp mới áp dụng
             // ở lần start kế tiếp.
             bool appliedNow = await Pipeline.ApplyOcrPairIfIdleAsync(_ocrDetPick, _ocrRecPick, CancellationToken.None);
             Toast.Show(appliedNow ? L["deck.ocr.pairSaved"] : L["deck.ocr.pairDeferred"]);
-            await LoadOcrModelsAsync();
+            await LoadOcrModelsAsync(syncFromActive: appliedNow);
         }
         catch (Exception ex)
         {
@@ -1231,6 +1247,7 @@
             await Pipeline.SetLlmModelAsync(model.Name, CancellationToken.None);
             SettingsStore.Save(SettingsStore.Load() with { LlmActiveModel = model.Name });
             _llmActiveModel = model.Name;
+            _llmActiveModelBaseline = model.Name;
             Toast.Show(L.Fmt("deck.llm.useSaved", model.Name));
             await LoadLlmModelsAsync();
         }
@@ -1416,11 +1433,43 @@
     // Reset theo !IsRunning (không chỉ IsComplete): lượt rerun kết thúc ở Failed vẫn phải để nút bấm lại
     // được — vòng lặp rerun→fail→"Bỏ qua thiết lập"→rerun (spec 2026-11-13); publish cuối lúc fail có
     // thể vẫn IsRunning, lần publish kế tiếp khi đã rảnh mới reset được.
-    private void OnSetupChanged() => _ = InvokeAsync(() =>
+    private void OnSetupChanged() => _ = InvokeAsync(async () =>
     {
-        if (Setup.IsComplete || !Setup.IsRunning) _rerunStarted = false;
-        StateHasChanged();
+        if (_disposed) return;
+        bool isComplete = Setup.IsComplete;
+        bool resync = SettingsPanelSync.WizardCompletionTransition(_wasSetupComplete, isComplete);
+        _wasSetupComplete = isComplete;
+        if (isComplete || !Setup.IsRunning) _rerunStarted = false;
+        if (resync && !_setupResyncBusy)
+        {
+            _setupResyncBusy = true;
+            try
+            {
+                await ResyncAfterWizardAsync();
+            }
+            finally
+            {
+                _setupResyncBusy = false;
+            }
+        }
+        if (!_disposed) StateHasChanged();
     });
+
+    // Wizard chỉ ghi OcrDet/OcrRec/LlmActiveModel. Merge từng field theo baseline để edit chưa lưu
+    // không bị mất; catalog luôn refresh, kể cả khi cả ba field đều đang dirty.
+    private async Task ResyncAfterWizardAsync()
+    {
+        AppSettings current = SettingsStore.Load();
+        (_ocrDetPick, _ocrDetBaseline) = SettingsPanelSync.MergeWizardField(
+            _ocrDetPick, _ocrDetBaseline, current.OcrDet);
+        (_ocrRecPick, _ocrRecBaseline) = SettingsPanelSync.MergeWizardField(
+            _ocrRecPick, _ocrRecBaseline, current.OcrRec);
+        (_llmActiveModel, _llmActiveModelBaseline) = SettingsPanelSync.MergeWizardField(
+            _llmActiveModel, _llmActiveModelBaseline, current.LlmActiveModel);
+        await LoadOcrModelsAsync();
+        await LoadLlmModelsAsync();
+        await LoadLlmRuntimeAsync();
+    }
 
     public void Dispose()
     {
