@@ -100,9 +100,8 @@ public static class Program
         var llmModels = new LlmModelManager(
             Path.Combine(llmRoot, "models"), Path.Combine(llmRoot, "models.json"));
         var llmRuntime = new LlamaRuntimeManager(Path.Combine(llmRoot, "runtime"), HttpUa.CreateClient());
-        LlamaServerHost? llmServer = null;
-        string? llmServerModel = null;
-        AppDomain.CurrentDomain.ProcessExit += (_, _) => llmServer?.Dispose();
+        var llmServers = new LlamaServerSlot();
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => llmServers.Stop();
 
         ITranslator LlmFactory(LlmSettings llmSettings)
         {
@@ -113,6 +112,7 @@ public static class Program
             var chat = new OpenAiChatClient(new HttpClient { Timeout = Timeout.InfiniteTimeSpan });
             if (!llmSettings.IsLocal)
             {
+                llmServers.Stop(); // local → API must release llama.cpp/VRAM immediately
                 return new LlmTranslator(chat, llmSettings);
             }
 
@@ -128,13 +128,7 @@ public static class Program
                 throw new RpcMethodException(RpcErrorCodes.InternalError,
                     "llm-runtime-missing: download llama.cpp from Setup or Settings.");
             }
-            if (llmServer is null || llmServerModel != modelName)
-            {
-                llmServer?.Dispose();
-                llmServer = new LlamaServerHost(runtime.ServerPath, modelPath);
-                llmServerModel = modelName;
-            }
-            LlamaServerHost serverRef = llmServer;
+            ILlamaServerHost serverRef = llmServers.GetOrCreate(modelName, runtime.ServerPath, modelPath);
             return new LlmTranslator(chat, llmSettings, async ct =>
             {
                 await serverRef.EnsureStartedAsync(ct).ConfigureAwait(false);
@@ -146,7 +140,17 @@ public static class Program
             sourceFactory: null, annotator: new FrameAnnotator(), annotatorFps: config.CaptureFps,
             llmFactory: LlmFactory);
         server.Register("core.start", p => host.StartAsync(p, CancellationToken.None));
-        server.Register("core.stop", p => host.StopAsync(p, CancellationToken.None));
+        server.Register("core.stop", async p =>
+        {
+            try
+            {
+                return await host.StopAsync(p, CancellationToken.None);
+            }
+            finally
+            {
+                llmServers.Stop();
+            }
+        });
         server.Register("core.list_sources", _ => host.ListSourcesAsync(CancellationToken.None));
         // ocr.models.* proxies: the App talks model management to the sidecar through the
         // core, keeping a single JSON-RPC channel.
@@ -180,6 +184,7 @@ public static class Program
             new StreamWriter(Console.OpenStandardOutput()) { NewLine = "\n" });
         await server.RunAsync(transport, CancellationToken.None);
         await host.DisposeAsync(); // stop the pipeline while the sidecar is still alive
+        llmServers.Stop();
         if (rpc is not null) await rpc.DisposeAsync();
         return 0;
     }

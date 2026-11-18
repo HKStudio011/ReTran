@@ -24,7 +24,7 @@ namespace ReTran.Core.Llm;
 /// <param name="gpuLayers">GPU layers passed as <c>-ngl</c>. Số layer GPU truyền qua <c>-ngl</c>.</param>
 public sealed class LlamaServerHost(
     string serverExe, string modelPath,
-    int contextSize = 4096, int gpuLayers = 99) : IDisposable
+    int contextSize = 4096, int gpuLayers = 99) : ILlamaServerHost
 {
     /// <summary>How long the server may take to report healthy (model load included). Thời gian tối đa để server báo khỏe (gồm nạp model).</summary>
     public static readonly TimeSpan DefaultHealthTimeout = TimeSpan.FromSeconds(120);
