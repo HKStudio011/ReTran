@@ -1161,7 +1161,25 @@ public class SetupCoordinatorTests : IDisposable
         await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
 
         Assert.Equal(SetupStep.Done, coordinator.Step);
-        Assert.Single(_bridge.LlmRuntimeDownloads); // chạy lại lượt tải để cập nhật
+        Assert.Equal("cuda", Assert.Single(_bridge.LlmRuntimeChecks));
+        Assert.Equal("cuda", Assert.Single(_bridge.LlmRuntimeDownloads)); // check và update cùng flavor
+    }
+
+    [Fact]
+    public async Task LlmRuntime_OutdatedOnCpu_ChecksAndDownloadsCpuFlavor()
+    {
+        WriteSetupJson("""{"flavor":"cpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":["Hy-MT2-1.8B-UD-Q4_K_XL"],"steps":{"checking":"done","verifyingfiles":"done","syncing":"done","verifyingsidecar":"done","downloadingmodels":"done","applying":"done"}}""");
+        _uvFake.Installed = null;
+        _bridge.LlmRuntimeInstalled = true;
+        _bridge.LlmRuntimeTag = "b7000";
+        _bridge.LlmRuntimeLatestTag = "b7234";
+        var coordinator = NewCoordinator(adapters: Adapters()); // no NVIDIA ⇒ CPU flavor
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Equal("cpu", Assert.Single(_bridge.LlmRuntimeChecks));
+        Assert.Equal("cpu", Assert.Single(_bridge.LlmRuntimeDownloads));
     }
 
     [Fact]
@@ -2031,6 +2049,9 @@ public class SetupCoordinatorTests : IDisposable
         /// <summary>Flavors of accepted <c>llm.runtime.download</c> calls, in order. Các flavor của lệnh <c>llm.runtime.download</c> đã nhận, theo thứ tự.</summary>
         public List<string> LlmRuntimeDownloads { get; } = [];
 
+        /// <summary>Flavors sent to <c>llm.runtime.check</c>; null records a missing parameter. Flavor gửi tới <c>llm.runtime.check</c>; null nghĩa là thiếu tham số.</summary>
+        public List<string?> LlmRuntimeChecks { get; } = [];
+
         public int RestartCount { get; private set; }
 
         /// <summary>The dev machine's GPU (RTX 5060 Ti, CC 12.0 — measured 2026-11-08).</summary>
@@ -2080,7 +2101,7 @@ public class SetupCoordinatorTests : IDisposable
                         },
                 }),
                 "llm.runtime.download" => DownloadLlmRuntime(@params),
-                "llm.runtime.check" => CheckLlmRuntime(),
+                "llm.runtime.check" => CheckLlmRuntime(@params),
                 "llm.models.list" => Task.FromResult<JsonNode?>(BuildLlmList()),
                 "llm.models.download" => DownloadLlmModel(@params),
                 "llm.models.set" => SetLlmModel(@params),
@@ -2103,8 +2124,9 @@ public class SetupCoordinatorTests : IDisposable
             return Task.FromResult<JsonNode?>(new JsonObject { ["accepted"] = true });
         }
 
-        private Task<JsonNode?> CheckLlmRuntime()
+        private Task<JsonNode?> CheckLlmRuntime(JsonNode? @params)
         {
+            LlmRuntimeChecks.Add(@params?["flavor"]?.GetValue<string>());
             if (LlmRuntimeCheckThrows) throw new InvalidOperationException("fake: llm.runtime.check offline");
             return Task.FromResult<JsonNode?>(new JsonObject
             {

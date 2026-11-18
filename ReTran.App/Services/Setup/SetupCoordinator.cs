@@ -1202,7 +1202,7 @@ public sealed class SetupCoordinator
                 if (await IsLlmRuntimeInstalledAsync(ct).ConfigureAwait(false))
                 {
                     // Đã cài: chỉ cập nhật khi Core tra được bản mới hơn (mất mạng ⇒ coi bản hiện tại là ok).
-                    (string? current, string? latest) = await CheckLlmRuntimeAsync(ct).ConfigureAwait(false);
+                    (string? current, string? latest) = await CheckLlmRuntimeAsync(runtimeFlavor, ct).ConfigureAwait(false);
                     if (current is null || latest is null || current == latest)
                     {
                         MarkStepDone(SetupStep.DownloadingLlmRuntime);
@@ -1309,11 +1309,12 @@ public sealed class SetupCoordinator
     /// Cặp tag llama.cpp (current, latest) từ <c>llm.runtime.check</c>; (null, null) khi lời gọi lỗi
     /// (mất mạng) để sự cố mạng không bao giờ chặn wizard.
     /// </summary>
-    private async Task<(string? Current, string? Latest)> CheckLlmRuntimeAsync(CancellationToken ct)
+    private async Task<(string? Current, string? Latest)> CheckLlmRuntimeAsync(string runtimeFlavor, CancellationToken ct)
     {
         try
         {
-            JsonNode? check = await _bridge.CallAsync("llm.runtime.check", null, ct).ConfigureAwait(false);
+            JsonNode? check = await _bridge.CallAsync("llm.runtime.check",
+                new JsonObject { ["flavor"] = runtimeFlavor }, ct).ConfigureAwait(false);
             return (ReadString(check, "current"), ReadString(check, "latest"));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
