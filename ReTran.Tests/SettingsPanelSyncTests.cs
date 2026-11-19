@@ -159,4 +159,17 @@ public class SettingsPanelSyncTests
     {
         Assert.Equal(expected, SettingsPanelSync.LlmUserPromptValid(provider, prompt));
     }
+
+    [Theory]
+    [InlineData("deepl", "google")]
+    [InlineData("google", "google")]
+    [InlineData("llm", "llm")]
+    [InlineData("LLM", "llm")]
+    [InlineData("", "google")]
+    [InlineData(null, "google")]
+    [InlineData("unknown", "google")]
+    public void NormalizeProvider_OnlyKeepsSupportedProviders(string? provider, string expected)
+    {
+        Assert.Equal(expected, SettingsPanelSync.NormalizeProvider(provider));
+    }
 }

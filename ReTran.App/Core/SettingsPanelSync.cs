@@ -74,6 +74,10 @@ internal static class SettingsPanelSync
         !string.Equals(provider, "llm", StringComparison.OrdinalIgnoreCase)
         || (!string.IsNullOrWhiteSpace(prompt) && prompt.Contains("{source_text}", StringComparison.Ordinal));
 
+    /// <summary>Returns the supported translation provider, falling back to Google. Trả về provider dịch được hỗ trợ, mặc định về Google.</summary>
+    internal static string NormalizeProvider(string? provider) =>
+        string.Equals(provider, "llm", StringComparison.OrdinalIgnoreCase) ? "llm" : "google";
+
     /// <summary>Allows OCR replacement saves only with a trusted, non-empty schema. Chỉ cho Save thay thế OCR khi schema đáng tin và không rỗng.</summary>
     internal static bool CanSaveOcrParams([NotNullWhen(true)] IReadOnlyList<OcrParamSpec>? schema, bool schemaFailed) =>
         !schemaFailed && schema is { Count: > 0 };
