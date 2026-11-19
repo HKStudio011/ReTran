@@ -53,7 +53,10 @@
         .rt-setup-modal .setup-choices .use { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--rt-dim); white-space: nowrap; cursor: pointer; }
         .rt-setup-modal .setup-choices .use input[type=radio] { margin: 0; accent-color: var(--rt-tally); cursor: pointer; }
         .rt-setup-modal .setup-choices .use.on { color: var(--rt-tally); font-weight: 600; }
-        .rt-setup-modal .tag-installed { display: inline-block; font-size: 10px; color: var(--rt-data); border: 1px solid currentColor; border-radius: 99px; padding: 0 6px; line-height: 1.7; white-space: nowrap; vertical-align: 1px; margin-left: 4px; }
+        .rt-setup-modal .tag-installed, .rt-setup-modal .tag-missing, .rt-setup-modal .tag-downloading { display: inline-block; font-size: 10px; border: 1px solid currentColor; border-radius: 99px; padding: 0 6px; line-height: 1.7; white-space: nowrap; vertical-align: 1px; margin-left: 4px; }
+        .rt-setup-modal .tag-installed { color: var(--rt-data); }
+        .rt-setup-modal .tag-missing { color: var(--rt-dim); }
+        .rt-setup-modal .tag-downloading { color: var(--rt-tally); }
         .rt-setup-modal .setup-hintline { margin: 8px 0 0; color: var(--rt-dim); font-size: 11px; line-height: 1.6; }
         .rt-setup-modal .setup-total { margin: 10px 0 0; color: var(--rt-dim); font-size: 11.5px; }
         .rt-setup-modal .setup-warn { margin: 8px 0 0; color: var(--rt-danger); font-size: 11.5px; }
@@ -274,13 +277,12 @@
                                         <span class="body">
                                             <span class="lbl">
                                                 @model.Name
-                                                @if (locked)
-                                                {
-                                                    <span class="tag-installed">@(L["setup.models.installed"])</span>
-                                                }
+                                                <span class="@(model.Downloading ? "tag-downloading" : model.Installed ? "tag-installed" : "tag-missing")">
+                                                    @(L[SetupModelDisplay.LlmStatusKey(model)])
+                                                </span>
                                             </span>
                                             <span class="det">@model.Quant · @FormatSize(model.SizeBytes)</span>
-                                            @if (!model.Installed && !model.Downloading)
+                                            @if (SetupModelDisplay.ShowLlmDownloadSize(model, _llmTicks.Contains(model.Name)))
                                             {
                                                 <span class="det">@(L.Fmt("setup.models.willDownload", FormatSize(model.SizeBytes)))</span>
                                             }
@@ -296,6 +298,10 @@
                                 }
                             </ul>
                         </div>
+                    }
+                    @if (SetupModelDisplay.AllSelectedLlmInstalled(_llmModelsList, _llmTicks))
+                    {
+                        <p class="setup-hintline">@(L["setup.llm.noDownload"])</p>
                     }
                     <p class="setup-total">@(L.Fmt("setup.models.total", FormatMb(LlmTotalMb())))</p>
                     @* Disable khi danh sách đang nạp: 1 click lúc list rỗng = trả lời rỗng ⇒ bước 4
@@ -339,7 +345,9 @@
                     @* Các bước chạy (VerifyingFiles…Applying): tên bước + bar indeterminate (spec cho phép
                        fallback indeterminate); khi bước tải có tiến độ đo được → danh sách % + ETA (spec
                        17-11 §9). *@
-                    <p class="text-sm text-surface">@(L[StepLabelKey(Coordinator.Step)])</p>
+                    <p class="text-sm text-surface">@(L[Coordinator.Step == SetupStep.DownloadingModels
+                        ? SetupModelDisplay.DownloadingModelsStepKey(Coordinator.Downloads.Count > 0)
+                        : StepLabelKey(Coordinator.Step)])</p>
                     <div class="rt-setup-track" aria-hidden="true"><div class="rt-setup-bar"></div></div>
                     @if (Coordinator.Downloads.Count > 0)
                     {
@@ -698,9 +706,6 @@
             return;
         }
 
-        // Danh sách về SAU lượt render đầu của màn (await) → phải vẽ lại nếu không UI kẹt "đang nạp…".
-        await InvokeAsync(StateHasChanged);
-
         try
         {
             _llmTicks = [];
@@ -723,6 +728,11 @@
             _llmInit = false;
             Logger.LogError(ex, "setup-modal: EnsureLlmStateAsync preselect failed");
         }
+
+        // Render once after both the catalog and its preselection are ready; rendering between them
+        // leaves the first visible list without installed ticks/badges until another interaction.
+        // Chỉ render khi catalog và preselect đều đã sẵn sàng để trạng thái đã cài hiện ngay lần đầu.
+        await InvokeAsync(StateHasChanged);
     }
 
     // Nút "Thử lại" khi đọc danh sách LLM thất bại — đọc lại từ Core (bước vẫn để trống được).
