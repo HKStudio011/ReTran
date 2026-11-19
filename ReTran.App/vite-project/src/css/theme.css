@@ -32,11 +32,5 @@
     --crack-stroke: color-mix(in srgb, var(--color-light) 40%, transparent);
 }
 
-/* ACCENT PAIRS — amber is the default; jade / coral override the tally colour. */
-[data-theme="light"][data-accent="jade"] { --primary: #087A60; }
-[data-theme="dark"][data-accent="jade"]  { --primary: #37D6A8; }
-[data-theme="light"][data-accent="coral"] { --primary: #B4452B; }
-[data-theme="dark"][data-accent="coral"]  { --primary: #FF7A59; }
-
 /* Legacy data-color values stay inert so an old localStorage entry cannot
-   break theming; the new attribute is data-accent. */
+   break theming; amber remains the single brand accent. */

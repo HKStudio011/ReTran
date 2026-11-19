@@ -473,17 +473,6 @@
         </div>
     </div>
     <div class="rt-srow">
-        <span>@(L["deck.settings.accent"])</span>
-        <div class="rt-swatches">
-            <button type="button" class="rt-swatch s-amber" aria-label="@(L["deck.settings.accent.amber"])"
-                    aria-pressed="@Pressed(_accent == "amber")" @onclick='() => SetAccentAsync("amber")'></button>
-            <button type="button" class="rt-swatch s-jade" aria-label="@(L["deck.settings.accent.jade"])"
-                    aria-pressed="@Pressed(_accent == "jade")" @onclick='() => SetAccentAsync("jade")'></button>
-            <button type="button" class="rt-swatch s-coral" aria-label="@(L["deck.settings.accent.coral"])"
-                    aria-pressed="@Pressed(_accent == "coral")" @onclick='() => SetAccentAsync("coral")'></button>
-        </div>
-    </div>
-    <div class="rt-srow">
         <span>@(L["deck.settings.uiLang"])</span>
         <div class="rt-seg" role="group" aria-label="@(L["deck.settings.uiLang"])">
             <button type="button" aria-pressed="@Pressed(L.Lang == "vi")" @onclick='() => SetLangAsync("vi")'>Tiếng Việt</button>
@@ -547,7 +536,6 @@
     private string _appVersion = string.Empty;
     private bool _checking;
     private string _themeSetting = "system";
-    private string _accent = "amber";
     private bool _appearanceLoaded;
 
     // OCR model manager: null = chưa nạp catalog; _ocrBusy chặn bấm chồng khi RPC đang chạy.
@@ -682,16 +670,14 @@
         if (!_disposed) RequestRender();
     });
 
-    // Theme/accent sống trong localStorage của WebView — đọc lại sau khi JS bridge sẵn sàng.
+    // Theme sống trong localStorage của WebView — đọc lại sau khi JS bridge sẵn sàng.
     private async Task LoadAppearanceAsync()
     {
         if (_appearanceLoaded || !Js.IsWebViewReady) return;
         try
         {
             string? theme = await Js.GetThemeSettingAsync();
-            string? accent = await Js.GetAccentAsync();
             if (theme is "light" or "dark" or "system") _themeSetting = theme;
-            if (accent is "amber" or "jade" or "coral") _accent = accent;
             _appearanceLoaded = true;
         }
         catch (Exception)
@@ -1495,19 +1481,6 @@
         catch (Exception)
         {
             // Không đổi được theme không phá form; giữ lựa chọn cũ.
-        }
-    }
-
-    private async Task SetAccentAsync(string accent)
-    {
-        try
-        {
-            await Js.SetAccentAsync(accent);
-            _accent = accent;
-        }
-        catch (Exception)
-        {
-            // Như trên.
         }
     }
 

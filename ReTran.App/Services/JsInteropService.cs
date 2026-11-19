@@ -101,12 +101,6 @@ public class JsInteropService : IAsyncDisposable
     /// <summary>Reads the persisted theme setting ("light", "dark" or "system"). Đọc theme đã lưu.</summary>
     public async ValueTask<string?> GetThemeSettingAsync() => await InvokeAsync<string?>("getThemeSetting");
 
-    /// <summary>Sets the accent id ("amber", "jade" or "coral"). Đặt mã màu nhấn.</summary>
-    public async ValueTask SetAccentAsync(string accentId) => await InvokeVoidAsync("setAccent", accentId);
-
-    /// <summary>Reads the persisted accent id. Đọc mã màu nhấn đã lưu.</summary>
-    public async ValueTask<string?> GetAccentAsync() => await InvokeAsync<string?>("getAccent");
-
     /// <summary>Copies text to the system clipboard. Sao chép văn bản vào clipboard hệ thống.</summary>
     public async ValueTask CopyTextAsync(string text) => await InvokeVoidAsync("copyText", text);
 
