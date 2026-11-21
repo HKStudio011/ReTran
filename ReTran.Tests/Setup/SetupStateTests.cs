@@ -27,7 +27,7 @@ public class SetupStateNeedsSetupTests : IDisposable
     [Fact]
     public void NeedsSetup_True_WhenVenvMissing_EvenIfStateComplete()
     {
-        var state = new SetupState("gpu", "vi", null) { IsComplete = true };
+        SetupState state = CompleteState();
 
         Assert.True(SetupState.NeedsSetup(state, @"C:\nope\python.exe", MakeModelsDir()));
     }
@@ -35,7 +35,7 @@ public class SetupStateNeedsSetupTests : IDisposable
     [Fact]
     public void NeedsSetup_True_WhenModelsDirEmpty()
     {
-        var state = new SetupState("gpu", "vi", null) { IsComplete = true };
+        SetupState state = CompleteState();
         string venv = MakeVenvPythonExe();
 
         // official_models tồn tại nhưng không có mục nào (model chưa tải / đã bị xoá).
@@ -52,9 +52,9 @@ public class SetupStateNeedsSetupTests : IDisposable
     [Fact]
     public void NeedsSetup_False_WhenCompleteAndFilesPresent()
     {
-        var state = new SetupState("gpu", "vi", new Dictionary<string, string> { ["syncing"] = "done" })
+        SetupState state = CompleteState() with
         {
-            IsComplete = true,
+            Steps = new Dictionary<string, string> { ["syncing"] = "done" },
         };
         string venv = MakeVenvPythonExe();
         string models = MakeModelsDir();
@@ -62,6 +62,27 @@ public class SetupStateNeedsSetupTests : IDisposable
 
         // Cùng đủ file trên đĩa nhưng wizard chưa tới bước Done → vẫn phải hiện modal.
         Assert.True(SetupState.NeedsSetup(state with { IsComplete = false }, venv, models));
+    }
+
+    [Fact]
+    public void NeedsSetup_MissingSelectedModel_ReturnsTrue()
+    {
+        SetupState state = CompleteState() with { Dets = ["PP-OCRv6_small_det", "PP-OCRv6_medium_det"] };
+        string venv = MakeVenvPythonExe();
+        string models = MakeModelsDir();
+
+        Assert.True(SetupState.NeedsSetup(state, venv, models));
+    }
+
+    [Fact]
+    public void Load_InvalidV2ActiveFields_DropsCompleteFlag()
+    {
+        string json = Temp("setup-invalid-active.json");
+        File.WriteAllText(json, """
+            {"flavor":"gpu","language":"vi","dets":["PP-OCRv6_small_det"],"activeDet":"PP-OCRv6_small_det","recs":["PP-OCRv6_small_rec"],"activeRec":"PP-OCRv6_small_rec","langs":[],"activeLang":"korean_PP-OCRv5_mobile_rec","llmModels":[],"isComplete":true}
+            """);
+
+        Assert.False(SetupState.Load(json).IsComplete);
     }
 
     [Fact]
@@ -381,11 +402,27 @@ public class SetupStateNeedsSetupTests : IDisposable
     private string MakeModelsDir()
     {
         string modelsDir = Temp("models");
-        string official = Path.Combine(modelsDir, "official_models");
-        Directory.CreateDirectory(official);
-        File.WriteAllText(Path.Combine(official, "PP-OCRv6_small_det.tar"), "x");
+        foreach (string name in new[] { "PP-OCRv6_small_det", "PP-OCRv6_small_rec" })
+        {
+            string modelDir = Path.Combine(modelsDir, "official_models", name);
+            Directory.CreateDirectory(modelDir);
+            File.WriteAllText(Path.Combine(modelDir, "inference.pdmodel"), "x");
+        }
         return modelsDir;
     }
+
+    private static SetupState CompleteState() => new()
+    {
+        Dets = ["PP-OCRv6_small_det"],
+        ActiveDet = "PP-OCRv6_small_det",
+        Recs = ["PP-OCRv6_small_rec"],
+        ActiveRec = "PP-OCRv6_small_rec",
+        Langs = [],
+        ActiveLang = null,
+        LlmModels = [],
+        ActiveLlm = null,
+        IsComplete = true,
+    };
 
     /// <summary>
     /// Writes a fake <c>&lt;tmp&gt;\.venv\Scripts\python.exe</c> and returns its path.

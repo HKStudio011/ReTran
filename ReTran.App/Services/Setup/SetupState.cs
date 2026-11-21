@@ -112,18 +112,18 @@ public sealed record SetupState(
     /// </summary>
     /// <summary>
     /// Enforces the v2 completeness contract on load: <see cref="IsComplete"/> may only stay true when
-    /// every v2 answer exists (det/rec, languages, LLM — an answered-empty list is non-null). Files
-    /// written by pre-v2 builds can carry a stale <c>isComplete: true</c> while v2 questions remain,
-    /// which would map the constructor to Done and hide the wizard forever; such a file loads as
-    /// incomplete so the wizard re-asks what is missing and re-sets the flag itself at Done.
+    /// all four answer lists exist, det/rec are non-empty, and every active pick belongs to its list.
+    /// Optional LLM may be empty; a language active pick must also belong to Langs. Invalid or pre-v2
+    /// state loads incomplete so the wizard asks only what is missing and re-sets the flag at Done.
     /// Áp dụng hợp đồng hoàn tất v2 khi đọc: <see cref="IsComplete"/> chỉ được giữ true khi mọi câu
     /// trả lời v2 đều có (det/rec, Ngôn ngữ, LLM — trả lời trống là list rỗng, không phải null). File
     /// do bản trước v2 ghi có thể mang <c>isComplete: true</c> cũ trong khi vẫn còn câu hỏi v2, khiến
     /// constructor map sang Done và ẩn wizard vĩnh viễn; file như vậy đọc thành chưa hoàn tất để
-    /// wizard hỏi lại phần thiếu và tự đặt lại cờ ở Done.
+    /// wizard hỏi lại phần thiếu và tự đặt lại cờ ở Done. Det/rec phải không rỗng và mọi active pick,
+    /// kể cả ActiveLang/ActiveLlm, phải thuộc danh sách tương ứng mới được giữ cờ hoàn tất.
     /// </summary>
     private static SetupState NormalizeCompletion(SetupState state) =>
-        state.IsComplete && (state.Dets is null || state.Langs is null || state.LlmModels is null)
+        state.IsComplete && !SetupModelSelection.HasCompleteAnswers(state)
             ? state with { IsComplete = false }
             : state;
 
@@ -184,16 +184,18 @@ public sealed record SetupState(
     /// </summary>
     /// <param name="state">State loaded from <c>setup.json</c>. Trạng thái đọc từ <c>setup.json</c>.</param>
     /// <param name="venvPythonExe">Sidecar venv interpreter to test for existence. Đường dẫn interpreter venv sidecar cần kiểm tra.</param>
-    /// <param name="modelsDir">Model cache root; its <c>official_models</c> subdirectory must be non-empty. Thư mục gốc cache model; thư mục con <c>official_models</c> phải không rỗng.</param>
-    /// <returns><see langword="true"/> when setup has to run again. <see langword="true"/> khi setup phải chạy lại.</returns>
+    /// <param name="modelsDir">OCR model cache root containing the selected model directories. Thư mục gốc cache OCR chứa các thư mục model đã chọn.</param>
+    /// <param name="llmRoot">Local LLM root, or <see langword="null"/> for <see cref="SetupPaths.LlmRoot"/>. Thư mục gốc LLM local, hoặc <see langword="null"/> để dùng <see cref="SetupPaths.LlmRoot"/>.</param>
+    /// <returns><see langword="true"/> when answers or any selected artifact require setup or repair. <see langword="true"/> khi câu trả lời hoặc một artifact đã chọn cần chạy setup/sửa.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="state"/> is null. Ném khi <paramref name="state"/> là null.</exception>
-    public static bool NeedsSetup(SetupState state, string venvPythonExe, string modelsDir)
+    public static bool NeedsSetup(
+        SetupState state, string venvPythonExe, string modelsDir, string? llmRoot = null)
     {
         ArgumentNullException.ThrowIfNull(state);
-        if (!state.IsComplete) return true;
-        if (!File.Exists(venvPythonExe)) return true;
-
-        string official = Path.Combine(modelsDir, OfficialModelsSubdir);
-        return !Directory.Exists(official) || !Directory.EnumerateFileSystemEntries(official).Any();
+        return !state.IsComplete
+            || !SetupModelSelection.HasCompleteAnswers(state)
+            || !SetupModelSelection.ArtifactsPresent(
+                state, venvPythonExe, modelsDir, llmRoot ?? SetupPaths.LlmRoot,
+                File.Exists, SetupCoordinator.IsModelDirInstalled, File.ReadAllText);
     }
 }

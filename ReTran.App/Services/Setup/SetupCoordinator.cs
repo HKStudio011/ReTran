@@ -173,11 +173,14 @@ public sealed class SetupCoordinator
     private readonly Func<string, bool> _fileExists;
     private readonly Func<string, int>? _countModelEntries;
     private readonly Func<string, bool> _modelDirExists;
+    private readonly Func<string, string> _readText;
+    private readonly string _llmRoot;
     private readonly TimeSpan _modelPollInterval;
     private readonly TimeSpan _modelDownloadTimeout;
     private readonly ILogger<SetupCoordinator>? _logger;
 
     private SetupState _state;
+    private bool _selectionPersistenceFailed;
     private int _running; // 0 idle / 1 a run is in progress (Interlocked) - guards against double starts
     private SetupCheckItem[] _checks = []; // snapshot checklist Checking - thay nguyên khối mỗi event
     private SetupDownloadInfo[] _downloads = []; // snapshot tiến độ tải - thay nguyên khối mỗi poll
@@ -215,6 +218,8 @@ public sealed class SetupCoordinator
     /// <param name="fileExists">File-existence probe for uv.exe (Checking + VerifyingFiles); defaults to <see cref="File.Exists"/>. Probe tồn tại file cho uv.exe (Checking + VerifyingFiles); mặc định <see cref="File.Exists"/>.</param>
     /// <param name="countModelEntries">Counts installed models for the Checking checklist; defaults to the real models directory. Đếm model đã cài cho checklist Checking; mặc định là thư mục models thật.</param>
     /// <param name="modelDirExists">Installed-probe for one model directory under the models cache, used by the rerun reconcile; defaults to <see cref="IsModelDirInstalled"/> (the sidecar's strict rule — non-empty dir, no <c>.partial</c> marker). Probe "đã cài" cho thư mục của một model trong cache model, dùng bởi reconcile khi chạy lại; mặc định <see cref="IsModelDirInstalled"/> (luật nghiêm của sidecar — thư mục không rỗng, không có marker <c>.partial</c>).</param>
+    /// <param name="readText">Text-read seam for selected-artifact JSON preflight; defaults to <see cref="File.ReadAllText"/>. Seam đọc text cho preflight JSON artifact đã chọn; mặc định <see cref="File.ReadAllText"/>.</param>
+    /// <param name="llmRoot">Local LLM root for artifact preflight; defaults to <see cref="SetupPaths.LlmRoot"/>. Thư mục gốc LLM local cho preflight artifact; mặc định <see cref="SetupPaths.LlmRoot"/>.</param>
     /// <param name="modelPollInterval">Delay between <c>ocr.models.list</c> polls while models download; default 2 s. Khoảng cách giữa các lần poll <c>ocr.models.list</c> khi đang tải model; mặc định 2 s.</param>
     /// <param name="modelDownloadTimeout">Total window per download attempt; default 60 min. Cửa sổ tổng cho mỗi lượt tải; mặc định 60 phút.</param>
     /// <param name="logger">DI logger, or <see langword="null"/> to log nothing. Logger DI, hoặc <see langword="null"/> để không ghi log.</param>
@@ -231,6 +236,8 @@ public sealed class SetupCoordinator
         Func<string, bool>? fileExists = null,
         Func<string, int>? countModelEntries = null,
         Func<string, bool>? modelDirExists = null,
+        Func<string, string>? readText = null,
+        string? llmRoot = null,
         TimeSpan? modelPollInterval = null,
         TimeSpan? modelDownloadTimeout = null,
         ILogger<SetupCoordinator>? logger = null)
@@ -254,6 +261,8 @@ public sealed class SetupCoordinator
         _fileExists = fileExists ?? File.Exists;
         _countModelEntries = countModelEntries;
         _modelDirExists = modelDirExists ?? IsModelDirInstalled;
+        _readText = readText ?? File.ReadAllText;
+        _llmRoot = llmRoot ?? SetupPaths.LlmRoot;
         _modelPollInterval = modelPollInterval ?? DefaultModelPollInterval;
         _modelDownloadTimeout = modelDownloadTimeout ?? DefaultModelDownloadTimeout;
         _logger = logger;
@@ -406,20 +415,18 @@ public sealed class SetupCoordinator
     /// Starts the wizard: re-runs the system check (it is pure and cheap, and the flavor must follow
     /// the CURRENT hardware), pauses at the first unanswered pre-pipeline question (det/rec models →
     /// languages → LLM), then runs the pipeline from the first not-done step. A completed
-    /// state short-circuits straight to <see cref="SetupStep.Done"/>. With <paramref name="force"/>
-    /// (the Settings "re-run setup" repair path) the run RESTARTS FROM STEP 1 instead: the v2 answers
-    /// and every step marker are cleared (and saved immediately, so a crash mid-rerun leaves a
-    /// consistent "rerunning" state), all three question screens are asked again, and the pipeline
-    /// re-verifies — while genuinely installed models are still not re-downloaded.
+    /// state short-circuits straight to <see cref="SetupStep.Done"/> only while every selected artifact
+    /// remains present. With <paramref name="force"/> (the Settings repair path), every step marker is
+    /// cleared and persisted immediately, valid answers are preserved, only missing/invalid question
+    /// screens are asked again, and the pipeline re-verifies without re-downloading installed models.
     /// Khởi động wizard: chạy lại check system (thuần và rẻ, flavor phải theo phần cứng HIỆN TẠI), dừng
     /// ở câu hỏi pre-pipeline đầu tiên chưa được trả lời (model det/rec → Ngôn ngữ → LLM), rồi
-    /// chạy pipeline từ bước chưa done đầu tiên. State đã xong thì nhảy thẳng tới
-    /// <see cref="SetupStep.Done"/>. Với <paramref name="force"/> (đường "chạy lại setup" trong
-    /// Settings — để sửa lỗi) lượt chạy CHẠY LẠI TỪ BƯỚC 1: xoá câu trả lời v2 và mọi marker bước
-    /// (ghi file ngay, để crash giữa rerun vẫn là state "đang rerun" nhất quán), hỏi lại cả 3 màn,
-    /// pipeline xác minh lại — còn model ĐÃ CÀI THẬT vẫn không bị tải lại.
+    /// chạy pipeline từ bước chưa done đầu tiên. State đã xong chỉ nhảy thẳng tới
+    /// <see cref="SetupStep.Done"/> khi mọi artifact đã chọn còn đủ. Với <paramref name="force"/>
+    /// (đường sửa lỗi trong Settings), mọi marker bước bị xoá và ghi ngay, câu trả lởi hợp lệ được giữ,
+    /// chỉ màn thiếu/không hợp lệ được hỏi lại, pipeline xác minh lại và không tải lại model đã cài.
     /// </summary>
-    /// <param name="force">Bypasses the <c>IsComplete</c> short-circuit and restarts the wizard from step 1 (answers and markers cleared — the repair rerun). Bỏ qua nhánh tắt <c>IsComplete</c> và chạy lại wizard từ bước 1 (xoá câu trả lời và marker — lượt rerun sửa lỗi).</param>
+    /// <param name="force">Bypasses the complete-state short-circuit and clears step markers while preserving valid answers for repair. Bỏ qua nhánh tắt hoàn tất và xoá marker bước nhưng giữ câu trả lởi hợp lệ để sửa.</param>
     /// <param name="ct">Cancellation token; cancelling aborts the run (state is left where it was). Token hủy; hủy sẽ dừng lượt chạy (state giữ nguyên ở chỗ nó đang ở).</param>
     public async Task StartAsync(bool force = false, CancellationToken ct = default)
     {
@@ -449,7 +456,7 @@ public sealed class SetupCoordinator
             Notice = null;
             _flavorSwitchConfirmed = false;
 
-            _state = _stateFactory();
+            if (!_selectionPersistenceFailed) _state = _stateFactory();
 
             // A fresh app session cannot assume the Core from a previous session is still alive: the
             // VerifyingSidecar marker is SESSION truth, not disk truth. Drop it on every run start so
@@ -464,30 +471,15 @@ public sealed class SetupCoordinator
 
             if (force)
             {
-                // The repair rerun restarts from step 1: clear the v2 answers (all three question
-                // screens are asked again) and every step marker (the pipeline re-verifies), then
-                // persist immediately — a crash mid-rerun must leave "rerunning", never the old
-                // "complete" state. What stays: the model download step still skips genuinely
-                // installed models (its bridge catalog is the truth); Syncing always runs its real
-                // frozen sync anyway (see RunSyncStepAsync).
-                // Lượt rerun sửa lỗi chạy lại từ bước 1: xoá câu trả lời v2 (cả 3 màn được hỏi lại)
-                // và mọi marker bước (pipeline xác minh lại), rồi lưu NGAY — crash giữa rerun phải
-                // để lại state "đang rerun", không bao giờ là "đã xong" cũ. Cái giữ nguyên: bước tải
-                // vẫn bỏ qua model đã cài THẬT (catalog của bridge là sự thật); Syncing luôn chạy
-                // frozen sync thật (xem RunSyncStepAsync).
-                _state = _state with
-                {
-                    Dets = null,
-                    ActiveDet = null,
-                    Recs = null,
-                    ActiveRec = null,
-                    Langs = null,
-                    ActiveLang = null,
-                    LlmModels = null,
-                    ActiveLlm = null,
-                    Steps = null,
-                    IsComplete = false,
-                };
+                // The repair rerun clears every step marker, not the answers: valid selections survive,
+                // while missing/invalid answers still pause at their own question screen. Persist immediately
+                // so a crash cannot revive the old complete state. Catalog/file probes skip valid artifacts;
+                // Syncing always runs its real frozen sync anyway (see RunSyncStepAsync).
+                // Lượt rerun sửa lỗi chỉ xoá marker bước, giữ mọi câu trả lởi hợp lệ; màn nào thiếu hoặc
+                // không hợp lệ vẫn dừng để hỏi. Lưu NGAY để crash không khôi phục trạng thái hoàn tất cũ.
+                // Probe catalog/file bỏ qua artifact còn hợp lệ; Syncing vẫn chạy frozen sync thật
+                // (xem RunSyncStepAsync).
+                _state = _state with { Steps = null, IsComplete = false };
                 _state.Save();
             }
 
@@ -498,7 +490,7 @@ public sealed class SetupCoordinator
             // Mất tắt hoàn tất chỉ có hiệu lực khi ARTIFACTS còn trên đĩa (venv + models): NeedsSetup
             // bắn khi chúng mất (spec v1 §5.9), và Done trần vô hiệu hoá trigger đó — venv mất không
             // bao giờ được sửa, start pipeline fail mỗi lần mở app (review BA 2026-11-17: dead path).
-            if (!force && _state.IsComplete && ArtifactsPresent())
+            if (!force && !_selectionPersistenceFailed && _state.IsComplete && ArtifactsPresent())
             {
                 Step = SetupStep.Done;
                 Publish();
@@ -526,7 +518,7 @@ public sealed class SetupCoordinator
                 return;
             }
 
-            if (_state.Dets is null)
+            if (!HasOcrAnswers(_state))
             {
                 Step = SetupStep.ChoosingOcrModels;
                 Publish();
@@ -828,7 +820,7 @@ public sealed class SetupCoordinator
                     return;
                 }
 
-                if (_state.Dets is null)
+                if (!HasOcrAnswers(_state))
                 {
                     Step = SetupStep.ChoosingOcrModels;
                     Publish();
@@ -844,6 +836,62 @@ public sealed class SetupCoordinator
         finally
         {
             EndRun();
+        }
+    }
+
+    /// <summary>
+    /// Removes a successfully deleted model from setup and settings and publishes the resulting lifecycle state.
+    /// Loại model đã được engine xoá thành công khỏi setup và settings rồi publish trạng thái lifecycle.
+    /// </summary>
+    /// <param name="name">Deleted catalog name. Tên catalog đã xoá.</param>
+    /// <param name="installed">Models still installed after deletion. Các model còn cài sau khi xoá.</param>
+    /// <param name="engineActive">Models active in the engine. Các model engine đang dùng.</param>
+    /// <exception cref="InvalidOperationException">Thrown after the coordinator becomes incomplete when either state file cannot be persisted. Ném sau khi coordinator chuyển chưa hoàn tất nếu một file trạng thái không ghi được.</exception>
+    public void RemoveDeletedModel(
+        string name, IReadOnlyCollection<string> installed, IReadOnlyCollection<string> engineActive)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        ArgumentNullException.ThrowIfNull(installed);
+        ArgumentNullException.ThrowIfNull(engineActive);
+        (SetupState updatedSetup, AppSettings updatedSettings) = SetupModelSelection.AfterDelete(
+            _state, _settings.Load(), name, installed, engineActive);
+
+        _selectionPersistenceFailed = true;
+        SkippedForSession = false;
+        Error = null;
+        Step = SetupStep.Checking;
+        _state = updatedSetup with { IsComplete = false };
+        Publish();
+
+        string target = "setup.json";
+        try
+        {
+            // The first persisted state is always incomplete. Only after settings are synchronized may
+            // a complete selection be marked complete again; either failure therefore leaves a repair gate.
+            _state.Save();
+            target = "settings.json";
+            _settings.Save(updatedSettings);
+            if (updatedSetup.IsComplete)
+            {
+                target = "setup.json";
+                _state = _state with { IsComplete = true };
+                _state.Save();
+            }
+
+            _selectionPersistenceFailed = false;
+            Error = null;
+            Step = _state.IsComplete ? SetupStep.Done : FirstIncompleteQuestionStep(_state);
+            Publish();
+        }
+        catch (Exception ex)
+        {
+            _selectionPersistenceFailed = true;
+            _state = _state with { IsComplete = false };
+            Error = SetupMessage.Of("settings.status.saveFailed");
+            EnterFailed(SetupStep.Checking);
+            _logger?.LogError(ex, "setup: deletion persistence failed for {Path}", target);
+            throw new InvalidOperationException(
+                $"Model deletion could not update {target}; setup repair is required: {ex.Message}", ex);
         }
     }
 
@@ -915,9 +963,39 @@ public sealed class SetupCoordinator
     /// Chạy tiếp sau khi một câu trả lời pre-pipeline được lưu: dừng ở câu hỏi bước 3/bước 4 chưa trả
     /// lời kế (Ngôn ngữ, rồi model LLM), hoặc chạy pipeline từ bước đầu khi đã trả lời hết.
     /// </summary>
+    private static SetupStep FirstIncompleteQuestionStep(SetupState state)
+    {
+        if (!HasOcrAnswers(state)) return SetupStep.ChoosingOcrModels;
+        if (state.Langs is null
+            || (state.ActiveLang is not null
+                && !state.Langs.Contains(state.ActiveLang, StringComparer.Ordinal)))
+        {
+            return SetupStep.ChoosingLanguages;
+        }
+        return SetupStep.ChoosingLlmModels;
+    }
+
+    private static bool HasOcrAnswers(SetupState state) =>
+        state.Dets is { Count: > 0 }
+        && state.Recs is { Count: > 0 }
+        && state.ActiveDet is not null
+        && state.Dets.Contains(state.ActiveDet, StringComparer.Ordinal)
+        && state.ActiveRec is not null
+        && state.Recs.Contains(state.ActiveRec, StringComparer.Ordinal);
+
     private async Task ContinueAfterAnswersAsync(CancellationToken ct)
     {
-        if (_state.Langs is null)
+        if (!HasOcrAnswers(_state))
+        {
+            Step = SetupStep.ChoosingOcrModels;
+            Publish();
+            _logger?.LogInformation("setup: paused at {Step}", Step);
+            return;
+        }
+
+        if (_state.Langs is null
+            || (_state.ActiveLang is not null
+                && !_state.Langs.Contains(_state.ActiveLang, StringComparer.Ordinal)))
         {
             Step = SetupStep.ChoosingLanguages;
             Publish();
@@ -925,7 +1003,9 @@ public sealed class SetupCoordinator
             return;
         }
 
-        if (_state.LlmModels is null)
+        if (_state.LlmModels is null
+            || (_state.ActiveLlm is not null
+                && !_state.LlmModels.Contains(_state.ActiveLlm, StringComparer.Ordinal)))
         {
             Step = SetupStep.ChoosingLlmModels;
             Publish();
@@ -1544,16 +1624,16 @@ public sealed class SetupCoordinator
             _state.Langs ?? []);
 
     /// <summary>
-    /// Applying (Review Focus #5 — ALWAYS runs, even when nothing was downloaded): computes the pair
-    /// from the saved answers (<see cref="OcrModelChoices.ExpectedPair"/> — the active legacy rec wins
-    /// over the v6 rec) and writes it plus <c>LlmActiveModel</c> into settings via
-    /// <see cref="AppSettingsService.Save"/>. When an active LLM is chosen it also calls
-    /// <c>llm.models.set</c> best-effort (a refusal only logs — settings are already written, spec §6).
+    /// Applying always computes <see cref="OcrModelChoices.ExpectedPair"/>, saves that pair and
+    /// <c>LlmActiveModel</c>, then calls <c>ocr.models.set</c>. Only a successful save and OCR RPC may
+    /// mark the step done; either failure uses the existing retry loop. The later <c>llm.models.set</c>
+    /// remains best-effort (a refusal only logs — settings are already written, spec §6).
     /// Applying (Review Focus #5 — LUÔN chạy, kể cả khi không tải model nào): tính cặp từ câu trả lời
     /// đã lưu (<see cref="OcrModelChoices.ExpectedPair"/> — rec legacy đang chấm thắng rec v6) và ghi
     /// cặp đó cùng <c>LlmActiveModel</c> vào settings qua <see cref="AppSettingsService.Save"/>. Khi có
     /// LLM "Dùng chính", gọi thêm <c>llm.models.set</c> kiểu best-effort (bị từ chối chỉ log — settings
-    /// đã ghi, spec §6).
+    /// đã ghi, spec §6). Sau khi lưu settings, Applying gọi <c>ocr.models.set</c> và chỉ đánh dấu xong
+    /// khi RPC này thành công; lỗi lưu hoặc RPC OCR đều đi qua vòng retry hiện có.
     /// </summary>
     private async Task<StepOutcome> RunApplyingStepAsync(CancellationToken ct)
     {
@@ -1568,8 +1648,16 @@ public sealed class SetupCoordinator
                 {
                     OcrDet = det,
                     OcrRec = rec,
-                    LlmActiveModel = _state.ActiveLlm ?? settings.LlmActiveModel,
+                    // A failed deletion must never resurrect the stale model when the repair answers "no LLM".
+                    LlmActiveModel = _state.ActiveLlm
+                        ?? (_selectionPersistenceFailed && _state.LlmModels is { Count: 0 }
+                            ? string.Empty
+                            : settings.LlmActiveModel),
                 });
+
+                await _bridge
+                    .CallAsync("ocr.models.set", new JsonObject { ["det"] = det, ["rec"] = rec }, ct)
+                    .ConfigureAwait(false);
 
                 if (_state.ActiveLlm is { } llm)
                 {
@@ -1614,16 +1702,17 @@ public sealed class SetupCoordinator
         _modelDirExists(Path.Combine(SetupPaths.ModelsDir, SetupState.OfficialModelsSubdir, modelName));
 
     /// <summary>
-    /// Whether the wizard's expensive artifacts are still on disk: the sidecar venv python and a
-    /// non-empty official models cache. Uses the injected seams so tests keep their fakes — this
-    /// gates the complete-state short-circuit (a lost venv must run the repair, not Done).
-    /// Kiểm tra các artifact đắt tiền của wizard còn trên đĩa: python venv sidecar và cache model
-    /// chính thức không rỗng. Dùng seam inject để test giữ fake — điều này chặn short-circuit
-    /// complete-state (venv mất phải chạy luồng sửa, không phải Done).
+    /// Whether every selected artifact is still on disk: the sidecar Python, all selected OCR/GGUF
+    /// files without partial markers, and the active llama.cpp runtime when LLM models are selected.
+    /// Injected seams keep this a cheap file/JSON preflight in production and tests.
+    /// Kiểm tra mọi artifact đã chọn còn trên đĩa: Python sidecar, tất cả OCR/GGUF đã chọn không có
+    /// marker partial và runtime llama.cpp active khi có model LLM. Seam inject giữ preflight này chỉ
+    /// đọc file/JSON rẻ trong production và test.
     /// </summary>
     private bool ArtifactsPresent() =>
-        _fileExists(SetupPaths.VenvPythonExe)
-        && _modelDirExists(Path.Combine(SetupPaths.ModelsDir, SetupState.OfficialModelsSubdir));
+        SetupModelSelection.ArtifactsPresent(
+            _state, SetupPaths.VenvPythonExe, SetupPaths.ModelsDir, _llmRoot,
+            _fileExists, _modelDirExists, _readText);
 
     /// <summary>
     /// The sidecar's installed rule mirrored (<c>ocr/models.py</c>): the model directory exists, is
@@ -1711,6 +1800,7 @@ public sealed class SetupCoordinator
     {
         _state = _state with { IsComplete = true };
         _state.Save();
+        _selectionPersistenceFailed = false;
         Error = null;
         Step = SetupStep.Done;
         Publish();

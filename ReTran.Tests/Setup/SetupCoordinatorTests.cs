@@ -76,6 +76,19 @@ public class SetupCoordinatorTests : IDisposable
 
     private static IVideoAdapterSource Adapters(params VideoAdapterInfo[] items) => new FakeAdapters(items);
 
+    private static string ReadArtifactText(string path)
+    {
+        if (path.EndsWith("llm-models.json", StringComparison.Ordinal))
+        {
+            return $$"""
+                [{"name":"{{FakeCoreBridge.LlmCatalogNames[0]}}","file":"{{FakeCoreBridge.LlmCatalogNames[0]}}.gguf"},{"name":"{{FakeCoreBridge.LlmCatalogNames[1]}}","file":"{{FakeCoreBridge.LlmCatalogNames[1]}}.gguf"}]
+                """;
+        }
+        if (path.EndsWith("runtime.json", StringComparison.Ordinal))
+            return """{"tag":"b7234","flavor":"cuda"}""";
+        return File.ReadAllText(path);
+    }
+
     /// <summary>
     /// Builds a coordinator over the shared fakes; state and settings point at temp files, model
     /// polling runs at 10 ms so download tests finish in milliseconds. The host-reachability seam
@@ -96,7 +109,9 @@ public class SetupCoordinatorTests : IDisposable
         Func<string, bool>? fileExists = null,
         TimeSpan? modelDownloadTimeout = null,
         Func<string, int>? countModelEntries = null,
-        Func<string, bool>? modelDirExists = null)
+        Func<string, bool>? modelDirExists = null,
+        Func<string, string>? readText = null,
+        string? llmRoot = null)
     {
         var coordinator = new SetupCoordinator(
             adapters ?? Adapters(NvidiaCurrent),
@@ -107,9 +122,11 @@ public class SetupCoordinatorTests : IDisposable
             _settings,
             () => _closeAppCalled = true,
             stateFactory: () => SetupState.Load(_setupJson),
-            fileExists: fileExists ?? (_ => true),
+            fileExists: fileExists ?? (path => !path.EndsWith(".partial", StringComparison.Ordinal)),
             countModelEntries: countModelEntries ?? (_ => 0),
             modelDirExists: modelDirExists ?? (_ => true),
+            readText: readText ?? ReadArtifactText,
+            llmRoot: llmRoot,
             modelPollInterval: TimeSpan.FromMilliseconds(10),
             modelDownloadTimeout: modelDownloadTimeout ?? TimeSpan.FromSeconds(5));
         coordinator.Changed += () => Interlocked.Increment(ref _changedCount);
@@ -119,6 +136,44 @@ public class SetupCoordinatorTests : IDisposable
     private void WriteSetupJson(string json) => File.WriteAllText(_setupJson, json);
 
     private void WriteSettingsJson(string json) => File.WriteAllText(_settingsJson, json);
+
+    private void WriteCompleteSetup(
+        string[]? dets = null,
+        string? activeDet = null,
+        string[]? recs = null,
+        string? activeRec = null,
+        string[]? llmModels = null,
+        string? activeLlm = null)
+    {
+        SetupState state = SetupState.Load(_setupJson) with
+        {
+            Flavor = "gpu",
+            Language = "vi",
+            Dets = [.. dets ?? [FakeCoreBridge.DetModel]],
+            ActiveDet = activeDet ?? FakeCoreBridge.DetModel,
+            Recs = [.. recs ?? [FakeCoreBridge.RecModel]],
+            ActiveRec = activeRec ?? FakeCoreBridge.RecModel,
+            Langs = [],
+            ActiveLang = null,
+            LlmModels = [.. llmModels ?? []],
+            ActiveLlm = activeLlm,
+            Steps = new Dictionary<string, string>
+            {
+                ["checking"] = "done",
+                ["choosingocrmodels"] = "done",
+                ["choosinglanguages"] = "done",
+                ["choosingllmmodels"] = "done",
+                ["verifyingfiles"] = "done",
+                ["syncing"] = "done",
+                ["verifyingsidecar"] = "done",
+                ["downloadingllmruntime"] = "done",
+                ["downloadingmodels"] = "done",
+                ["applying"] = "done",
+            },
+            IsComplete = true,
+        };
+        state.Save();
+    }
 
     /// <summary>
     /// True when a model-dir probe path points AT the named model's directory (the probe receives the
@@ -1521,11 +1576,10 @@ public class SetupCoordinatorTests : IDisposable
     }
 
     [Fact]
-    public async Task Rerun_ForceReset_ClearsAnswersAndMarkers_ReasksFromFirstQuestion()
+    public async Task Rerun_ForceReset_PreservesAnswersAndRepairsPipeline()
     {
-        // Máy đã hoàn tất v2: bấm "Chạy lại setup" phải CHẠY LẠI TỪ ĐẦU — xoá câu trả lời + mọi
-        // marker, hỏi lại cả 3 màn (det/rec trước), chạy lại pipeline; model ĐÃ CÀI THẬT thì bước
-        // tải vẫn bỏ qua (không tải lại vô ích).
+        // Máy đã hoàn tất v2: rerun xoá mọi marker nhưng giữ câu trả lởi hợp lệ, không hỏi lại ba màn;
+        // pipeline chạy lại và model đã cài thật không bị tải lại vô ích.
         WriteSetupJson("""
             {
               "flavor": "gpu",
@@ -1558,26 +1612,19 @@ public class SetupCoordinatorTests : IDisposable
 
         await coordinator.StartAsync(force: true, ct: TestContext.Current.CancellationToken);
 
-        // Hỏi lại từ màn hỏi ĐẦU TIÊN; file đã reset (crash giữa rerun vẫn là state "đang rerun").
-        Assert.Equal(SetupStep.ChoosingOcrModels, coordinator.Step);
-        SetupState reset = ReadSetupJson();
-        Assert.Null(reset.Dets);
-        Assert.Null(reset.Langs);
-        Assert.Null(reset.LlmModels);
-        Assert.False(reset.IsComplete);
-        // Chỉ marker Checking của LƯỢT NÀY tồn tại — mọi marker pipeline cũ đã bị xoá.
-        Assert.Equal("done", reset.Steps!["checking"]);
-        Assert.False(reset.Steps.ContainsKey("syncing"));
-        Assert.False(reset.Steps.ContainsKey("downloadingmodels"));
-        Assert.False(reset.Steps.ContainsKey("choosingocrmodels"));
-
-        // Trả lời lại cả 3 màn → chạy lại pipeline → Done.
-        await coordinator.ContinueWithOcrModelsAsync([FakeCoreBridge.DetModel], FakeCoreBridge.DetModel,
-            [FakeCoreBridge.RecModel], FakeCoreBridge.RecModel, TestContext.Current.CancellationToken);
-        await coordinator.ContinueWithLanguagesAsync([], null, TestContext.Current.CancellationToken);
-        await coordinator.ContinueWithLlmModelsAsync([], null, TestContext.Current.CancellationToken);
-
+        // Câu trả lởi được giữ nguyên và pipeline repair chạy thẳng tới Done.
         Assert.Equal(SetupStep.Done, coordinator.Step);
+        SetupState repaired = ReadSetupJson();
+        Assert.Equal([FakeCoreBridge.DetModel], repaired.Dets);
+        Assert.Equal([FakeCoreBridge.RecModel], repaired.Recs);
+        Assert.Empty(repaired.Langs!);
+        Assert.Empty(repaired.LlmModels!);
+        Assert.True(repaired.IsComplete);
+        // Các marker pipeline đều được tạo lại sau khi bước tương ứng thành công.
+        Assert.Equal("done", repaired.Steps!["checking"]);
+        Assert.Equal("done", repaired.Steps["syncing"]);
+        Assert.Equal("done", repaired.Steps["downloadingmodels"]);
+
         // Pipeline chạy LẠI (marker đã xoá): sidecar được ping/verify lại...
         Assert.Contains(_bridge.Calls, c => c.Method == "sidecar.ping");
         // ...uv sync chạy THẬT (không đường nhanh cùng-flavor — BA 17-11: rerun phải chạy đủ bước)...
@@ -1839,12 +1886,12 @@ public class SetupCoordinatorTests : IDisposable
         release.SetResult();
         await startTask.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
-        // The run finished: a forced rerun now RESTARTS FROM STEP 1 (answers + markers cleared), so it
-        // pauses at the first question instead of passing straight back to Done — IsRunning is false.
-        // Lượt chạy kết thúc: rerun có force giờ CHẠY LẠI TỪ BƯỚC 1 (xoá answers + marker), nên nó
-        // dừng ở câu hỏi đầu tiên thay vì quay thẳng Done — IsRunning về false.
-        Assert.Equal(SetupStep.ChoosingOcrModels, coordinator.Step);
-        Assert.False(coordinator.IsComplete);
+        // The run finished: force clears markers but preserves valid answers, so repair reaches Done
+        // without asking the three screens again and IsRunning returns to false.
+        // Lượt chạy kết thúc: force xoá marker nhưng giữ câu trả lởi hợp lệ, nên repair tới Done mà
+        // không hỏi lại ba màn và IsRunning về false.
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.True(coordinator.IsComplete);
         Assert.False(coordinator.IsRunning);
     }
 
@@ -1945,6 +1992,201 @@ public class SetupCoordinatorTests : IDisposable
         Assert.False(coordinator.IsRunning);
     }
 
+    // ── Task 2: rerun/artifact integrity, Applying và deletion ─────────────────────────────────────
+
+    [Fact]
+    public async Task ForceRerun_PreservesAnswersAndRepairsOnlyMissingArtifacts()
+    {
+        const string mediumDet = "PP-OCRv6_medium_det";
+        const string otherLlm = "Hy-MT2-7B-Q5_K_M";
+        WriteCompleteSetup(
+            dets: [FakeCoreBridge.DetModel, mediumDet],
+            activeDet: FakeCoreBridge.DetModel,
+            llmModels: [FakeCoreBridge.LlmCatalogNames[0], otherLlm],
+            activeLlm: FakeCoreBridge.LlmCatalogNames[0]);
+        _bridge.Installed.Add(FakeCoreBridge.DetModel);
+        _bridge.Installed.Add(FakeCoreBridge.RecModel);
+        _bridge.LlmInstalled.Add(FakeCoreBridge.LlmCatalogNames[0]);
+        _bridge.LlmRuntimeInstalled = true;
+        _bridge.LlmRuntimeTag = "b7234";
+        _bridge.LlmRuntimeLatestTag = "b7234";
+        var coordinator = NewCoordinator(
+            modelDirExists: path => !HasModelDir(path, mediumDet));
+
+        await coordinator.StartAsync(force: true, TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        SetupState state = ReadSetupJson();
+        Assert.Equal([FakeCoreBridge.DetModel, mediumDet], state.Dets);
+        Assert.Equal(FakeCoreBridge.DetModel, state.ActiveDet);
+        Assert.Equal([FakeCoreBridge.RecModel], state.Recs);
+        Assert.Empty(state.Langs!);
+        Assert.Equal([FakeCoreBridge.LlmCatalogNames[0], otherLlm], state.LlmModels);
+        Assert.Equal(FakeCoreBridge.LlmCatalogNames[0], state.ActiveLlm);
+        Assert.Equal([mediumDet], _bridge.Downloaded);
+        Assert.Equal([otherLlm], _bridge.LlmDownloaded);
+        Assert.Empty(_bridge.LlmRuntimeDownloads);
+    }
+
+    [Fact]
+    public async Task Applying_CallsOcrModelsSetBeforeDone()
+    {
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
+        _bridge.Installed.Add(FakeCoreBridge.DetModel);
+        _bridge.Installed.Add(FakeCoreBridge.RecModel);
+        var coordinator = NewCoordinator();
+        _bridge.OnOcrSet = () =>
+        {
+            Assert.Equal(SetupStep.Applying, coordinator.Step);
+            AppSettings persisted = _settings.Load();
+            Assert.Equal(FakeCoreBridge.DetModel, persisted.OcrDet);
+            Assert.Equal(FakeCoreBridge.RecModel, persisted.OcrRec);
+        };
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Equal([(FakeCoreBridge.DetModel, FakeCoreBridge.RecModel)], _bridge.OcrSetCalls);
+    }
+
+    [Fact]
+    public async Task Applying_OcrSetFailure_DoesNotComplete_AndRetryIsIdempotent()
+    {
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
+        _bridge.Installed.Add(FakeCoreBridge.DetModel);
+        _bridge.Installed.Add(FakeCoreBridge.RecModel);
+        _bridge.OcrSetFailuresRemaining = SetupCoordinator.MaxRetries + 1;
+        var coordinator = NewCoordinator();
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+        Assert.False(coordinator.IsComplete);
+        Assert.Equal(SetupCoordinator.MaxRetries + 1, _bridge.OcrSetCalls.Count);
+        Assert.All(_bridge.OcrSetCalls,
+            pair => Assert.Equal((FakeCoreBridge.DetModel, FakeCoreBridge.RecModel), pair));
+        Assert.False(ReadSetupJson().IsComplete);
+        Assert.Equal(FakeCoreBridge.DetModel, _settings.Load().OcrDet);
+        Assert.Equal(FakeCoreBridge.RecModel, _settings.Load().OcrRec);
+
+        await coordinator.RetryAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Equal(SetupCoordinator.MaxRetries + 2, _bridge.OcrSetCalls.Count);
+        Assert.Equal((FakeCoreBridge.DetModel, FakeCoreBridge.RecModel), _bridge.OcrSetCalls[^1]);
+    }
+
+    [Fact]
+    public void RemoveDeletedModel_UpdatesSetupSettingsAndPublishes()
+    {
+        const string deleted = "PP-OCRv6_medium_det";
+        WriteCompleteSetup(
+            dets: [FakeCoreBridge.DetModel, deleted], activeDet: deleted);
+        _settings.Save(AppSettings.Default with
+        {
+            OcrDet = deleted,
+            OcrRec = FakeCoreBridge.RecModel,
+            LlmActiveModel = string.Empty,
+        });
+        var coordinator = NewCoordinator();
+        int before = _changedCount;
+
+        coordinator.RemoveDeletedModel(
+            deleted,
+            [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel],
+            [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel]);
+
+        SetupState state = ReadSetupJson();
+        Assert.Equal([FakeCoreBridge.DetModel], state.Dets);
+        Assert.Equal(FakeCoreBridge.DetModel, state.ActiveDet);
+        Assert.Equal(FakeCoreBridge.DetModel, coordinator.ActiveDet);
+        Assert.Equal(FakeCoreBridge.DetModel, _settings.Load().OcrDet);
+        Assert.True(state.IsComplete);
+        Assert.True(coordinator.IsComplete);
+        Assert.True(_changedCount > before);
+    }
+
+    [Theory]
+    [InlineData("setup.json")]
+    [InlineData("settings.json")]
+    public void Delete_PersistenceFailure_FailsClosed(string failingFile)
+    {
+        const string deleted = "PP-OCRv6_medium_det";
+        WriteCompleteSetup(dets: [deleted], activeDet: deleted);
+        _settings.Save(AppSettings.Default with
+        {
+            OcrDet = deleted,
+            OcrRec = FakeCoreBridge.RecModel,
+            LlmActiveModel = string.Empty,
+        });
+        var coordinator = NewCoordinator();
+        int before = _changedCount;
+        if (failingFile == "setup.json")
+        {
+            File.Delete(_setupJson);
+            Directory.CreateDirectory(_setupJson);
+        }
+        else
+        {
+            File.Delete(_settingsJson);
+            Directory.CreateDirectory(_settingsJson);
+        }
+
+        InvalidOperationException failure = Assert.Throws<InvalidOperationException>(() =>
+            coordinator.RemoveDeletedModel(deleted, [], []));
+
+        Assert.False(coordinator.IsComplete);
+        Assert.False(PipelineGate.CanStartPipeline(
+            coordinator.IsComplete, coordinator.IsRunning, coordinator.SkippedForSession));
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+        Assert.Equal(string.Empty, coordinator.ActiveDet);
+        Assert.Contains(failingFile, failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(_changedCount > before);
+        if (failingFile == "settings.json")
+        {
+            SetupState persisted = ReadSetupJson();
+            Assert.False(persisted.IsComplete);
+            Assert.Equal(string.Empty, persisted.ActiveDet);
+        }
+    }
+
+    [Fact]
+    public async Task Delete_SettingsFailure_RepairNeverRestoresDeletedLlm()
+    {
+        string deleted = FakeCoreBridge.LlmCatalogNames[1];
+        WriteCompleteSetup(llmModels: [deleted], activeLlm: deleted);
+        _settings.Save(AppSettings.Default with
+        {
+            OcrDet = FakeCoreBridge.DetModel,
+            OcrRec = FakeCoreBridge.RecModel,
+            LlmActiveModel = deleted,
+        });
+        _bridge.Installed.Add(FakeCoreBridge.DetModel);
+        _bridge.Installed.Add(FakeCoreBridge.RecModel);
+        var coordinator = NewCoordinator();
+        File.Delete(_settingsJson);
+        Directory.CreateDirectory(_settingsJson);
+        Assert.Throws<InvalidOperationException>(() => coordinator.RemoveDeletedModel(
+            deleted, [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel],
+            [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel]));
+
+        Directory.Delete(_settingsJson, recursive: true);
+        _settings.Save(AppSettings.Default with
+        {
+            OcrDet = FakeCoreBridge.DetModel,
+            OcrRec = FakeCoreBridge.RecModel,
+            LlmActiveModel = deleted,
+        });
+        await coordinator.RetryAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.ChoosingLlmModels, coordinator.Step);
+
+        await coordinator.ContinueWithLlmModelsAsync([], null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Equal(string.Empty, _settings.Load().LlmActiveModel);
+        Assert.DoesNotContain(deleted, _bridge.LlmSetCalls);
+    }
+
     // ── fakes ─────────────────────────────────────────────────────────────────────────────────────
 
     private sealed class FakeAdapters(VideoAdapterInfo[] items) : IVideoAdapterSource
@@ -2027,6 +2269,15 @@ public class SetupCoordinatorTests : IDisposable
 
         public List<string> Downloaded { get; } = [];
 
+        /// <summary>OCR pairs accepted via ocr.models.set, in order. Cặp OCR nhận qua ocr.models.set, theo thứ tự.</summary>
+        public List<(string Det, string Rec)> OcrSetCalls { get; } = [];
+
+        /// <summary>Number of ocr.models.set calls that fail before success. Số lời gọi ocr.models.set fail trước khi thành công.</summary>
+        public int OcrSetFailuresRemaining { get; set; }
+
+        /// <summary>Runs after a successful pair update. Chạy sau khi cập nhật cặp thành công.</summary>
+        public Action? OnOcrSet { get; set; }
+
         /// <summary>GGUF names the fake reports installed. Tên GGUF fake báo đã cài.</summary>
         public HashSet<string> LlmInstalled { get; } = [];
 
@@ -2106,6 +2357,7 @@ public class SetupCoordinatorTests : IDisposable
                     ["rec"] = RecModel,
                 }),
                 "ocr.models.download" => Download(@params),
+                "ocr.models.set" => SetOcrModelPair(@params),
                 "sidecar.device" => Task.FromResult(DeviceResult),
                 "llm.runtime.status" => Task.FromResult<JsonNode?>(new JsonObject
                 {
@@ -2142,6 +2394,23 @@ public class SetupCoordinatorTests : IDisposable
             Downloaded.Add(name);
             Installed.Add(name); // the fake "download" completes immediately
             return Task.FromResult<JsonNode?>(new JsonObject { ["accepted"] = true });
+        }
+
+        private Task<JsonNode?> SetOcrModelPair(JsonNode? @params)
+        {
+            string det = @params!["det"]!.GetValue<string>();
+            string rec = @params!["rec"]!.GetValue<string>();
+            OcrSetCalls.Add((det, rec));
+            if (OcrSetFailuresRemaining > 0)
+            {
+                OcrSetFailuresRemaining--;
+                throw new InvalidOperationException("fake: ocr.models.set failed");
+            }
+            OnOcrSet?.Invoke();
+            return Task.FromResult<JsonNode?>(new JsonObject
+            {
+                ["active"] = new JsonObject { ["det"] = det, ["rec"] = rec },
+            });
         }
 
         private Task<JsonNode?> DownloadLlmRuntime(JsonNode? @params)
