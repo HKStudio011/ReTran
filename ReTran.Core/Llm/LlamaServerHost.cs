@@ -6,45 +6,80 @@ namespace ReTran.Core.Llm;
 
 /// <summary>
 /// Owns the lifecycle of one <c>llama-server.exe</c> process: picks a free loopback port, spawns
-/// the server with the catalog GGUF, waits for <c>/health</c> before any request (model load can
-/// take tens of seconds), drains the server's output so its pipes never fill, and kills the whole
-/// process tree on dispose. Starting is lazy and idempotent so it can be triggered on the first
-/// translation without blocking <c>core.start</c>. The runtime binaries are never bundled with the
-/// app — the setup wizard (or the settings UI) downloads them (spec 2026-11-14 D5/D13).
-/// Sở hữu vòng đời một tiến trình <c>llama-server.exe</c>: chọn cổng loopback trống, spawn server
-/// với GGUF trong catalog, chờ <c>/health</c> trước mọi request (nạp model có thể mất hàng chục
-/// giây), hút output của server để pipe không đầy, và kill cả cây tiến trình khi dispose. Khởi
-/// động là lazy và idempotent nên có thể kích hoạt ở lần dịch đầu mà không chặn <c>core.start</c>.
-/// Binary runtime không bao giờ đi kèm app — setup wizard (hoặc UI Settings) tải về
-/// (spec 2026-11-14 D5/D13).
+/// the server with the catalog GGUF, waits for <c>/health</c> before any request, publishes
+/// IO-based loading progress, detects a stalled load, drains output, and kills the process tree on
+/// dispose. Starting is lazy and idempotent; runtime binaries are downloaded by Setup or Settings.
+/// Sở hữu vòng đờ một tiến trình <c>llama-server.exe</c>: chọn cổng loopback trống, spawn server
+/// với GGUF trong catalog, chờ <c>/health</c> trước mọi request, phát hành tiến trình nạp theo IO,
+/// phát hiện nạp bị đứng, hút output và kill cây tiến trình khi dispose. Khởi động lazy và idempotent;
+/// binary runtime do Setup hoặc Settings tải về.
 /// </summary>
-/// <param name="serverExe">Path to the extracted <c>llama-server.exe</c>. Đường dẫn <c>llama-server.exe</c> đã giải nén.</param>
-/// <param name="modelPath">Path to the GGUF model file. Đường dẫn file model GGUF.</param>
-/// <param name="contextSize">Context window passed as <c>-c</c>. Cửa sổ ngữ cảnh truyền qua <c>-c</c>.</param>
-/// <param name="gpuLayers">GPU layers passed as <c>-ngl</c>. Số layer GPU truyền qua <c>-ngl</c>.</param>
-public sealed class LlamaServerHost(
-    string serverExe, string modelPath,
-    int contextSize = 4096, int gpuLayers = 99) : ILlamaServerHost
+public sealed class LlamaServerHost : ILlamaServerHost
 {
-    /// <summary>How long the server may take to report healthy (model load included). Thời gian tối đa để server báo khỏe (gồm nạp model).</summary>
-    public static readonly TimeSpan DefaultHealthTimeout = TimeSpan.FromSeconds(120);
+    /// <summary>Fixed health ceiling when process counters cannot be read. Trần health cố định khi không đọc được counter tiến trình.</summary>
+    public static readonly TimeSpan DefaultHealthTimeout = TimeSpan.FromSeconds(600);
 
     private static readonly TimeSpan HealthInterval = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan ActivitySampleInterval = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan StallWindow = TimeSpan.FromSeconds(600);
     private static readonly HttpClient ProbeClient = new() { Timeout = TimeSpan.FromSeconds(5) };
     private const int StderrTailLines = 50;
+    private const long ActivityIoBytes = 1024 * 1024;
+    private const long ActivityRamBytes = 1024 * 1024;
+    private const long ActivityPageFaults = 64;
 
+    private readonly string _serverExe;
+    private readonly string _modelPath;
+    private readonly int _contextSize;
+    private readonly int _gpuLayers;
+    private readonly ILlamaProcessMetrics _metrics;
+    private readonly TimeProvider _timeProvider;
+    private readonly Func<ProcessStartInfo, Process?> _processFactory;
+    private readonly Func<int, CancellationToken, Task<bool>>? _healthProbe;
+    private readonly CancellationTokenSource _disposeCts = new();
     private readonly object _gate = new();
     private readonly Queue<string> _stderrTail = new();
+    private readonly SemaphoreSlim _startGate = new(1, 1);
     private Process? _process;
     private int _port;
+    private int _disposed;
+    private LlmLoadProgressSnapshot _loadProgress = new("stopped", null, null, null, false);
 
-    // Serializes EnsureStartedAsync ACROSS the health wait: without it a second concurrent caller
-    // sees the process alive and returns before /health passes, so one translation can hit a
-    // still-loading server (BA review 2026-11-17). Held from entry until healthy (or failed+cleaned).
-    // Tuần tự hoá EnsureStartedAsync XUYÊN suốt pha chờ health: thiếu nó, caller thứ hai thấy process
-    // còn sống và trả về trước khi /health xong — một lượt dịch có thể trúng server đang nạp model
-    // (review BA 2026-11-17). Giữ từ lúc vào tới khi khỏe (hoặc fail + dọn sạch).
-    private readonly SemaphoreSlim _startGate = new(1, 1);
+    /// <summary>
+    /// Creates a host for one model with optional counter and clock implementations for controlled tests.
+    /// Tạo host cho một model, có thể truyền bộ đếm và đồng hồ riêng cho test có kiểm soát.
+    /// </summary>
+    /// <param name="serverExe">Path to the extracted <c>llama-server.exe</c>. Đường dẫn <c>llama-server.exe</c> đã giải nén.</param>
+    /// <param name="modelPath">Path to the GGUF model file. Đường dẫn file model GGUF.</param>
+    /// <param name="contextSize">Context window passed as <c>-c</c>. Cửa sổ ngữ cảnh truyền qua <c>-c</c>.</param>
+    /// <param name="gpuLayers">GPU layers passed as <c>-ngl</c>. Số layer GPU truyền qua <c>-ngl</c>.</param>
+    /// <param name="metrics">Optional process-counter reader; null uses Win32. Bộ đọc counter tùy chọn; null dùng Win32.</param>
+    /// <param name="timeProvider">Optional health-wait clock; null uses the system clock. Đồng hồ chờ health tùy chọn; null dùng đồng hồ hệ thống.</param>
+    public LlamaServerHost(
+        string serverExe, string modelPath,
+        int contextSize = 4096, int gpuLayers = 99,
+        ILlamaProcessMetrics? metrics = null, TimeProvider? timeProvider = null)
+        : this(serverExe, modelPath, contextSize, gpuLayers,
+            metrics ?? new LlamaProcessMetrics(), timeProvider ?? TimeProvider.System,
+            Process.Start, null)
+    {
+    }
+
+    internal LlamaServerHost(
+        string serverExe, string modelPath, int contextSize, int gpuLayers,
+        ILlamaProcessMetrics metrics, TimeProvider timeProvider,
+        Func<ProcessStartInfo, Process?> processFactory,
+        Func<int, CancellationToken, Task<bool>>? healthProbe)
+    {
+        _serverExe = serverExe ?? throw new ArgumentNullException(nameof(serverExe));
+        _modelPath = modelPath ?? throw new ArgumentNullException(nameof(modelPath));
+        _contextSize = contextSize;
+        _gpuLayers = gpuLayers;
+        _metrics = metrics ?? throw new ArgumentNullException(nameof(metrics));
+        _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
+        _processFactory = processFactory ?? throw new ArgumentNullException(nameof(processFactory));
+        _healthProbe = healthProbe;
+    }
 
     /// <summary>The chosen port, or 0 before <see cref="EnsureStartedAsync"/>. Cổng đã chọn, hoặc 0 trước khi start.</summary>
     public int Port
@@ -62,6 +97,12 @@ public sealed class LlamaServerHost(
             if (port == 0) throw new InvalidOperationException("llama-server has not started.");
             return $"http://127.0.0.1:{port}";
         }
+    }
+
+    /// <inheritdoc />
+    public LlmLoadProgressSnapshot LoadProgress
+    {
+        get { lock (_gate) return _loadProgress; }
     }
 
     /// <summary>
@@ -115,7 +156,6 @@ public sealed class LlamaServerHost(
             catch (Exception)
             {
                 // Connection refused while the model still loads — keep polling.
-                // Connection refused trong lúc model còn nạp — tiếp tục poll.
             }
             await Task.Delay(interval, ct).ConfigureAwait(false);
         }
@@ -123,72 +163,186 @@ public sealed class LlamaServerHost(
     }
 
     /// <summary>
-    /// Ensures the server is running and healthy; idempotent and safe to call before every
-    /// translation. Đảm bảo server đang chạy và khỏe; idempotent, gọi được trước mọi lượt dịch.
+    /// Ensures the server is running and healthy; idempotent and safe to call before every translation.
+    /// Đảm bảo server đang chạy và khỏe; idempotent, gọi được trước mọi lượt dịch.
     /// </summary>
     /// <param name="ct">Token used to cancel the start. Token dùng để hủy khởi động.</param>
-    /// <exception cref="InvalidOperationException">Thrown when the binary/model is missing or the server never becomes healthy. Khi thiếu binary/model hoặc server không khỏe kịp.</exception>
+    /// <exception cref="InvalidOperationException">Thrown when the binary/model is missing, the process exits, or loading stalls. Ném khi thiếu binary/model, tiến trình thoát hoặc nạp bị đứng.</exception>
     public async Task EnsureStartedAsync(CancellationToken ct)
     {
-        // Held across the health wait — see the field doc (BA review 2026-11-17).
-        // Giữ xuyên suốt pha chờ health — xem doc của field (review BA 2026-11-17).
-        await _startGate.WaitAsync(ct).ConfigureAwait(false);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposeCts.Token);
+        bool acquired = false;
         try
         {
-        string effectiveServerExe = serverExe;
-        string effectiveModelPath = modelPath;
-        int port;
-        lock (_gate)
-        {
-            if (_process is { HasExited: false }) return;
-            if (!File.Exists(effectiveServerExe))
+            // Serialize the complete health wait so a second translator cannot use a loading server.
+            await _startGate.WaitAsync(linked.Token).ConfigureAwait(false);
+            acquired = true;
+            Process process;
+            lock (_gate)
             {
-                throw new InvalidOperationException($"llama-server not found at {effectiveServerExe}.");
+                if (IsAlive(_process))
+                {
+                    _loadProgress = _loadProgress with { Phase = "ready" };
+                    return;
+                }
+                if (!File.Exists(_serverExe))
+                    throw new InvalidOperationException($"llama-server not found at {_serverExe}.");
+                if (!File.Exists(_modelPath))
+                    throw new InvalidOperationException($"GGUF model not found at {_modelPath}.");
+
+                _port = PickFreePort();
+                long? total = new FileInfo(_modelPath).Length;
+                _loadProgress = new LlmLoadProgressSnapshot("loading", null, total, null, false);
+                var startInfo = new ProcessStartInfo(
+                    _serverExe, BuildArguments(_modelPath, _port, _contextSize, _gpuLayers))
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardError = true,
+                    RedirectStandardOutput = true,
+                    WorkingDirectory = Path.GetDirectoryName(_serverExe) ?? string.Empty,
+                };
+                _process = _processFactory(startInfo)
+                    ?? throw new InvalidOperationException("Failed to start llama-server.");
+                _process.OutputDataReceived += (_, _) => { };
+                _process.ErrorDataReceived += (_, e) => AppendStderrTail(e.Data);
+                _process.BeginOutputReadLine();
+                _process.BeginErrorReadLine();
+                process = _process;
             }
-            if (!File.Exists(effectiveModelPath))
-            {
-                throw new InvalidOperationException($"GGUF model not found at {effectiveModelPath}.");
-            }
 
-            _port = PickFreePort();
-            port = _port;
-            var startInfo = new ProcessStartInfo(effectiveServerExe, BuildArguments(effectiveModelPath, port, contextSize, gpuLayers))
-            {
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardError = true,
-                RedirectStandardOutput = true,
-                WorkingDirectory = Path.GetDirectoryName(effectiveServerExe) ?? string.Empty,
-            };
-            _process = Process.Start(startInfo)
-                ?? throw new InvalidOperationException("Failed to start llama-server.");
-            // Drain both pipes via events so a chatty server can never block on a full pipe.
-            // Hút cả hai pipe bằng event để server nói nhiều không bao giờ kẹt vì pipe đầy.
-            _process.OutputDataReceived += (_, _) => { };
-            _process.ErrorDataReceived += (_, e) => AppendStderrTail(e.Data);
-            _process.BeginOutputReadLine();
-            _process.BeginErrorReadLine();
+            await MonitorHealthAsync(process, Port, linked.Token).ConfigureAwait(false);
+            lock (_gate) _loadProgress = _loadProgress with { Phase = "ready" };
         }
-
-        bool healthy = await WaitForHealthAsync(
-            async token =>
-            {
-                using HttpResponseMessage response = await ProbeClient
-                    .GetAsync($"http://127.0.0.1:{port}/health", token).ConfigureAwait(false);
-                return response.StatusCode == HttpStatusCode.OK;
-            },
-            DefaultHealthTimeout, HealthInterval, ct).ConfigureAwait(false);
-
-        if (!healthy)
+        catch
         {
-            string tail = KillAndCollectStderrTail();
-            throw new InvalidOperationException(
-                $"llama-server did not become healthy within {DefaultHealthTimeout.TotalSeconds:0} s.{tail}");
-        }
+            if (acquired) _ = KillAndCollectStderrTail();
+            throw;
         }
         finally
         {
-            _startGate.Release();
+            if (acquired) _startGate.Release();
+        }
+    }
+
+    private async Task MonitorHealthAsync(Process process, int port, CancellationToken ct)
+    {
+        DateTimeOffset started = _timeProvider.GetUtcNow();
+        DateTimeOffset deadline = started + StallWindow;
+        DateTimeOffset nextSample = started;
+        DateTimeOffset previousSampleAt = started;
+        LlamaProcessSample previous = default!;
+        bool havePrevious = false;
+        bool countersUnavailable = false;
+        long bytesHighWater = 0;
+        long ramHighWater = 0;
+
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!IsAlive(process))
+            {
+                int? exitCode = TryGetExitCode(process);
+                string tail = KillAndCollectStderrTail();
+                throw new InvalidOperationException(
+                    $"llama-server exited before becoming healthy{(exitCode is null ? "" : $" (exit code {exitCode})")}.{tail}");
+            }
+
+            try
+            {
+                bool healthy = _healthProbe is null
+                    ? await ProbeHealthAsync(port, ct).ConfigureAwait(false)
+                    : await _healthProbe(port, ct).ConfigureAwait(false);
+                if (healthy) return;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                // Connection refused while the model loads is not a startup failure yet.
+            }
+
+            DateTimeOffset now = _timeProvider.GetUtcNow();
+            if (now >= deadline)
+            {
+                string tail = KillAndCollectStderrTail();
+                throw new InvalidOperationException(
+                    $"llama-server stalled: no loading activity for 600 s (không có hoạt động trong 10 phút).{tail}");
+            }
+
+            if (!countersUnavailable && now >= nextSample)
+            {
+                if (!_metrics.TryRead(process, out LlamaProcessSample sample))
+                {
+                    countersUnavailable = true;
+                    deadline = started + DefaultHealthTimeout;
+                    long? total = LoadProgress.BytesTotal;
+                    SetProgress(new LlmLoadProgressSnapshot("loading", null, total, null, false));
+                }
+                else
+                {
+                    TimeSpan elapsed = havePrevious ? now - previousSampleAt : TimeSpan.Zero;
+                    double? speed = null;
+                    bool activity = false;
+                    if (havePrevious && elapsed > TimeSpan.Zero)
+                    {
+                        long readDelta = sample.ReadBytes - previous.ReadBytes;
+                        if (readDelta >= 0)
+                            speed = readDelta / elapsed.TotalSeconds;
+                        activity = readDelta >= ActivityIoBytes
+                            || sample.PageFaults - previous.PageFaults >= ActivityPageFaults
+                            || (sample.CpuTime - previous.CpuTime).TotalSeconds / elapsed.TotalSeconds >= 0.05;
+                    }
+
+                    activity |= sample.WorkingSetBytes - ramHighWater >= ActivityRamBytes;
+                    ramHighWater = Math.Max(ramHighWater, sample.WorkingSetBytes);
+                    bytesHighWater = Math.Max(bytesHighWater, sample.ReadBytes);
+                    if (activity) deadline = now + StallWindow;
+                    long? total = LoadProgress.BytesTotal;
+                    string phase = total > 0 && bytesHighWater >= total ? "finalizing" : "loading";
+                    SetProgress(new LlmLoadProgressSnapshot(
+                        phase, bytesHighWater, total, speed, total > 0));
+                    previous = sample;
+                    previousSampleAt = now;
+                    havePrevious = true;
+                    nextSample = now + ActivitySampleInterval;
+                }
+            }
+
+            await Task.Delay(HealthInterval, _timeProvider, ct).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<bool> ProbeHealthAsync(int port, CancellationToken ct)
+    {
+        using HttpResponseMessage response = await ProbeClient
+            .GetAsync($"http://127.0.0.1:{port}/health", ct).ConfigureAwait(false);
+        return response.StatusCode == HttpStatusCode.OK;
+    }
+
+    private void SetProgress(LlmLoadProgressSnapshot snapshot)
+    {
+        lock (_gate) _loadProgress = snapshot;
+    }
+
+    private static bool IsAlive(Process? process)
+    {
+        if (process is null) return false;
+        try { return !process.HasExited; }
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
+    }
+
+    private static int? TryGetExitCode(Process process)
+    {
+        try { return process.ExitCode; }
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or System.ComponentModel.Win32Exception)
+        {
+            return null;
         }
     }
 
@@ -215,16 +369,12 @@ public sealed class LlamaServerHost(
 
         try
         {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-                process.WaitForExit(5_000);
-            }
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            process.WaitForExit(5_000); // also flushes async stdout/stderr handlers after natural exit
         }
         catch (Exception)
         {
-            // Best-effort kill; the failure message below still explains the root cause.
-            // Kill best-effort; thông điệp lỗi bên dưới vẫn nêu nguyên nhân gốc.
+            // Best-effort kill; the health error still reports the root cause.
         }
         process.Dispose();
 
@@ -238,11 +388,15 @@ public sealed class LlamaServerHost(
     }
 
     /// <summary>
-    /// Kills the server process tree. Safe to call multiple times. Kill cây tiến trình server.
-    /// Gọi nhiều lần vẫn an toàn.
+    /// Cancels an outstanding health wait, then kills the server process tree. Safe to repeat.
+    /// Hủy health wait đang chờ rồi kill cây tiến trình server. Gọi lặp vẫn an toàn.
     /// </summary>
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        try { _disposeCts.Cancel(); }
+        catch (ObjectDisposedException) { }
         _ = KillAndCollectStderrTail();
+        lock (_gate) _loadProgress = new LlmLoadProgressSnapshot("stopped", null, null, null, false);
     }
 }

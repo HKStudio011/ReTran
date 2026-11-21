@@ -1,0 +1,209 @@
+@using System.Globalization
+@using ReTran_App.Core
+@using ReTran_App.Services
+@implements IDisposable
+@inject I18nService L
+
+@if (Visible && Current is { } info)
+{
+    <div class="rt-llm-startup-backdrop">
+        <section class="rt-llm-startup" role="dialog" aria-modal="true"
+                 aria-labelledby="llm-startup-title" tabindex="-1" @ref="_dialogRef">
+            <p class="rt-llm-startup-model rt-mono">@(L.Fmt("llm.startup.model", info.Model))</p>
+            <h2 id="llm-startup-title">@(L["llm.startup.title"])</h2>
+            <p class="rt-llm-startup-phase">@PhaseText</p>
+
+            @if (Percent is double)
+            {
+                <div class="rt-llm-progress" role="progressbar" aria-label="@(L["llm.startup.progress"])"
+                     aria-valuemin="0" aria-valuemax="100" aria-valuenow="@AriaPercent"
+                     aria-valuetext="@PercentText">
+                    <span class="rt-llm-progress-fill" style="width: @ProgressWidth"></span>
+                </div>
+                <p class="rt-llm-progress-value rt-mono">@PercentText</p>
+            }
+            else
+            {
+                <div class="rt-llm-progress indeterminate" role="progressbar"
+                     aria-label="@(L["llm.startup.progress"])" aria-valuetext="@PhaseText">
+                    <span class="rt-llm-progress-fill"></span>
+                </div>
+                <p class="rt-llm-progress-value">@(L["llm.startup.progressIndeterminate"])</p>
+            }
+
+            @if (info.BytesLoaded is long loaded && info.BytesTotal is long total)
+            {
+                <p class="rt-llm-startup-metric rt-mono">
+                    @(L.Fmt("llm.startup.bytes", FormatBytes(loaded), FormatBytes(total)))
+                </p>
+            }
+            @if (info.BytesPerSec is > 0)
+            {
+                <p class="rt-llm-startup-metric rt-mono">
+                    @(L.Fmt("llm.startup.speed", FormatBytes(info.BytesPerSec.Value)))
+                    @if (Eta is TimeSpan eta)
+                    {
+                        <span> · @(L.Fmt("llm.startup.eta", FormatEta(eta)))</span>
+                    }
+                </p>
+            }
+
+            @if (info.Phase == "error")
+            {
+                <p class="rt-alert" role="alert">@(info.Error ?? PhaseText)</p>
+                <div class="rt-llm-startup-actions">
+                    <button type="button" class="rt-btn rt-btn-primary" @onclick="Close">
+                        @(L["llm.startup.close"])
+                    </button>
+                </div>
+            }
+            else
+            {
+                <div class="rt-llm-startup-actions">
+                    <button type="button" class="rt-btn" disabled="@(_canceling || info.Phase == "cancelling")"
+                            @onclick="CancelAsync">
+                        @(info.Phase == "cancelling" || _canceling
+                            ? L["llm.startup.cancelling"] : L["llm.startup.cancel"])
+                    </button>
+                </div>
+            }
+        </section>
+    </div>
+}
+
+@code {
+    private ElementReference _dialogRef;
+    private long? _dismissedAttempt;
+    private long? _visibleAttempt;
+    private bool _wasVisible;
+    private bool _focusPending;
+    private bool _canceling;
+
+    /// <summary>
+    /// Shared concrete controller whose Start orchestration also serves the floating menu.
+    /// Controller concrete dùng chung, có Start orchestration phục vụ cả floating menu.
+    /// </summary>
+    [Parameter, EditorRequired]
+    public required PipelineController Pipeline { get; set; }
+
+    private LlmStartupInfo? Current => Pipeline.LlmStartup;
+    private bool Visible => Current is { } info
+        && !(info.Phase == "error" && _dismissedAttempt == info.Attempt);
+
+    private string PhaseText => Current?.Phase switch
+    {
+        "finalizing" => L["llm.startup.phase.finalizing"],
+        "ready" => L["llm.startup.phase.ready"],
+        "cancelling" => L["llm.startup.phase.cancelling"],
+        "error" => L["llm.startup.phase.error"],
+        _ => L["llm.startup.phase.loading"],
+    };
+
+    private double? Percent
+    {
+        get
+        {
+            if (Current is not { } info) return null;
+            if (info.Phase == "ready") return 100;
+            if (!info.ProgressAvailable || info.BytesLoaded is not long loaded
+                || info.BytesTotal is not long total || total <= 0) return null;
+            return Math.Clamp((double)loaded * 100 / total, 0, 99);
+        }
+    }
+
+    private string AriaPercent => Percent?.ToString("0.##", CultureInfo.InvariantCulture) ?? "0";
+
+    private string PercentText => Percent is double value
+        ? $"{Math.Floor(value).ToString(CultureInfo.InvariantCulture)}%"
+        : string.Empty;
+
+    private string ProgressWidth => Percent is double value
+        ? $"{value.ToString("0.##", CultureInfo.InvariantCulture)}%"
+        : "0%";
+
+    private TimeSpan? Eta
+    {
+        get
+        {
+            if (Current is not { BytesPerSec: > 0, BytesLoaded: long loaded, BytesTotal: long total } info
+                || info.Phase == "ready") return null;
+            long remaining = total - Math.Min(loaded, total);
+            return remaining > 0
+                ? TimeSpan.FromSeconds(remaining / info.BytesPerSec.Value)
+                : null;
+        }
+    }
+
+    protected override void OnInitialized()
+    {
+        Pipeline.LlmStartupChanged += OnStartupChanged;
+        L.Changed += OnLanguageChanged;
+        _focusPending = Visible;
+        _wasVisible = Visible;
+        _visibleAttempt = Current?.Attempt;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_focusPending && Visible)
+        {
+            _focusPending = false;
+            try { await _dialogRef.FocusAsync(); }
+            catch (Exception) { /* WebView focus is best-effort during startup. */ }
+        }
+        await base.OnAfterRenderAsync(firstRender);
+    }
+
+    private void OnStartupChanged() => _ = InvokeAsync(() =>
+    {
+        if (Current?.Phase != "error") _dismissedAttempt = null;
+        if (Current is null || Current.Phase == "error") _canceling = false;
+        bool visible = Visible;
+        if (visible && (!_wasVisible || _visibleAttempt != Current?.Attempt)) _focusPending = true;
+        _wasVisible = visible;
+        _visibleAttempt = Current?.Attempt;
+        StateHasChanged();
+    });
+
+    private void OnLanguageChanged() => _ = InvokeAsync(StateHasChanged);
+
+    private async Task CancelAsync()
+    {
+        if (_canceling) return;
+        _canceling = true;
+        try { await Pipeline.CancelLlmStartupAsync(CancellationToken.None); }
+        finally
+        {
+            _canceling = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void Close()
+    {
+        if (Current is { Phase: "error" } info) _dismissedAttempt = info.Attempt;
+        _wasVisible = false;
+    }
+
+    private string FormatBytes(double bytes)
+    {
+        CultureInfo culture = L.Lang == "vi"
+            ? CultureInfo.GetCultureInfo("vi") : CultureInfo.GetCultureInfo("en");
+        (double value, string unit) = bytes >= 1024 * 1024 * 1024
+            ? (bytes / (1024 * 1024 * 1024), "GB")
+            : bytes >= 1024 * 1024
+                ? (bytes / (1024 * 1024), "MB")
+                : (bytes / 1024, "KB");
+        return $"{value.ToString("0.##", culture)} {unit}";
+    }
+
+    private static string FormatEta(TimeSpan eta) => eta.TotalHours >= 1
+        ? eta.ToString(@"h\:mm\:ss", CultureInfo.InvariantCulture)
+        : eta.ToString(@"m\:ss", CultureInfo.InvariantCulture);
+
+    public void Dispose()
+    {
+        Pipeline.LlmStartupChanged -= OnStartupChanged;
+        L.Changed -= OnLanguageChanged;
+    }
+}

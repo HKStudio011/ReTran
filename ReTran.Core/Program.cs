@@ -117,18 +117,7 @@ public static class Program
             }
 
             string modelName = llmSettings.Model!;
-            string modelPath = llmModels.ModelPath(modelName);
-            if (!File.Exists(modelPath))
-            {
-                throw new RpcMethodException(RpcErrorCodes.InternalError, $"llm-model-missing: {modelName}");
-            }
-            LlmRuntimeStatus runtime = llmRuntime.GetStatusAsync(CancellationToken.None).GetAwaiter().GetResult();
-            if (!runtime.Installed || runtime.ServerPath is null)
-            {
-                throw new RpcMethodException(RpcErrorCodes.InternalError,
-                    "llm-runtime-missing: download llama.cpp from Setup or Settings.");
-            }
-            ILlamaServerHost serverRef = llmServers.GetOrCreate(modelName, runtime.ServerPath, modelPath);
+            ILlamaServerHost serverRef = LlmServerRpc.ResolveHost(modelName, llmModels, llmRuntime, llmServers);
             return new LlmTranslator(chat, llmSettings, async ct =>
             {
                 await llmServers.EnsureStartedAsync(serverRef, ct).ConfigureAwait(false);
@@ -172,16 +161,7 @@ public static class Program
         // llm.*: runtime + model của provider LLM, quản lý phía Core — setup wizard và Settings
         // dùng chung một đường RPC với các verb khác.
         LlmRpcHandlers.Register(server, llmModels, llmRuntime);
-        server.Register("llm.server.status", _ =>
-        {
-            LlamaServerStatus status = llmServers.Status;
-            return Task.FromResult<JsonNode?>(new JsonObject
-            {
-                ["state"] = status.State,
-                ["model"] = status.Model,
-                ["error"] = status.Error,
-            });
-        });
+        LlmServerRpc.Register(server, llmModels, llmRuntime, llmServers);
         // ocr.config.* proxies: the Settings UI reads the engine-parameter schema and saves
         // values through the core; the core forces deferReload from the session state.
         // Proxy ocr.config.*: UI Settings đọc schema tham số engine và lưu giá trị qua core;

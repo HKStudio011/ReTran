@@ -161,7 +161,31 @@ public sealed record LlmRuntimeCheckInfo(string? Current, string? Latest);
 /// <param name="State"><c>stopped</c>, <c>loading</c>, <c>ready</c> or <c>error</c>. Trạng thái vòng đời server.</param>
 /// <param name="Model">Active local model, or <see langword="null"/> when stopped. Model local đang dùng, hoặc <see langword="null"/> khi đã dừng.</param>
 /// <param name="Error">Startup/health error, or <see langword="null"/>. Lỗi khởi động/health, hoặc <see langword="null"/>.</param>
-public sealed record LlmServerStatusInfo(string State, string? Model, string? Error);
+/// <param name="Attempt">Monotonic server-start attempt. Attempt start server đơn điệu.</param>
+/// <param name="Phase">Loading, finalizing, ready, error, or stopped. Giai đoạn loading, finalizing, ready, error hoặc stopped.</param>
+/// <param name="BytesLoaded">High-water IO bytes read, or null. Mức cao nhất của byte IO đã đọc, hoặc null.</param>
+/// <param name="BytesTotal">GGUF byte size, or null. Kích thước GGUF bằng byte, hoặc null.</param>
+/// <param name="BytesPerSec">Measured IO speed, or null. Tốc độ IO đo được, hoặc null.</param>
+/// <param name="ProgressAvailable">Whether determinate progress is available. Có tiến trình xác định khả dụng hay không.</param>
+public sealed record LlmServerStatusInfo(
+    string State, string? Model, string? Error, long Attempt, string Phase,
+    long? BytesLoaded, long? BytesTotal, double? BytesPerSec, bool ProgressAvailable);
+
+/// <summary>
+/// App-visible state of one local LLM prewarm and pipeline-start attempt.
+/// Trạng thái hiển thị phía App của một lượt prewarm LLM local và start pipeline.
+/// </summary>
+/// <param name="Attempt">Core server-start attempt. Attempt start server do Core cấp.</param>
+/// <param name="Model">Catalog model being loaded. Model trong catalog đang được nạp.</param>
+/// <param name="Phase">Current loading/finalizing/ready/cancelling/error phase. Giai đoạn loading/finalizing/ready/cancelling/error hiện tại.</param>
+/// <param name="BytesLoaded">High-water IO bytes read, or null. Mức cao nhất của byte IO đã đọc, hoặc null.</param>
+/// <param name="BytesTotal">GGUF byte size, or null. Kích thước GGUF bằng byte, hoặc null.</param>
+/// <param name="BytesPerSec">Measured IO speed, or null. Tốc độ IO đo được, hoặc null.</param>
+/// <param name="ProgressAvailable">Whether determinate progress is available. Có tiến trình xác định khả dụng hay không.</param>
+/// <param name="Error">Startup error shown until the user closes the popup. Lỗi khởi động hiển thị tới khi đóng popup.</param>
+public sealed record LlmStartupInfo(
+    long Attempt, string Model, string Phase, long? BytesLoaded, long? BytesTotal,
+    double? BytesPerSec, bool ProgressAvailable, string? Error);
 
 /// <summary>
 /// App-side orchestrator over <see cref="ICorePeer"/>: starts/stops the Core pipeline
@@ -188,6 +212,12 @@ public sealed class PipelineController : IPipelineControl
     private readonly ILogger<PipelineController> _log;
     private readonly string _previewMapName;
     private readonly SemaphoreSlim _cacheGate = new(1, 1);
+    private readonly object _startupGate = new();
+    private CancellationTokenSource? _startupCts;
+    private TaskCompletionSource? _startupCompletion;
+    private LlmStartupInfo? _llmStartup;
+    private long _startupGeneration;
+    private static readonly TimeSpan LlmStatusPollInterval = TimeSpan.FromMilliseconds(500);
     // Giữ handler trong bounds của read-loop: gate wait + truy cập DB tối đa 2 s (lookup và put).
     private static readonly TimeSpan CacheGateTimeout = TimeSpan.FromSeconds(2);
 
@@ -263,6 +293,21 @@ public sealed class PipelineController : IPipelineControl
     public event Action? StateChanged;
 
     /// <summary>
+    /// Raised when the local LLM startup snapshot appears, changes, or closes.
+    /// Được phát khi snapshot khởi động LLM local xuất hiện, thay đổi hoặc đóng.
+    /// </summary>
+    public event Action? LlmStartupChanged;
+
+    /// <summary>
+    /// Current local LLM startup popup state, or null when no popup should be shown.
+    /// Trạng thái popup khởi động LLM local hiện tại, hoặc null khi không cần hiển thị.
+    /// </summary>
+    public LlmStartupInfo? LlmStartup
+    {
+        get { lock (_startupGate) return _llmStartup; }
+    }
+
+    /// <summary>
     /// Whether the pipeline was last known to be running. Read by a page on its first render so
     /// navigating back to the control page shows the real badge instead of a stale "stopped".
     /// Pipeline có đang chạy theo lần biết cuối hay không. Trang đọc ở render đầu để quay lại trang
@@ -297,15 +342,16 @@ public sealed class PipelineController : IPipelineControl
     /// Mỗi lần start phiên sẽ xoá guard seq trên wire trước khi gửi <c>core.start</c>, vì Core
     /// khởi động lại seq <c>frame.annotated</c> từ 1 cho mỗi phiên. Guard seqlock của vùng nhớ
     /// không bị reset: writer gieo bộ đếm từ vùng nhớ nên seq MMF chạy liên tục giữa các thế hệ
-    /// writer. Local LLM starts also send <c>llm.models.set</c> for the saved active model before
-    /// <c>core.start</c>, keeping Core's catalog pointer aligned with settings.
-    /// Lần start LLM local cũng gửi <c>llm.models.set</c> cho model active đã lưu trước
-    /// <c>core.start</c> để con trỏ catalog của Core khớp settings.
+    /// writer. Local LLM starts send <c>llm.models.set</c>, prewarm through <c>llm.server.start</c>,
+    /// and wait for a matching ready attempt before <c>core.start</c>; only one Start may be active.
+    /// Lần start LLM local gửi <c>llm.models.set</c>, prewarm qua <c>llm.server.start</c> và chờ
+    /// đúng attempt ready trước <c>core.start</c>; chỉ một Start được chạy tại một thởi điểm.
     /// </remarks>
     /// <param name="source">Capture source for the session. Nguồn capture cho phiên.</param>
     /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
     /// <returns>A task that completes once Core acknowledges the start. Task hoàn tất khi Core xác nhận start.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="source"/> is null. Ném khi <paramref name="source"/> là null.</exception>
+    /// <exception cref="InvalidOperationException">Thrown for a concurrent Start or a failed/superseded local server attempt. Ném khi có Start đồng thởi hoặc attempt server local fail/bị thay thế.</exception>
     /// <exception cref="RpcException">
     /// Propagated unchanged from Core for invalid params, unknown provider, a session already
     /// running, or a requested OCR model that is not installed (<c>ocr-model-missing</c> — see
@@ -317,101 +363,233 @@ public sealed class PipelineController : IPipelineControl
     public async Task StartAsync(SourceSelection source, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(source);
-        await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
-        EnsureHandlersWired();
-
-        AppSettings settings = _settings.Load();
-        // Chỉ gửi ocr.params khi có ghi đè: vắng mặt = sidecar giữ cấu hình hiện tại. Mỗi giá
-        // trị được DeepClone để tách khỏi node settings trước khi gắn vào params (tránh lỗi
-        // "node already has a parent" khi node bị dùng lại ở lần start sau).
-        var ocr = new JsonObject { ["det"] = settings.OcrDet, ["rec"] = settings.OcrRec };
-        // mergeLines luôn gửi — Core cũ bỏ qua key lạ.
-        ocr["mergeLines"] = settings.OcrMergeLines;
-        // Ba ngưỡng gộp dòng (spec K2) cũng luôn gửi — AppSettings lúc nào cũng mang giá trị,
-        // và Core đọc đúng trong khối "ocr" (PipelineHost.ParseStart). App chuyển nguyên vẹn,
-        // không clamp: Core là nơi duy nhất chặn dải ngoài 0.1..2.0 / 1.0..3.0 / 0.0..1.0.
-        ocr["mergeGapRatio"] = settings.OcrMergeGap;
-        ocr["mergeHeightRatio"] = settings.OcrMergeHeight;
-        ocr["mergeOverlapRatio"] = settings.OcrMergeOverlap;
-        JsonObject? ocrParams = BuildOcrParams(settings.OcrEngine ?? new Dictionary<string, JsonNode?>());
-        if (ocrParams is not null) ocr["params"] = ocrParams;
-
-        var translate = new JsonObject
+        CancellationTokenSource startupCts;
+        TaskCompletionSource completion;
+        long generation;
+        lock (_startupGate)
         {
-            ["provider"] = settings.Provider,
-            ["src"] = settings.Src,
-            ["dst"] = settings.Dst,
-        };
-        if (string.Equals(settings.Provider, "llm", StringComparison.OrdinalIgnoreCase))
-        {
-            // LLM block (spec 2026-11-14 D1/D10): the mode decides which fields travel; prompt
-            // overrides travel only when set so Core keeps its card defaults.
-            // Khối LLM (spec 2026-11-14 D1/D10): mode quyết định field nào đi; prompt ghi đè chỉ
-            // đi khi có để Core giữ mặc định theo model card.
-            var llm = new JsonObject { ["mode"] = settings.LlmMode };
-            if (string.Equals(settings.LlmMode, "api", StringComparison.OrdinalIgnoreCase))
-            {
-                llm["baseUrl"] = settings.LlmBaseUrl;
-                llm["apiKey"] = settings.LlmApiKey;
-                llm["model"] = settings.LlmApiModel;
-            }
-            else
-            {
-                llm["model"] = settings.LlmActiveModel;
-            }
-            if (!string.IsNullOrWhiteSpace(settings.LlmSystemPrompt)) llm["systemPrompt"] = settings.LlmSystemPrompt;
-            if (!string.IsNullOrWhiteSpace(settings.LlmUserPrompt)) llm["userPrompt"] = settings.LlmUserPrompt;
-            translate["llm"] = llm;
+            if (_startupCts is not null)
+                throw new InvalidOperationException("pipeline start is already in progress");
+            startupCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            _startupCts = startupCts;
+            _startupCompletion = completion;
+            generation = ++_startupGeneration;
         }
 
-        var @params = new JsonObject
+        try
         {
-            ["source"] = source.UseWindow
-                ? new JsonObject { ["kind"] = "window", ["hwnd"] = source.HwndHex ?? string.Empty }
-                : new JsonObject { ["kind"] = "screen", ["monitor"] = source.Monitor },
-            ["translate"] = translate,
-            ["ocr"] = ocr,
-            ["ocrFps"] = settings.OcrFps,
-            ["captureFps"] = settings.CaptureFps,
-        };
-
-        // Cleared before core.start is sent (never after it returns) because Core restarts its
-        // frame.annotated seq at 1 for every session: without this, the new session's first
-        // notifications would look like replays. The shared-memory seqlock guard is NOT reset —
-        // the writer seeds its counter from the section, so the MMF seq is continuous across
-        // writer generations and an old-session frame stays rejected until a fresh write lands.
-        // Xoá trước khi gửi core.start (không phải sau khi nó trả về) vì Core khởi động lại seq
-        // frame.annotated từ 1 cho mỗi phiên: nếu không, những thông báo đầu của phiên mới sẽ bị
-        // coi là phát lại. Guard seqlock của vùng nhớ KHÔNG reset — writer gieo bộ đếm từ vùng
-        // nhớ nên seq MMF chạy liên tục giữa các thế hệ writer, khung của phiên cũ vẫn bị loại
-        // cho tới khi có lần ghi mới.
-        _lastPreviewSeq = 0;
-
-        if (string.Equals(settings.Provider, "llm", StringComparison.OrdinalIgnoreCase)
-            && string.Equals(settings.LlmMode, "local", StringComparison.OrdinalIgnoreCase))
+            await StartFlowAsync(source, startupCts.Token, generation).ConfigureAwait(false);
+        }
+        finally
         {
-            // Settings is the source of truth: align Core's catalog pointer before starting so the
-            // table's InUse state cannot keep pointing at a model from an older session.
-            // Settings là nguồn sự thật: đồng bộ con trỏ catalog của Core trước start để trạng thái
-            // InUse không giữ model của một phiên cũ.
-            try
+            lock (_startupGate)
             {
-                await _peer.CallAsync("llm.models.set",
+                if (generation == _startupGeneration)
+                {
+                    _startupCts = null;
+                    _startupCompletion = null;
+                }
+            }
+            startupCts.Dispose();
+            completion.TrySetResult();
+        }
+    }
+
+    /// <summary>
+    /// Cancels the active start and completes only after its server/session rollback has finished.
+    /// Hủy lượt start đang chạy và chỉ hoàn tất sau khi rollback server/session đã xong.
+    /// </summary>
+    /// <param name="ct">Token used to cancel waiting for cleanup, not the cleanup itself. Token hủy việc chờ cleanup, không hủy chính cleanup.</param>
+    /// <returns>A task that completes after rollback, or immediately when no start is active. Task hoàn tất sau rollback, hoặc ngay khi không có start đang chạy.</returns>
+    public async Task CancelLlmStartupAsync(CancellationToken ct)
+    {
+        Task? completion;
+        bool changed = false;
+        lock (_startupGate)
+        {
+            if (_startupCts is null) return;
+            _startupCts.Cancel();
+            completion = _startupCompletion?.Task;
+            if (_llmStartup is not null && _llmStartup.Phase != "error")
+            {
+                _llmStartup = _llmStartup with { Phase = "cancelling" };
+                changed = true;
+            }
+        }
+        if (changed) LlmStartupChanged?.Invoke();
+        if (completion is not null) await completion.WaitAsync(ct).ConfigureAwait(false);
+    }
+
+    private async Task StartFlowAsync(SourceSelection source, CancellationToken ct, long generation)
+    {
+        bool localLlm = false;
+        bool llmStopNeeded = false;
+        bool coreStartSent = false;
+        long attempt = 0;
+        string model = string.Empty;
+        try
+        {
+            await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
+            EnsureHandlersWired();
+            AppSettings settings = _settings.Load();
+            localLlm = string.Equals(settings.Provider, "llm", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(settings.LlmMode, "local", StringComparison.OrdinalIgnoreCase);
+            model = settings.LlmActiveModel ?? string.Empty;
+
+            var ocr = new JsonObject { ["det"] = settings.OcrDet, ["rec"] = settings.OcrRec };
+            ocr["mergeLines"] = settings.OcrMergeLines;
+            ocr["mergeGapRatio"] = settings.OcrMergeGap;
+            ocr["mergeHeightRatio"] = settings.OcrMergeHeight;
+            ocr["mergeOverlapRatio"] = settings.OcrMergeOverlap;
+            JsonObject? ocrParams = BuildOcrParams(settings.OcrEngine ?? new Dictionary<string, JsonNode?>());
+            if (ocrParams is not null) ocr["params"] = ocrParams;
+
+            var translate = new JsonObject
+            {
+                ["provider"] = settings.Provider,
+                ["src"] = settings.Src,
+                ["dst"] = settings.Dst,
+            };
+            if (string.Equals(settings.Provider, "llm", StringComparison.OrdinalIgnoreCase))
+            {
+                var llm = new JsonObject { ["mode"] = settings.LlmMode };
+                if (string.Equals(settings.LlmMode, "api", StringComparison.OrdinalIgnoreCase))
+                {
+                    llm["baseUrl"] = settings.LlmBaseUrl;
+                    llm["apiKey"] = settings.LlmApiKey;
+                    llm["model"] = settings.LlmApiModel;
+                }
+                else
+                {
+                    llm["model"] = settings.LlmActiveModel;
+                }
+                if (!string.IsNullOrWhiteSpace(settings.LlmSystemPrompt)) llm["systemPrompt"] = settings.LlmSystemPrompt;
+                if (!string.IsNullOrWhiteSpace(settings.LlmUserPrompt)) llm["userPrompt"] = settings.LlmUserPrompt;
+                translate["llm"] = llm;
+            }
+
+            var @params = new JsonObject
+            {
+                ["source"] = source.UseWindow
+                    ? new JsonObject { ["kind"] = "window", ["hwnd"] = source.HwndHex ?? string.Empty }
+                    : new JsonObject { ["kind"] = "screen", ["monitor"] = source.Monitor },
+                ["translate"] = translate,
+                ["ocr"] = ocr,
+                ["ocrFps"] = settings.OcrFps,
+                ["captureFps"] = settings.CaptureFps,
+            };
+            _lastPreviewSeq = 0;
+
+            if (localLlm)
+            {
+                try
+                {
+                    await _peer.CallAsync("llm.models.set",
+                        new JsonObject { ["name"] = settings.LlmActiveModel }, ct).ConfigureAwait(false);
+                }
+                catch (RpcException ex) when (ex.Message.StartsWith("model is not installed:", StringComparison.Ordinal))
+                {
+                    throw new RpcException(-32603, $"llm-model-missing: {settings.LlmActiveModel}");
+                }
+
+                llmStopNeeded = true;
+                JsonNode? acceptedNode = await _peer.CallAsync("llm.server.start",
                     new JsonObject { ["name"] = settings.LlmActiveModel }, ct).ConfigureAwait(false);
+                if (acceptedNode is not JsonObject accepted
+                    || accepted["accepted"] is not JsonValue acceptedValue
+                    || !acceptedValue.TryGetValue(out bool isAccepted) || !isAccepted)
+                {
+                    throw new InvalidOperationException("llm-server start was not accepted.");
+                }
+                attempt = ReadLong(accepted, "attempt");
+                if (attempt <= 0) throw new InvalidOperationException("llm-server start returned an invalid attempt.");
+                model = ReadNullableString(accepted, "model") ?? model;
+                PublishLlmStartup(generation, new LlmStartupInfo(
+                    attempt, model, "loading", null, null, null, false, null));
+
+                while (true)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    JsonNode? statusNode = await _peer.CallAsync("llm.server.status", null, ct).ConfigureAwait(false);
+                    LlmServerStatusInfo status = ParseLlmServerStatus(statusNode);
+                    if (status.Attempt != attempt)
+                    {
+                        throw new InvalidOperationException(
+                            $"llm-server startup attempt {attempt} was superseded by attempt {status.Attempt}.");
+                    }
+                    PublishLlmStartup(generation, new LlmStartupInfo(
+                        attempt, model, status.Phase, status.BytesLoaded, status.BytesTotal,
+                        status.BytesPerSec, status.ProgressAvailable, status.Error));
+                    if (status.State == "ready") break;
+                    if (status.State == "error")
+                        throw new InvalidOperationException(status.Error ?? "llm-server startup failed.");
+                    if (status.State == "stopped")
+                        throw new InvalidOperationException("llm-server startup stopped before becoming ready.");
+                    await Task.Delay(LlmStatusPollInterval, ct).ConfigureAwait(false);
+                }
             }
-            catch (RpcException ex) when (ex.Message.StartsWith("model is not installed:", StringComparison.Ordinal))
-            {
-                // Keep the same recovery contract as Core's factory: Home opens the model/runtime
-                // guidance only for this code, not for a raw preflight -32602.
-                // Giữ recovery contract như factory của Core: Home chỉ mở hướng dẫn model/runtime
-                // cho code này, không phải lỗi preflight -32602 thô.
-                throw new RpcException(-32603, $"llm-model-missing: {settings.LlmActiveModel}");
-            }
+
+            // Once sent, wait for the sequential RPC even after cancellation; core.stop must run
+            // afterwards so a session that just opened cannot survive the cancelled Start.
+            ct.ThrowIfCancellationRequested();
+            coreStartSent = true;
+            await _peer.CallAsync("core.start", @params, CancellationToken.None).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            IsRunning = true;
+            ActiveSource = source;
+            StateChanged?.Invoke();
+            if (localLlm) PublishLlmStartup(generation, null);
         }
-        await _peer.CallAsync("core.start", @params, ct).ConfigureAwait(false);
-        IsRunning = true;
-        ActiveSource = source;
-        StateChanged?.Invoke();
+        catch (OperationCanceledException)
+        {
+            await RollbackStartAsync(coreStartSent, llmStopNeeded).ConfigureAwait(false);
+            if (localLlm) PublishLlmStartup(generation, null);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            await RollbackStartAsync(coreStartSent, llmStopNeeded).ConfigureAwait(false);
+            if (localLlm)
+            {
+                LlmStartupInfo? current;
+                lock (_startupGate) current = _llmStartup;
+                PublishLlmStartup(generation, (current ?? new LlmStartupInfo(
+                    attempt, model, "error", null, null, null, false, null)) with
+                {
+                    Phase = "error",
+                    Error = ex.Message,
+                });
+            }
+            throw;
+        }
+    }
+
+    private async Task RollbackStartAsync(bool coreStartSent, bool llmStopNeeded)
+    {
+        if (coreStartSent)
+        {
+            try { await _peer.CallAsync("core.stop", null, CancellationToken.None).ConfigureAwait(false); }
+            catch (Exception ex) { _log.LogWarning(ex, "core.stop rollback after Start failure was not acknowledged."); }
+        }
+        if (llmStopNeeded)
+        {
+            try { await _peer.CallAsync("llm.server.stop", null, CancellationToken.None).ConfigureAwait(false); }
+            catch (Exception ex) { _log.LogWarning(ex, "llm.server.stop rollback after Start failure was not acknowledged."); }
+        }
+        IsRunning = false;
+        ActiveSource = null;
+        ClearOverlayFrames();
+    }
+
+    private void PublishLlmStartup(long generation, LlmStartupInfo? info)
+    {
+        lock (_startupGate)
+        {
+            if (generation != _startupGeneration) return;
+            _llmStartup = info;
+        }
+        LlmStartupChanged?.Invoke();
     }
 
     /// <summary>
@@ -665,10 +843,22 @@ public sealed class PipelineController : IPipelineControl
         await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
         EnsureHandlersWired();
         JsonNode? result = await _peer.CallAsync("llm.server.status", null, ct).ConfigureAwait(false);
+        return ParseLlmServerStatus(result);
+    }
+
+    private static LlmServerStatusInfo ParseLlmServerStatus(JsonNode? result)
+    {
+        JsonObject? obj = result as JsonObject;
         return new LlmServerStatusInfo(
-            result is JsonObject obj ? ReadNullableString(obj, "state") ?? "stopped" : "stopped",
-            result is JsonObject o2 ? ReadNullableString(o2, "model") : null,
-            result is JsonObject o3 ? ReadNullableString(o3, "error") : null);
+            obj is null ? "stopped" : ReadNullableString(obj, "state") ?? "stopped",
+            obj is null ? null : ReadNullableString(obj, "model"),
+            obj is null ? null : ReadNullableString(obj, "error"),
+            obj is null ? 0 : ReadLong(obj, "attempt"),
+            obj is null ? "stopped" : ReadNullableString(obj, "phase") ?? "loading",
+            obj is null ? null : ReadNullableLong(obj, "bytesLoaded"),
+            obj is null ? null : ReadNullableLong(obj, "bytesTotal"),
+            obj is null ? null : ReadNullableDouble(obj, "bytesPerSec"),
+            obj is not null && ReadBool(obj, "progressAvailable"));
     }
 
     /// <summary>
@@ -1260,6 +1450,11 @@ public sealed class PipelineController : IPipelineControl
             ? parsed
             : fallback;
     }
+
+    private static long? ReadNullableLong(JsonObject o, string key) =>
+        o[key] is JsonValue value && value.GetValueKind() == JsonValueKind.Number
+            ? ReadLong(o, key)
+            : null;
 
     private static double ReadDouble(JsonObject o, string key, double fallback = 0)
         => o[key] is JsonValue value

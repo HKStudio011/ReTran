@@ -850,6 +850,68 @@ body { background: var(--rt-page); }
 .rt-page-head h1 { font-size: 20px; font-weight: 600; }
 .rt-page .rt-panel { padding: 4px 18px 18px; }
 
+/* ---------- shared local-LLM startup dialog ---------- */
+.rt-llm-startup-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 65;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(3, 12, 14, .68);
+  backdrop-filter: blur(3px);
+}
+
+.rt-llm-startup {
+  width: min(460px, 100%);
+  max-height: calc(100dvh - 40px);
+  overflow-y: auto;
+  padding: 22px;
+  border: 1px solid var(--rt-line2);
+  border-top: 2px solid var(--rt-tally);
+  border-radius: var(--rt-r3);
+  background: var(--rt-panel);
+  color: var(--rt-text);
+  box-shadow: 0 22px 70px rgba(0, 0, 0, .42);
+}
+
+.rt-llm-startup h2 { margin: 5px 0 8px; font-size: 19px; font-weight: 600; }
+.rt-llm-startup-model { color: var(--rt-data); font-size: 11px; overflow-wrap: anywhere; }
+.rt-llm-startup-phase { margin-bottom: 16px !important; color: var(--rt-dim); }
+
+.rt-llm-progress {
+  height: 9px;
+  overflow: hidden;
+  border: 1px solid var(--rt-line);
+  border-radius: 8px;
+  background: var(--rt-well);
+}
+
+.rt-llm-progress-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--rt-data);
+  transition: width .25s ease;
+}
+
+.rt-llm-progress.indeterminate .rt-llm-progress-fill {
+  width: 38%;
+  animation: rt-llm-indeterminate 1.35s ease-in-out infinite;
+}
+
+.rt-llm-progress-value { margin-top: 6px !important; color: var(--rt-dim); font-size: 11.5px; }
+.rt-llm-startup-metric { margin-top: 9px !important; color: var(--rt-dim); font-size: 11.5px; }
+.rt-llm-startup .rt-alert { margin-top: 14px !important; color: var(--rt-danger); white-space: pre-wrap; }
+.rt-llm-startup-actions { display: flex; justify-content: flex-end; margin-top: 20px; }
+
+@keyframes rt-llm-indeterminate {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(285%); }
+}
+
 /* ---------- keyframes ---------- */
 @keyframes rt-lamp {
   0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--rt-tally) 55%, transparent); }

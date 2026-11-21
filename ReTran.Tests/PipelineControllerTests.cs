@@ -775,6 +775,265 @@ public class PipelineControllerTests : IDisposable
     }
 
     [Fact]
+    public async Task Start_LocalLlmm_PrewarmsBeforeCoreStart()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        UseLocalLlm();
+        PipelineController controller = CreateController(peer, new OverlayState());
+        int startupChanges = 0;
+        controller.LlmStartupChanged += () => startupChanges++;
+        var source = new SourceSelection(false, 0, null);
+        IPipelineControl floatingMenuSurface = controller;
+
+        await floatingMenuSurface.StartAsync(source, CancellationToken.None);
+
+        Assert.Equal(
+            ["llm.models.set", "llm.server.start", "llm.server.status", "core.start"],
+            peer.Calls.Select(call => call.Method));
+        Assert.True(controller.IsRunning);
+        Assert.Equal(source, controller.ActiveSource);
+        Assert.True(startupChanges > 0); // the shared controller publishes even through IPipelineControl
+        Assert.Null(controller.LlmStartup); // successful core.start closes the popup
+    }
+
+    [Fact]
+    public async Task Start_CancelBeforeCoreStart_StopsServerWithoutRunning()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        UseLocalLlm();
+        var accepted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        peer.Called += method =>
+        {
+            if (method == "llm.server.start") accepted.TrySetResult();
+        };
+        peer.Reply = method => method switch
+        {
+            "llm.server.start" => AcceptedLocalStart(),
+            "llm.server.status" => LocalStatus(state: "loading", phase: "loading"),
+            _ => null,
+        };
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        Task start = controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None);
+        await accepted.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        await controller.CancelLlmStartupAsync(CancellationToken.None);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => start);
+        Assert.DoesNotContain(peer.Calls, call => call.Method == "core.start");
+        Assert.Contains(peer.Calls, call => call.Method == "llm.server.stop");
+        Assert.False(controller.IsRunning);
+        Assert.Null(controller.ActiveSource);
+        Assert.Null(controller.LlmStartup);
+    }
+
+    [Fact]
+    public async Task Start_CancelWhenReadyStatusArrives_DoesNotSendCoreStart()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        UseLocalLlm();
+        PipelineController? controller = null;
+        Task? cancel = null;
+        peer.AsyncReply = (method, _, _) => method switch
+        {
+            "llm.server.start" => Task.FromResult<JsonNode?>(AcceptedLocalStart()),
+            "llm.server.status" => CancelAndReturnReady(),
+            _ => Task.FromResult<JsonNode?>(new JsonObject { ["running"] = false }),
+        };
+        controller = CreateController(peer, new OverlayState());
+
+        Task start = controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => start);
+        Assert.NotNull(cancel);
+        await cancel;
+
+        Assert.DoesNotContain(peer.Calls, call => call.Method == "core.start");
+        Assert.Contains(peer.Calls, call => call.Method == "llm.server.stop");
+        Assert.False(controller.IsRunning);
+
+        Task<JsonNode?> CancelAndReturnReady()
+        {
+            cancel = controller!.CancelLlmStartupAsync(CancellationToken.None);
+            return Task.FromResult<JsonNode?>(LocalStatus());
+        }
+    }
+
+    [Fact]
+    public async Task Start_CancelAfterCoreStart_RollsBackWithCoreStop()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        UseLocalLlm();
+        var coreStartSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finishCoreStart = new TaskCompletionSource<JsonNode?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        peer.AsyncReply = (method, _, _) => method switch
+        {
+            "core.start" => AwaitCoreStart(),
+            "llm.server.start" => Task.FromResult<JsonNode?>(AcceptedLocalStart()),
+            "llm.server.status" => Task.FromResult<JsonNode?>(LocalStatus()),
+            _ => Task.FromResult<JsonNode?>(new JsonObject { ["running"] = false }),
+        };
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        Task start = controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None);
+        await coreStartSent.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        Task cancel = controller.CancelLlmStartupAsync(CancellationToken.None);
+        Assert.False(cancel.IsCompleted);
+        Assert.DoesNotContain(peer.Calls, call => call.Method == "core.stop");
+
+        finishCoreStart.SetResult(new JsonObject { ["running"] = true });
+        await cancel.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => start);
+
+        Assert.Contains(peer.Calls, call => call.Method == "core.stop");
+        Assert.False(controller.IsRunning);
+        Assert.Null(controller.ActiveSource);
+        Assert.Null(controller.LlmStartup);
+
+        Task<JsonNode?> AwaitCoreStart()
+        {
+            coreStartSent.TrySetResult();
+            return finishCoreStart.Task;
+        }
+    }
+
+    [Fact]
+    public async Task Start_CoreStartFailure_StopsLlmAndDoesNotRun()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        UseLocalLlm();
+        peer.Reply = method => method switch
+        {
+            "llm.server.start" => AcceptedLocalStart(),
+            "llm.server.status" => LocalStatus(),
+            "core.start" => throw new RpcException(-32603, "core start exploded"),
+            _ => null,
+        };
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        RpcException error = await Assert.ThrowsAsync<RpcException>(() =>
+            controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None));
+
+        Assert.Equal("core start exploded", error.Message);
+        Assert.Contains(peer.Calls, call => call.Method == "core.stop");
+        Assert.Contains(peer.Calls, call => call.Method == "llm.server.stop");
+        Assert.False(controller.IsRunning);
+        Assert.Null(controller.ActiveSource);
+        Assert.Equal("error", controller.LlmStartup?.Phase);
+        Assert.Equal("core start exploded", controller.LlmStartup?.Error);
+    }
+
+    [Fact]
+    public async Task Start_SecondCallerRejected_AndSourceUnchanged()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        UseLocalLlm();
+        var accepted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        peer.Called += method =>
+        {
+            if (method == "llm.server.start") accepted.TrySetResult();
+        };
+        peer.Reply = method => method switch
+        {
+            "llm.server.start" => AcceptedLocalStart(),
+            "llm.server.status" => LocalStatus(state: "loading", phase: "loading"),
+            _ => null,
+        };
+        PipelineController controller = CreateController(peer, new OverlayState());
+        var firstSource = new SourceSelection(false, 0, null);
+        Task first = controller.StartAsync(firstSource, CancellationToken.None);
+        await accepted.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            controller.StartAsync(new SourceSelection(true, 0, "0xBEEF"), CancellationToken.None));
+
+        Assert.Equal("pipeline start is already in progress", error.Message);
+        Assert.Null(controller.ActiveSource);
+        Assert.Single(peer.Calls, call => call.Method == "llm.server.start");
+        await controller.CancelLlmStartupAsync(CancellationToken.None);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
+    }
+
+    [Theory]
+    [InlineData("google")]
+    [InlineData("api")]
+    public async Task Start_GoogleOrApi_DoesNotPrewarm(string mode)
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        new AppSettingsService(_settingsPath).Save(AppSettings.Default with
+        {
+            Provider = mode == "google" ? "google" : "llm",
+            LlmMode = mode == "api" ? "api" : "local",
+        });
+        PipelineController controller = CreateController(peer, new OverlayState());
+        int startupChanges = 0;
+        controller.LlmStartupChanged += () => startupChanges++;
+
+        await controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None);
+
+        Assert.Equal("core.start", Assert.Single(peer.Calls).Method);
+        Assert.Equal(0, startupChanges);
+        Assert.Null(controller.LlmStartup);
+        Assert.True(controller.IsRunning);
+    }
+
+    [Theory]
+    [InlineData("error")]
+    [InlineData("superseded")]
+    public async Task Start_LocalLlmm_StatusErrorOrSuperseded_StopsBeforeCoreStart(string failure)
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        UseLocalLlm();
+        peer.Reply = method => method switch
+        {
+            "llm.server.start" => AcceptedLocalStart(),
+            "llm.server.status" when failure == "error" => new JsonObject
+            {
+                ["state"] = "error", ["model"] = "Hy-MT2-1.8B-UD-Q4_K_XL",
+                ["error"] = "load exploded", ["attempt"] = 1L, ["phase"] = "error",
+                ["bytesLoaded"] = null, ["bytesTotal"] = null, ["bytesPerSec"] = null,
+                ["progressAvailable"] = false,
+            },
+            "llm.server.status" => LocalStatus(attempt: 2),
+            _ => null,
+        };
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None));
+
+        Assert.Contains(failure == "error" ? "load exploded" : "superseded", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(peer.Calls, call => call.Method == "core.start");
+        Assert.Contains(peer.Calls, call => call.Method == "llm.server.stop");
+        Assert.False(controller.IsRunning);
+    }
+
+    private void UseLocalLlm() => new AppSettingsService(_settingsPath).Save(AppSettings.Default with
+    {
+        Provider = "llm",
+        LlmMode = "local",
+        LlmActiveModel = "Hy-MT2-1.8B-UD-Q4_K_XL",
+    });
+
+    private static JsonObject AcceptedLocalStart() => new()
+    {
+        ["accepted"] = true,
+        ["attempt"] = 1L,
+        ["model"] = "Hy-MT2-1.8B-UD-Q4_K_XL",
+    };
+
+    private static JsonObject LocalStatus(long attempt = 1, string state = "ready", string phase = "ready") => new()
+    {
+        ["state"] = state,
+        ["model"] = "Hy-MT2-1.8B-UD-Q4_K_XL",
+        ["error"] = null,
+        ["attempt"] = attempt,
+        ["phase"] = phase,
+        ["bytesLoaded"] = 8L,
+        ["bytesTotal"] = 8L,
+        ["bytesPerSec"] = 1024.0,
+        ["progressAvailable"] = true,
+    };
+
+    [Fact]
     public async Task Start_LlmLocal_SendsModeAndActiveModelOnly()
     {
         var peer = new FakeCorePeer { IsStarted = true };
@@ -790,11 +1049,13 @@ public class PipelineControllerTests : IDisposable
 
         // Local: đồng bộ con trỏ active của catalog TRƯỚC core.start để InUse khớp model phiên;
         // prompt null không đi wire và field API không lẫn vào (spec D1/D10).
-        Assert.Equal(2, peer.Calls.Count);
+        Assert.Equal(4, peer.Calls.Count);
         Assert.Equal("llm.models.set", peer.Calls[0].Method);
         Assert.Equal("Hy-MT2-1.8B-UD-Q4_K_XL", peer.Calls[0].Params!["name"]!.GetValue<string>());
-        Assert.Equal("core.start", peer.Calls[1].Method);
-        JsonObject llm = peer.Calls[1].Params!["translate"]!["llm"]!.AsObject();
+        Assert.Equal("llm.server.start", peer.Calls[1].Method);
+        Assert.Equal("llm.server.status", peer.Calls[2].Method);
+        Assert.Equal("core.start", peer.Calls[3].Method);
+        JsonObject llm = peer.Calls[3].Params!["translate"]!["llm"]!.AsObject();
         Assert.Equal("local", llm["mode"]!.GetValue<string>());
         Assert.Equal("Hy-MT2-1.8B-UD-Q4_K_XL", llm["model"]!.GetValue<string>());
         Assert.Null(llm["baseUrl"]);
@@ -953,7 +1214,9 @@ public class PipelineControllerTests : IDisposable
             ? new JsonObject
             {
                 ["state"] = "error", ["model"] = "Hy-MT2-1.8B-Q4_K_M",
-                ["error"] = "health timeout",
+                ["error"] = "health timeout", ["attempt"] = 42L, ["phase"] = "finalizing",
+                ["bytesLoaded"] = 100L, ["bytesTotal"] = 400L, ["bytesPerSec"] = 12.5,
+                ["progressAvailable"] = true,
             }
             : null;
         PipelineController controller = CreateController(peer, new OverlayState());
@@ -964,6 +1227,12 @@ public class PipelineControllerTests : IDisposable
         Assert.Equal("error", status.State);
         Assert.Equal("Hy-MT2-1.8B-Q4_K_M", status.Model);
         Assert.Equal("health timeout", status.Error);
+        Assert.Equal(42, status.Attempt);
+        Assert.Equal("finalizing", status.Phase);
+        Assert.Equal(100, status.BytesLoaded);
+        Assert.Equal(400, status.BytesTotal);
+        Assert.Equal(12.5, status.BytesPerSec);
+        Assert.True(status.ProgressAvailable);
     }
 
     [Fact]
@@ -1400,6 +1669,8 @@ public class PipelineControllerTests : IDisposable
 
         /// <summary>Optional per-method canned reply; null (or a null return) falls back to the default shape. Phản hồi dựng sẵn theo method; null trả về mặc định.</summary>
         public Func<string, JsonNode?>? Reply { get; set; }
+        public Func<string, JsonNode?, CancellationToken, Task<JsonNode?>>? AsyncReply { get; set; }
+        public event Action<string>? Called;
 
         public event Action<string, JsonNode?>? NotificationReceived;
         public event Action<Exception>? HandlerError;
@@ -1416,10 +1687,26 @@ public class PipelineControllerTests : IDisposable
         public Task<JsonNode?> CallAsync(string method, JsonNode? @params, CancellationToken ct)
         {
             Calls.Add((method, @params));
-            JsonNode? result = (Reply?.Invoke(method))
-                ?? (method == "core.start"
-                    ? new JsonObject { ["running"] = true }
-                    : new JsonObject { ["running"] = false });
+            Called?.Invoke(method);
+            if (AsyncReply is not null) return AsyncReply(method, @params, ct);
+            ct.ThrowIfCancellationRequested();
+            JsonNode? result = (Reply?.Invoke(method)) ?? method switch
+            {
+                "core.start" => new JsonObject { ["running"] = true },
+                "llm.server.start" => new JsonObject
+                {
+                    ["accepted"] = true, ["attempt"] = 1L,
+                    ["model"] = @params?["name"]?.GetValue<string>(),
+                },
+                "llm.server.status" => new JsonObject
+                {
+                    ["state"] = "ready", ["model"] = "Hy-MT2-1.8B-UD-Q4_K_XL",
+                    ["error"] = null, ["attempt"] = 1L, ["phase"] = "ready",
+                    ["bytesLoaded"] = 8L, ["bytesTotal"] = 8L,
+                    ["bytesPerSec"] = 1024.0, ["progressAvailable"] = true,
+                },
+                _ => new JsonObject { ["running"] = false },
+            };
             return Task.FromResult<JsonNode?>(result);
         }
 
