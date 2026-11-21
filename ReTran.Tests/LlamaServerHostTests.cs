@@ -131,6 +131,67 @@ public class LlamaServerHostTests
     }
 
     [Fact]
+    public async Task HealthWait_LateHealthSuccess_AfterFixedCeiling_IsRejected()
+    {
+        string dir = NewTempDir();
+        var clock = new FakeTimeProvider();
+        var metrics = new ScriptedMetrics(_ => null);
+        using LlamaServerHost host = CreateHost(
+            dir, metrics, clock, LongRunningCommand,
+            (_, _) =>
+            {
+                clock.Advance(TimeSpan.FromSeconds(601));
+                return Task.FromResult(true);
+            });
+        Task startup = host.EnsureStartedAsync(TestContext.Current.CancellationToken);
+        try
+        {
+            InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => startup.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+            Assert.Contains("no loading activity for 600 s", error.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            host.Dispose();
+            await ObserveCancellationAsync(startup);
+            DeleteTempDir(dir);
+        }
+    }
+
+    [Fact]
+    public async Task HealthWait_FinalWindowActivity_RenewsInsteadOfKilling()
+    {
+        string dir = NewTempDir();
+        var clock = new FakeTimeProvider();
+        var metrics = new ScriptedMetrics(read => SampleFor("io", read));
+        using LlamaServerHost host = CreateHost(dir, metrics, clock, LongRunningCommand);
+        Task startup = host.EnsureStartedAsync(TestContext.Current.CancellationToken);
+        try
+        {
+            await metrics.WaitForReadAsync(1);
+            clock.Advance(TimeSpan.FromSeconds(600));
+            await DrainAsync();
+
+            Assert.False(startup.IsCompleted); // IO in the 595–600 sample must renew before the stall check
+            await metrics.WaitForReadAsync(2);
+            clock.Advance(TimeSpan.FromSeconds(599));
+            await DrainAsync();
+            Assert.False(startup.IsCompleted);
+
+            clock.Advance(TimeSpan.FromSeconds(1));
+            InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(
+                () => startup.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+            Assert.Contains("no loading activity for 600 s", error.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            host.Dispose();
+            await ObserveCancellationAsync(startup);
+            DeleteTempDir(dir);
+        }
+    }
+
+    [Fact]
     public async Task Progress_MonotonicClamped_UntilHealthy()
     {
         const long MiB = 1024 * 1024;

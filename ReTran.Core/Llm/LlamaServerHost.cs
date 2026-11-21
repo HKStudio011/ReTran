@@ -237,6 +237,54 @@ public sealed class LlamaServerHost : ILlamaServerHost
         long bytesHighWater = 0;
         long ramHighWater = 0;
 
+        // A due sample always runs before the deadline decision: activity in the final sample
+        // window is still activity, including while a health probe was in flight.
+        void SampleDueActivity(DateTimeOffset now)
+        {
+            if (countersUnavailable || now < nextSample) return;
+            if (!_metrics.TryRead(process, out LlamaProcessSample sample))
+            {
+                countersUnavailable = true;
+                deadline = started + DefaultHealthTimeout;
+                long? total = LoadProgress.BytesTotal;
+                SetProgress(new LlmLoadProgressSnapshot("loading", null, total, null, false));
+                return;
+            }
+
+            TimeSpan elapsed = havePrevious ? now - previousSampleAt : TimeSpan.Zero;
+            double? speed = null;
+            bool activity = false;
+            if (havePrevious && elapsed > TimeSpan.Zero)
+            {
+                long readDelta = sample.ReadBytes - previous.ReadBytes;
+                if (readDelta >= 0) speed = readDelta / elapsed.TotalSeconds;
+                activity = readDelta >= ActivityIoBytes
+                    || sample.PageFaults - previous.PageFaults >= ActivityPageFaults
+                    || (sample.CpuTime - previous.CpuTime).TotalSeconds / elapsed.TotalSeconds >= 0.05;
+            }
+
+            activity |= sample.WorkingSetBytes - ramHighWater >= ActivityRamBytes;
+            ramHighWater = Math.Max(ramHighWater, sample.WorkingSetBytes);
+            bytesHighWater = Math.Max(bytesHighWater, sample.ReadBytes);
+            if (activity) deadline = now + StallWindow;
+            long? modelBytes = LoadProgress.BytesTotal;
+            string phase = modelBytes > 0 && bytesHighWater >= modelBytes ? "finalizing" : "loading";
+            SetProgress(new LlmLoadProgressSnapshot(
+                phase, bytesHighWater, modelBytes, speed, modelBytes > 0));
+            previous = sample;
+            previousSampleAt = now;
+            havePrevious = true;
+            nextSample = now + ActivitySampleInterval;
+        }
+
+        void ThrowIfPastDeadline(DateTimeOffset now)
+        {
+            if (now < deadline) return;
+            string tail = KillAndCollectStderrTail();
+            throw new InvalidOperationException(
+                $"llama-server stalled: no loading activity for 600 s (không có hoạt động trong 10 phút).{tail}");
+        }
+
         while (true)
         {
             ct.ThrowIfCancellationRequested();
@@ -248,70 +296,45 @@ public sealed class LlamaServerHost : ILlamaServerHost
                     $"llama-server exited before becoming healthy{(exitCode is null ? "" : $" (exit code {exitCode})")}.{tail}");
             }
 
-            try
-            {
-                bool healthy = _healthProbe is null
-                    ? await ProbeHealthAsync(port, ct).ConfigureAwait(false)
-                    : await _healthProbe(port, ct).ConfigureAwait(false);
-                if (healthy) return;
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception)
-            {
-                // Connection refused while the model loads is not a startup failure yet.
-            }
-
             DateTimeOffset now = _timeProvider.GetUtcNow();
-            if (now >= deadline)
-            {
-                string tail = KillAndCollectStderrTail();
-                throw new InvalidOperationException(
-                    $"llama-server stalled: no loading activity for 600 s (không có hoạt động trong 10 phút).{tail}");
-            }
+            SampleDueActivity(now);
+            ThrowIfPastDeadline(now);
 
-            if (!countersUnavailable && now >= nextSample)
+            bool healthy = false;
+            using (var probeCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            using (ITimer probeDeadline = _timeProvider.CreateTimer(
+                static state => ((CancellationTokenSource)state!).Cancel(), probeCts,
+                deadline - now, Timeout.InfiniteTimeSpan))
             {
-                if (!_metrics.TryRead(process, out LlamaProcessSample sample))
+                try
                 {
-                    countersUnavailable = true;
-                    deadline = started + DefaultHealthTimeout;
-                    long? total = LoadProgress.BytesTotal;
-                    SetProgress(new LlmLoadProgressSnapshot("loading", null, total, null, false));
+                    healthy = _healthProbe is null
+                        ? await ProbeHealthAsync(port, probeCts.Token).ConfigureAwait(false)
+                        : await _healthProbe(port, probeCts.Token).ConfigureAwait(false);
                 }
-                else
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
-                    TimeSpan elapsed = havePrevious ? now - previousSampleAt : TimeSpan.Zero;
-                    double? speed = null;
-                    bool activity = false;
-                    if (havePrevious && elapsed > TimeSpan.Zero)
-                    {
-                        long readDelta = sample.ReadBytes - previous.ReadBytes;
-                        if (readDelta >= 0)
-                            speed = readDelta / elapsed.TotalSeconds;
-                        activity = readDelta >= ActivityIoBytes
-                            || sample.PageFaults - previous.PageFaults >= ActivityPageFaults
-                            || (sample.CpuTime - previous.CpuTime).TotalSeconds / elapsed.TotalSeconds >= 0.05;
-                    }
-
-                    activity |= sample.WorkingSetBytes - ramHighWater >= ActivityRamBytes;
-                    ramHighWater = Math.Max(ramHighWater, sample.WorkingSetBytes);
-                    bytesHighWater = Math.Max(bytesHighWater, sample.ReadBytes);
-                    if (activity) deadline = now + StallWindow;
-                    long? total = LoadProgress.BytesTotal;
-                    string phase = total > 0 && bytesHighWater >= total ? "finalizing" : "loading";
-                    SetProgress(new LlmLoadProgressSnapshot(
-                        phase, bytesHighWater, total, speed, total > 0));
-                    previous = sample;
-                    previousSampleAt = now;
-                    havePrevious = true;
-                    nextSample = now + ActivitySampleInterval;
+                    throw;
+                }
+                catch (OperationCanceledException) when (probeCts.IsCancellationRequested)
+                {
+                    // The completion-time deadline check below turns this into a stall, not caller cancellation.
+                }
+                catch (Exception)
+                {
+                    // Connection refused while the model loads is not a startup failure yet.
                 }
             }
 
-            await Task.Delay(HealthInterval, _timeProvider, ct).ConfigureAwait(false);
+            DateTimeOffset completedAt = _timeProvider.GetUtcNow();
+            SampleDueActivity(completedAt);
+            ThrowIfPastDeadline(completedAt);
+            if (healthy) return;
+
+            TimeSpan delay = HealthInterval;
+            TimeSpan remaining = deadline - completedAt;
+            if (remaining < delay) delay = remaining;
+            await Task.Delay(delay, _timeProvider, ct).ConfigureAwait(false);
         }
     }
 
