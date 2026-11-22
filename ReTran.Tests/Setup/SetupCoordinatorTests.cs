@@ -1280,6 +1280,48 @@ public class SetupCoordinatorTests : IDisposable
     }
 
     [Fact]
+    public async Task Setup_MissingArtifactSameTag_ReportsRepairNotUpdate()
+    {
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":["Hy-MT2-1.8B-UD-Q4_K_XL"],"steps":{"checking":"done","verifyingfiles":"done","syncing":"done","verifyingsidecar":"done","downloadingmodels":"done","applying":"done"}}""");
+        _bridge.LlmRuntimeInstalled = false;
+        _bridge.LlmRuntimeTag = "b7234";
+        _bridge.LlmRuntimeLatestTag = "b7234";
+        var logger = new RecordingLogger<SetupCoordinator>();
+        var coordinator = NewCoordinator(logger: logger);
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Equal("cuda", Assert.Single(_bridge.LlmRuntimeChecks));
+        Assert.Equal("cuda", Assert.Single(_bridge.LlmRuntimeDownloads));
+        var decision = Assert.Single(logger.Entries, entry =>
+            entry.Message.Contains("runtime llama.cpp decision", StringComparison.Ordinal));
+        Assert.Contains("flavor=cuda", decision.Message, StringComparison.Ordinal);
+        Assert.Contains("current=b7234", decision.Message, StringComparison.Ordinal);
+        Assert.Contains("latest=b7234", decision.Message, StringComparison.Ordinal);
+        Assert.Contains("installed=False", decision.Message, StringComparison.Ordinal);
+        Assert.Contains("action=repair-same-tag", decision.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(logger.Entries, entry => entry.Message.Contains("cập nhật", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task LlmRuntime_AcceptedCancelledAttempt_OldInstallDoesNotComplete()
+    {
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":["Hy-MT2-1.8B-UD-Q4_K_XL"],"steps":{"checking":"done","verifyingfiles":"done","syncing":"done","verifyingsidecar":"done","downloadingmodels":"done","applying":"done"}}""");
+        _bridge.LlmRuntimeInstalled = true;
+        _bridge.LlmRuntimeTag = "b7000";
+        _bridge.LlmRuntimeLatestTag = "b7234";
+        _bridge.LlmRuntimeDownloadCompletes = false;
+        _bridge.LlmRuntimeAttemptState = "Cancelled";
+        var coordinator = NewCoordinator(modelDownloadTimeout: TimeSpan.FromMilliseconds(150));
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+        Assert.Equal(SetupCoordinator.MaxRetries + 1, _bridge.LlmRuntimeDownloads.Count);
+    }
+
+    [Fact]
     public async Task LlmRuntime_Offline_SkipsAsOk()
     {
         // Mất mạng khi tra bản mới ⇒ coi bản đang cài là ok, không chặn wizard.
@@ -2436,7 +2478,7 @@ public class SetupCoordinatorTests : IDisposable
 
     private sealed class RecordingLogger<T> : ILogger<T>
     {
-        public List<(LogLevel Level, Exception? Exception)> Entries { get; } = [];
+        public List<(LogLevel Level, Exception? Exception, string Message)> Entries { get; } = [];
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
@@ -2448,7 +2490,7 @@ public class SetupCoordinatorTests : IDisposable
             TState state,
             Exception? exception,
             Func<TState, Exception?, string> formatter) =>
-            Entries.Add((logLevel, exception));
+            Entries.Add((logLevel, exception, formatter(state, exception)));
     }
 
     // ── fakes ─────────────────────────────────────────────────────────────────────────────────────
@@ -2577,6 +2619,10 @@ public class SetupCoordinatorTests : IDisposable
 
         /// <summary>Whether the latest accepted runtime attempt is queued/in-flight. Attempt runtime mới nhận còn đang xếp hàng/chạy hay không.</summary>
         public bool LlmRuntimeDownloading { get; set; }
+
+        /// <summary>Attempt state exposed by <c>llm.runtime.status</c>. Trạng thái attempt mà <c>llm.runtime.status</c> phơi ra.</summary>
+        public string LlmRuntimeAttemptState { get; set; } = "None";
+
         private long _llmRuntimeAttempt;
 
         /// <summary>Optional <c>downloadFailed</c> flag the fake includes in <c>llm.runtime.status</c>. Cờ <c>downloadFailed</c> tuỳ chọn fake nhúng vào <c>llm.runtime.status</c>.</summary>
@@ -2637,6 +2683,7 @@ public class SetupCoordinatorTests : IDisposable
                     ["downloadError"] = LlmRuntimeDownloadFailed ? LlmRuntimeDownloadError : null,
                     ["downloading"] = LlmRuntimeDownloading,
                     ["attempt"] = _llmRuntimeAttempt,
+                    ["attemptState"] = LlmRuntimeAttemptState,
                     ["progress"] = LlmRuntimeProgress is null
                         ? null
                         : new JsonObject
@@ -2685,8 +2732,20 @@ public class SetupCoordinatorTests : IDisposable
         {
             LlmRuntimeDownloads.Add(@params!["flavor"]!.GetValue<string>());
             _llmRuntimeAttempt++;
-            LlmRuntimeDownloading = !LlmRuntimeDownloadCompletes;
-            if (LlmRuntimeDownloadCompletes) LlmRuntimeInstalled = true; // fast network unless disabled
+            if (LlmRuntimeDownloadCompletes)
+            {
+                LlmRuntimeAttemptState = "Succeeded";
+                LlmRuntimeInstalled = true; // fast network unless disabled
+            }
+            else if (LlmRuntimeDownloadFailed)
+            {
+                LlmRuntimeAttemptState = "Failed";
+            }
+            else if (LlmRuntimeAttemptState != "Cancelled")
+            {
+                LlmRuntimeAttemptState = "Running";
+            }
+            LlmRuntimeDownloading = LlmRuntimeAttemptState == "Running";
             return Task.FromResult<JsonNode?>(new JsonObject
             {
                 ["accepted"] = true,

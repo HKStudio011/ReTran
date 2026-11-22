@@ -1404,9 +1404,10 @@ public sealed class SetupCoordinator
     /// DownloadingLlmRuntime (spec 2026-11-14 D13): the llama.cpp runtime is never bundled with the
     /// release zip, so the wizard installs it here. The runtime flavor follows the machine — GPU
     /// wheel flavor (already past the VerifyingSidecar capability gate) ⇒ <c>cuda</c>, otherwise
-    /// <c>cpu</c>. A runtime already on disk marks the step done off one status call ("re-run setup"
-    /// pass-through); otherwise it fires <c>llm.runtime.download</c> and polls
-    /// <c>llm.runtime.status</c> every <see cref="_modelPollInterval"/> until installed or the
+    /// <c>cpu</c>. A valid installed runtime skips when current matches latest or the check is offline;
+    /// an older build updates, while a missing artifact repairs even at the same tag. Every decision logs
+    /// flavor/current/latest/installed. Downloads poll <c>llm.runtime.status</c> every
+    /// <see cref="_modelPollInterval"/> until the matching attempt commits or the
     /// <see cref="_modelDownloadTimeout"/> window elapses (then a fresh attempt follows). Failure is
     /// soft like DownloadingModels: the failure popup offers retry/skip-for-session and Settings can
     /// download the runtime later.
@@ -1414,10 +1415,10 @@ public sealed class SetupCoordinator
     /// nằm trong zip release, nên wizard cài nó ở đây — nhưng chỉ khi bước 4 có chọn model LLM; bước 4
     /// để trống thì bước này tự đánh dấu done mà không gọi RPC nào. Flavor runtime theo máy — flavor
     /// wheel GPU (đã qua cổng capability ở VerifyingSidecar) ⇒ <c>cuda</c>, còn lại <c>cpu</c>. Runtime
-    /// đã có trên đĩa: so tag với bản mới nhất Core tra được (<c>llm.runtime.check</c>) — cũ thì
-    /// tải/cập nhật, mới nhất hoặc mất mạng thì đánh dấu xong ("chạy lại setup" đi thẳng qua); chưa có
-    /// thì gọi <c>llm.runtime.download</c> rồi poll <c>llm.runtime.status</c> mỗi
-    /// <see cref="_modelPollInterval"/> cho tới khi installed hoặc hết cửa sổ
+    /// đã có artifact và current==latest (hoặc không check được khi offline) thì bỏ qua; bản cũ được cập
+    /// nhật, artifact thiếu được repair kể cả cùng tag. Mọi quyết định log flavor/current/latest/installed.
+    /// Lượt tải poll <c>llm.runtime.status</c> mỗi <see cref="_modelPollInterval"/> cho tới khi đúng attempt
+    /// commit hoặc hết cửa sổ
     /// <see cref="_modelDownloadTimeout"/> (lượt thử mới sẽ chạy). Thất bại là mềm như
     /// DownloadingModels: popup màn lỗi cho retry/bỏ qua phiên, và Settings có thể tải runtime sau.
     /// </summary>
@@ -1437,16 +1438,24 @@ public sealed class SetupCoordinator
             try
             {
                 downloadError = null;
-                if (await IsLlmRuntimeInstalledAsync(runtimeFlavor, ct).ConfigureAwait(false))
+                bool installed = await IsLlmRuntimeInstalledAsync(runtimeFlavor, ct).ConfigureAwait(false);
+                (string? current, string? latest) = await CheckLlmRuntimeAsync(runtimeFlavor, ct).ConfigureAwait(false);
+                string action = installed
+                    ? current is null || latest is null
+                        ? "skip-check-unavailable"
+                        : current == latest ? "skip-current" : "update"
+                    : current is not null && current == latest
+                        ? "repair-same-tag"
+                        : current is null ? "install" : "repair";
+                _logger?.LogInformation(
+                    "setup: runtime llama.cpp decision flavor={Flavor} current={Current} latest={Latest} installed={Installed} action={Action}",
+                    runtimeFlavor, current, latest, installed, action);
+                if (installed && (current is null || latest is null || current == latest))
                 {
-                    // Đã cài: chỉ cập nhật khi Core tra được bản mới hơn (mất mạng ⇒ coi bản hiện tại là ok).
-                    (string? current, string? latest) = await CheckLlmRuntimeAsync(runtimeFlavor, ct).ConfigureAwait(false);
-                    if (current is null || latest is null || current == latest)
-                    {
-                        MarkStepDone(SetupStep.DownloadingLlmRuntime);
-                        return StepOutcome.Done;
-                    }
-                    _logger?.LogInformation("setup: runtime llama.cpp tag {Current} cũ hơn {Latest} — cập nhật", current, latest);
+                    // Valid same-tag installs still skip; an unavailable check remains a soft offline pass.
+                    // Bản cùng tag còn artifact vẫn bỏ qua; không check được vẫn cho qua mềm khi offline.
+                    MarkStepDone(SetupStep.DownloadingLlmRuntime);
+                    return StepOutcome.Done;
                 }
 
                 JsonNode? accepted = await _bridge
@@ -1468,12 +1477,19 @@ public sealed class SetupCoordinator
                     // cannot complete from that old binary either.
                     // Lỗi của attempt NÀY thắng mọi bản cũ; attempt xếp hàng/đang chạy cũng không
                     // được hoàn tất nhờ binary cũ.
-                    if (IsLlmRuntimeDownloadFailed(status))
+                    string? attemptState = ReadString(status, "attemptState");
+                    if (attemptState == "Cancelled")
+                    {
+                        throw new OperationCanceledException("llm runtime download was cancelled");
+                    }
+                    if (attemptState == "Failed" || IsLlmRuntimeDownloadFailed(status))
                     {
                         downloadError = ReadString(status, "downloadError");
                         throw new InvalidOperationException("llm runtime download failed (reported by status)");
                     }
-                    if (!IsLlmRuntimeDownloading(status) && IsLlmRuntimeInstalled(status)) break;
+                    bool committed = attemptState == "Succeeded";
+                    bool legacyComplete = attemptState is null && !IsLlmRuntimeDownloading(status);
+                    if ((committed || legacyComplete) && IsLlmRuntimeInstalled(status)) break;
                     // Tiến độ tải zip runtime (spec vòng 2 §9): status có `progress` → đưa vào snapshot
                     // và PUBLISH — không publish thì UI không bao giờ vẽ lại dòng % + ETA.
                     var downloads = ParseRuntimeDownloads(status);

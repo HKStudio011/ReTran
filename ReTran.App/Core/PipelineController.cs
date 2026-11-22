@@ -119,6 +119,28 @@ public sealed record LlmModelInfo(
 }
 
 /// <summary>
+/// App-side mirror of Core's latest runtime download attempt state.
+/// Bản mirror phía App của trạng thái lượt tải runtime mới nhất từ Core.
+/// </summary>
+public enum LlmRuntimeAttemptState
+{
+    /// <summary>No download attempt has been registered. Chưa có lượt tải nào được đăng ký.</summary>
+    None,
+
+    /// <summary>The attempt is queued or running. Lượt tải đang xếp hàng hoặc đang chạy.</summary>
+    Running,
+
+    /// <summary>The attempt committed a verified server binary. Lượt tải đã commit một server binary được xác minh.</summary>
+    Succeeded,
+
+    /// <summary>The attempt ended with an error. Lượt tải kết thúc với lỗi.</summary>
+    Failed,
+
+    /// <summary>The caller cancelled the attempt. Caller đã hủy lượt tải.</summary>
+    Cancelled,
+}
+
+/// <summary>
 /// Installed state of the llama.cpp runtime (<c>llm.runtime.status</c>).
 /// Trạng thái runtime llama.cpp (<c>llm.runtime.status</c>).
 /// </summary>
@@ -144,6 +166,9 @@ public sealed record LlmRuntimeStatusInfo(string? Tag, bool Installed, string? S
 
     /// <summary>Active runtime flavor, or <see langword="null"/> for a legacy/unknown state. Flavor runtime active, hoặc <see langword="null"/> khi state cũ/không rõ.</summary>
     public string? Flavor { get; init; }
+
+    /// <summary>State of <see cref="Attempt"/>; <see cref="LlmRuntimeAttemptState.None"/> for an older Core. Trạng thái của <see cref="Attempt"/>; <see cref="LlmRuntimeAttemptState.None"/> với Core cũ.</summary>
+    public LlmRuntimeAttemptState AttemptState { get; init; }
 }
 
 /// <summary>
@@ -885,6 +910,9 @@ public sealed class PipelineController : IPipelineControl
             Downloading = result is JsonObject o6 && ReadBool(o6, "downloading"),
             Attempt = result is JsonObject o7 ? ReadLong(o7, "attempt") : 0,
             Flavor = result is JsonObject o8 ? ReadNullableString(o8, "flavor") : null,
+            AttemptState = result is JsonObject o9
+                ? ReadLlmRuntimeAttemptState(o9)
+                : LlmRuntimeAttemptState.None,
         };
     }
 
@@ -1468,6 +1496,11 @@ public sealed class PipelineController : IPipelineControl
         => o[key] is JsonValue value && value.GetValueKind() == JsonValueKind.String
             ? value.GetValue<string>()
             : null;
+
+    private static LlmRuntimeAttemptState ReadLlmRuntimeAttemptState(JsonObject o) =>
+        Enum.TryParse(ReadNullableString(o, "attemptState"), ignoreCase: true, out LlmRuntimeAttemptState state)
+            ? state
+            : LlmRuntimeAttemptState.None;
 
     private static double? ReadNullableDouble(JsonObject o, string key)
         => o[key] is JsonValue value

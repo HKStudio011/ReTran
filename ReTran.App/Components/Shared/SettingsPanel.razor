@@ -1469,6 +1469,9 @@
                     case LlmRuntimePollOutcome.Superseded:
                         Toast.Show(L["deck.llm.runtime.downloadSuperseded"], ToastSeverity.Error);
                         return;
+                    case LlmRuntimePollOutcome.Cancelled:
+                        // Hủy chủ động không phải success và cũng không cần error toast.
+                        return;
                     case LlmRuntimePollOutcome.Failed:
                         Toast.Show(_llmRuntime.DownloadError is { } error
                             ? L.Fmt("deck.llm.runtime.downloadFailedDetail", error)

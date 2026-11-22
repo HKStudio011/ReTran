@@ -190,6 +190,7 @@ public class LlamaRuntimeManagerTests : IDisposable
         Assert.Null(status.Tag);
         Assert.False(status.Installed);
         Assert.Null(status.ServerPath);
+        Assert.Equal(LlmRuntimeAttemptState.None, status.AttemptState);
     }
 
     [Fact]
@@ -209,6 +210,7 @@ public class LlamaRuntimeManagerTests : IDisposable
         Assert.True(File.Exists(status.ServerPath));
         Assert.True(File.Exists(Path.Combine(_dir, "cuda", "b190", "extra.dll")));
         Assert.Equal("cuda", status.Flavor);
+        Assert.Equal(LlmRuntimeAttemptState.Succeeded, status.AttemptState);
 
         (_, string? latest) = await manager.CheckAsync("cuda", TestContext.Current.CancellationToken);
         Assert.Equal("b190", latest); // Current == Latest sau khi tải mới nhất — nothing newer to fetch.
@@ -278,6 +280,7 @@ public class LlamaRuntimeManagerTests : IDisposable
             LlmRuntimeStatus status = await manager.GetStatusAsync(TestContext.Current.CancellationToken);
 
             Assert.True(status.Downloading);
+            Assert.Equal(LlmRuntimeAttemptState.Running, status.AttemptState);
             Assert.False(status.Installed); // the old b200 install must not make this repair look complete
             Assert.Equal("b200", status.Tag);
         }
@@ -317,6 +320,99 @@ public class LlamaRuntimeManagerTests : IDisposable
         Assert.True(status.Installed); // the previous runtime remains usable after the failed update
         Assert.True(status.DownloadFailed); // ...but the update itself must not look successful
         Assert.Equal("network down", status.DownloadError);
+    }
+
+    [Fact]
+    public async Task Download_HttpTimeout_MarksFailed()
+    {
+        var manager = new LlamaRuntimeManager(
+            _dir, new HttpClient(new GhHandler(ReleasesJson)),
+            (uri, target, ct) => Task.FromException(
+                new TaskCanceledException("HttpClient.Timeout elapsed", new TimeoutException("HTTP timed out"))));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            manager.DownloadAsync("cpu", TestContext.Current.CancellationToken));
+
+        LlmRuntimeStatus status = await manager.GetStatusAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(LlmRuntimeAttemptState.Failed, status.AttemptState);
+        Assert.True(status.DownloadFailed);
+        Assert.Contains("HttpClient.Timeout", status.DownloadError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Download_CallerCancellation_MarksCancelled()
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var manager = new LlamaRuntimeManager(
+            _dir, new HttpClient(new GhHandler(ReleasesJson)),
+            async (uri, target, ct) =>
+            {
+                started.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            });
+        using var caller = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+
+        Task download = manager.DownloadAsync("cpu", caller.Token);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        caller.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => download);
+
+        LlmRuntimeStatus status = await manager.GetStatusAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(LlmRuntimeAttemptState.Cancelled, status.AttemptState);
+        Assert.False(status.Downloading);
+        Assert.False(status.DownloadFailed);
+        Assert.Null(status.DownloadError);
+    }
+
+    [Theory]
+    [InlineData(LlmRuntimeAttemptState.None, "None")]
+    [InlineData(LlmRuntimeAttemptState.Running, "Running")]
+    [InlineData(LlmRuntimeAttemptState.Succeeded, "Succeeded")]
+    [InlineData(LlmRuntimeAttemptState.Failed, "Failed")]
+    [InlineData(LlmRuntimeAttemptState.Cancelled, "Cancelled")]
+    public void Status_AttemptState_SerializesAsString(LlmRuntimeAttemptState state, string expected)
+    {
+        var status = new LlmRuntimeStatus(null, false, null) { AttemptState = state };
+
+        var node = JsonSerializer.SerializeToNode(status, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        });
+
+        Assert.Equal(expected, node?["attemptState"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Download_MissingServerAfterExtract_RollsBackAndDoesNotWriteState()
+    {
+        const string oldState = """{"tag":"b100","flavor":"cpu"}""";
+        string oldDir = Path.Combine(_dir, "cpu", "b100");
+        string oldServer = Path.Combine(oldDir, "llama-server.exe");
+        string statePath = Path.Combine(_dir, "runtime.json");
+        Directory.CreateDirectory(oldDir);
+        File.WriteAllText(oldServer, "old-server");
+        File.WriteAllText(statePath, oldState);
+        var manager = new LlamaRuntimeManager(
+            _dir, new HttpClient(new GhHandler(ReleasesJson)),
+            (uri, target, ct) =>
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                using FileStream stream = File.Create(target);
+                using var zip = new ZipArchive(stream, ZipArchiveMode.Create);
+                zip.CreateEntry("readme.txt");
+                return Task.CompletedTask;
+            });
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            manager.DownloadAsync("cpu", TestContext.Current.CancellationToken));
+
+        Assert.Equal("old-server", File.ReadAllText(oldServer));
+        Assert.False(Directory.Exists(Path.Combine(_dir, "cpu", "b200")));
+        Assert.Equal(oldState, File.ReadAllText(statePath));
+        LlmRuntimeStatus status = await manager.GetStatusAsync(TestContext.Current.CancellationToken);
+        Assert.True(status.Installed);
+        Assert.Equal(LlmRuntimeAttemptState.Failed, status.AttemptState);
+        Assert.True(status.DownloadFailed);
     }
 
     [Fact]
