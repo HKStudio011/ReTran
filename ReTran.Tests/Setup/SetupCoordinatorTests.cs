@@ -1321,6 +1321,50 @@ public class SetupCoordinatorTests : IDisposable
         Assert.Equal(SetupCoordinator.MaxRetries + 1, _bridge.LlmRuntimeDownloads.Count);
     }
 
+    [Theory]
+    [InlineData("absent", SetupStep.Done)]
+    [InlineData("null", SetupStep.Failed)]
+    [InlineData("malformed", SetupStep.Failed)]
+    [InlineData("succeeded", SetupStep.Done)]
+    public async Task LlmRuntime_AttemptStatePresence_GatesLegacyCompletion(string wireCase, SetupStep expected)
+    {
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":["Hy-MT2-1.8B-UD-Q4_K_XL"],"steps":{"checking":"done","verifyingfiles":"done","syncing":"done","verifyingsidecar":"done","downloadingmodels":"done","applying":"done"}}""");
+        _bridge.LlmRuntimeTag = "b7000";
+        _bridge.LlmRuntimeLatestTag = "b7234";
+        _bridge.LlmRuntimeStatusFactory = attempt =>
+        {
+            var status = new JsonObject
+            {
+                ["tag"] = "b7000",
+                ["installed"] = true,
+                ["serverPath"] = @"C:\fake\llm\runtime\b7000\llama-server.exe",
+                ["downloadFailed"] = false,
+                ["downloading"] = false,
+                ["attempt"] = attempt,
+            };
+            if (wireCase != "absent")
+            {
+                status["attemptState"] = wireCase switch
+                {
+                    "null" => null,
+                    "malformed" => JsonValue.Create(42),
+                    "succeeded" => JsonValue.Create("Succeeded"),
+                    _ => throw new ArgumentOutOfRangeException(nameof(wireCase)),
+                };
+            }
+            return status;
+        };
+        var coordinator = NewCoordinator(
+            modelPollInterval: TimeSpan.FromMilliseconds(5),
+            modelDownloadTimeout: TimeSpan.FromMilliseconds(50));
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(expected, coordinator.Step);
+        Assert.Equal(expected == SetupStep.Done ? 1 : SetupCoordinator.MaxRetries + 1,
+            _bridge.LlmRuntimeDownloads.Count);
+    }
+
     [Fact]
     public async Task LlmRuntime_Offline_SkipsAsOk()
     {
@@ -2623,6 +2667,9 @@ public class SetupCoordinatorTests : IDisposable
         /// <summary>Attempt state exposed by <c>llm.runtime.status</c>. Trạng thái attempt mà <c>llm.runtime.status</c> phơi ra.</summary>
         public string LlmRuntimeAttemptState { get; set; } = "None";
 
+        /// <summary>Optional full status factory for wire-shape regressions. Factory status đầy đủ tuỳ chọn cho regression về wire shape.</summary>
+        public Func<long, JsonObject>? LlmRuntimeStatusFactory { get; set; }
+
         private long _llmRuntimeAttempt;
 
         /// <summary>Optional <c>downloadFailed</c> flag the fake includes in <c>llm.runtime.status</c>. Cờ <c>downloadFailed</c> tuỳ chọn fake nhúng vào <c>llm.runtime.status</c>.</summary>
@@ -2672,33 +2719,39 @@ public class SetupCoordinatorTests : IDisposable
                 "ocr.models.download" => Download(@params),
                 "ocr.models.set" => SetOcrModelPair(@params),
                 "sidecar.device" => Task.FromResult(DeviceResult),
-                "llm.runtime.status" => Task.FromResult<JsonNode?>(new JsonObject
-                {
-                    ["tag"] = LlmRuntimeInstalled ? "b7234" : null,
-                    ["installed"] = LlmRuntimeInstalled,
-                    ["serverPath"] = LlmRuntimeInstalled
-                        ? @"C:\fake\llm\runtime\b7234\llama-server.exe"
-                        : null,
-                    ["downloadFailed"] = LlmRuntimeDownloadFailed,
-                    ["downloadError"] = LlmRuntimeDownloadFailed ? LlmRuntimeDownloadError : null,
-                    ["downloading"] = LlmRuntimeDownloading,
-                    ["attempt"] = _llmRuntimeAttempt,
-                    ["attemptState"] = LlmRuntimeAttemptState,
-                    ["progress"] = LlmRuntimeProgress is null
-                        ? null
-                        : new JsonObject
-                        {
-                            ["receivedBytes"] = LlmRuntimeProgress.ReceivedBytes,
-                            ["totalBytes"] = LlmRuntimeProgress.TotalBytes,
-                            ["bytesPerSec"] = LlmRuntimeProgress.BytesPerSec,
-                        },
-                }),
+                "llm.runtime.status" => Task.FromResult<JsonNode?>(BuildLlmRuntimeStatus()),
                 "llm.runtime.download" => DownloadLlmRuntime(@params),
                 "llm.runtime.check" => CheckLlmRuntime(@params),
                 "llm.models.list" => Task.FromResult<JsonNode?>(BuildLlmList()),
                 "llm.models.download" => DownloadLlmModel(@params),
                 "llm.models.set" => SetLlmModel(@params),
                 _ => Task.FromResult<JsonNode?>(null),
+            };
+        }
+
+        private JsonObject BuildLlmRuntimeStatus()
+        {
+            if (LlmRuntimeStatusFactory is { } factory) return factory(_llmRuntimeAttempt);
+            return new JsonObject
+            {
+                ["tag"] = LlmRuntimeInstalled ? "b7234" : null,
+                ["installed"] = LlmRuntimeInstalled,
+                ["serverPath"] = LlmRuntimeInstalled
+                    ? @"C:\fake\llm\runtime\b7234\llama-server.exe"
+                    : null,
+                ["downloadFailed"] = LlmRuntimeDownloadFailed,
+                ["downloadError"] = LlmRuntimeDownloadFailed ? LlmRuntimeDownloadError : null,
+                ["downloading"] = LlmRuntimeDownloading,
+                ["attempt"] = _llmRuntimeAttempt,
+                ["attemptState"] = LlmRuntimeAttemptState,
+                ["progress"] = LlmRuntimeProgress is null
+                    ? null
+                    : new JsonObject
+                    {
+                        ["receivedBytes"] = LlmRuntimeProgress.ReceivedBytes,
+                        ["totalBytes"] = LlmRuntimeProgress.TotalBytes,
+                        ["bytesPerSec"] = LlmRuntimeProgress.BytesPerSec,
+                    },
             };
         }
 

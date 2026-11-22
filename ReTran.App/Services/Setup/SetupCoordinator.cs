@@ -1478,6 +1478,8 @@ public sealed class SetupCoordinator
                     // Lỗi của attempt NÀY thắng mọi bản cũ; attempt xếp hàng/đang chạy cũng không
                     // được hoàn tất nhờ binary cũ.
                     string? attemptState = ReadString(status, "attemptState");
+                    bool attemptStatePresent = status is JsonObject statusObj
+                        && statusObj.ContainsKey("attemptState");
                     if (attemptState == "Cancelled")
                     {
                         throw new OperationCanceledException("llm runtime download was cancelled");
@@ -1488,7 +1490,11 @@ public sealed class SetupCoordinator
                         throw new InvalidOperationException("llm runtime download failed (reported by status)");
                     }
                     bool committed = attemptState == "Succeeded";
-                    bool legacyComplete = attemptState is null && !IsLlmRuntimeDownloading(status);
+                    // Only a genuinely absent field identifies legacy Core; present null/wrong-type data
+                    // is schema drift and must never complete from an old binary.
+                    // Chỉ field thật sự vắng mới nhận diện Core cũ; null/sai kiểu là schema drift và
+                    // không bao giờ được hoàn tất nhờ binary cũ.
+                    bool legacyComplete = !attemptStatePresent && !IsLlmRuntimeDownloading(status);
                     if ((committed || legacyComplete) && IsLlmRuntimeInstalled(status)) break;
                     // Tiến độ tải zip runtime (spec vòng 2 §9): status có `progress` → đưa vào snapshot
                     // và PUBLISH — không publish thì UI không bao giờ vẽ lại dòng % + ETA.
