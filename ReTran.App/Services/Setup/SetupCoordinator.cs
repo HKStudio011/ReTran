@@ -191,6 +191,7 @@ public sealed class SetupCoordinator
     private bool _selectionPersistenceFailed;
     private ModelDeletionIntent? _deletionIntent;
     private bool _deletionJournalUnreadable;
+    private bool _deletionSettingsWritten;
     private int _running; // 0 idle / 1 a run is in progress (Interlocked) - guards against double starts
     private SetupCheckItem[] _checks = []; // snapshot checklist Checking - thay nguyên khối mỗi event
     private SetupDownloadInfo[] _downloads = []; // snapshot tiến độ tải - thay nguyên khối mỗi poll
@@ -874,6 +875,7 @@ public sealed class SetupCoordinator
                 $"Model deletion '{existing.Name}' still requires repair; cannot start '{name}'.");
 
         _deletionIntent = new ModelDeletionIntent(name, [.. installed], [.. engineActive]);
+        _deletionSettingsWritten = false;
         _selectionPersistenceFailed = true;
         SkippedForSession = false;
         Error = null;
@@ -922,11 +924,19 @@ public sealed class SetupCoordinator
             _state.Save();
             target = "settings.json";
             _settings.Save(updatedSettings);
+            _deletionSettingsWritten = true;
             if (updatedSetup.IsComplete)
             {
                 target = "setup.json";
                 _state = _state with { IsComplete = true };
                 _state.Save();
+            }
+
+            target = "setup.json/settings.json";
+            if (_deletionIntent is { } intent
+                && !DeletionStateConsistent(intent, requireCompleteAnswers: false))
+            {
+                throw new InvalidOperationException("Model deletion state is still inconsistent.");
             }
 
             target = "model-deletion.json";
@@ -955,6 +965,7 @@ public sealed class SetupCoordinator
             }
 
             _deletionIntent = intent;
+            _deletionSettingsWritten = false;
             _selectionPersistenceFailed = true;
             SkippedForSession = false;
             (SetupState updatedSetup, _) = SetupModelSelection.AfterDelete(
@@ -996,9 +1007,12 @@ public sealed class SetupCoordinator
 
     private void ClearDeletionIntent()
     {
+        if (_deletionIntent is not null && !_deletionSettingsWritten)
+            throw new InvalidOperationException("Cannot clear deletion intent before settings.json is written.");
         File.Delete(_deletionJournalPath);
         _deletionIntent = null;
         _deletionJournalUnreadable = false;
+        _deletionSettingsWritten = false;
         _selectionPersistenceFailed = false;
     }
 
@@ -1063,13 +1077,21 @@ public sealed class SetupCoordinator
             //     (BA review 2026-11-17: the LLM half of reconcile);
             //   • Syncing: the real frozen sync validates/repairs the venv and picks up shipped
             //     pyproject/lock changes (BA 2026-11-17 — user directive: always run).
+            // Applying also always runs while a deletion journal exists: an old done marker can never
+            // substitute for the successful settings write required before journal cleanup.
             // Ba bước LUÔN thực thi khi tới lượt — phần bên trong tự bỏ qua phần đắt:
             //   • hai bước tải: GGUF/runtime bị xoá sau khi hoàn tất sẽ được tải bù ở lượt kế, marker
             //     done của phiên cũ không bao giờ che mất artifact còn thiếu (review BA 2026-11-17:
             //     nửa LLM của reconcile);
             //   • Syncing: frozen sync thật xác minh/sửa venv và nhận pyproject/lock mới theo bản
             //     cập nhật (BA 2026-11-17 — chỉ đạo của user: luôn chạy).
-            if (IsStepDone(step) && step is not (SetupStep.DownloadingModels or SetupStep.DownloadingLlmRuntime or SetupStep.Syncing)) continue;
+            bool deletionNeedsSettingsWrite = step == SetupStep.Applying && _deletionIntent is not null;
+            if (IsStepDone(step)
+                && step is not (SetupStep.DownloadingModels or SetupStep.DownloadingLlmRuntime or SetupStep.Syncing)
+                && !deletionNeedsSettingsWrite)
+            {
+                continue;
+            }
 
             StepOutcome outcome = await RunStepAsync(step, ct).ConfigureAwait(false);
             if (outcome != StepOutcome.Done) return; // Paused or Failed — state already set by the step
@@ -1776,6 +1798,7 @@ public sealed class SetupCoordinator
                             ? string.Empty
                             : settings.LlmActiveModel),
                 });
+                if (_deletionIntent is not null) _deletionSettingsWritten = true;
 
                 await _bridge
                     .CallAsync("ocr.models.set", new JsonObject { ["det"] = det, ["rec"] = rec }, ct)
@@ -1923,24 +1946,31 @@ public sealed class SetupCoordinator
         Publish();
     }
 
-    private bool DeletionStateConsistent(ModelDeletionIntent intent)
+    private bool DeletionStateConsistent(
+        ModelDeletionIntent intent, bool requireCompleteAnswers = true)
     {
-        if (!SetupModelSelection.HasCompleteAnswers(_state)) return false;
+        bool completeAnswers = SetupModelSelection.HasCompleteAnswers(_state);
+        if (requireCompleteAnswers && !completeAnswers) return false;
         AppSettings settings = _settings.Load();
-        (string det, string rec) = OcrModelChoices.ExpectedPair(
-            _state.ActiveDet!, _state.ActiveLang, _state.ActiveRec!);
-        if (settings.OcrDet != det || settings.OcrRec != rec) return false;
-        if (_state.LlmModels is { Count: 0 } && !string.IsNullOrEmpty(settings.LlmActiveModel)) return false;
         if (settings.LlmActiveModel == intent.Name) return false;
         if (_state.ActiveDet == intent.Name || _state.ActiveRec == intent.Name
             || _state.ActiveLang == intent.Name || _state.ActiveLlm == intent.Name)
         {
             return false;
         }
-        return !ContainsModel(_state.Dets, intent.Name)
-            && !ContainsModel(_state.Recs, intent.Name)
-            && !ContainsModel(_state.Langs, intent.Name)
-            && !ContainsModel(_state.LlmModels, intent.Name);
+        if (ContainsModel(_state.Dets, intent.Name)
+            || ContainsModel(_state.Recs, intent.Name)
+            || ContainsModel(_state.Langs, intent.Name)
+            || ContainsModel(_state.LlmModels, intent.Name))
+        {
+            return false;
+        }
+        if (!completeAnswers) return true;
+
+        (string det, string rec) = OcrModelChoices.ExpectedPair(
+            _state.ActiveDet!, _state.ActiveLang, _state.ActiveRec!);
+        if (settings.OcrDet != det || settings.OcrRec != rec) return false;
+        return _state.LlmModels is not { Count: 0 } || string.IsNullOrEmpty(settings.LlmActiveModel);
 
         static bool ContainsModel(List<string>? names, string name) =>
             names?.Contains(name, StringComparer.Ordinal) == true;
@@ -1950,7 +1980,8 @@ public sealed class SetupCoordinator
     {
         if (_deletionJournalUnreadable
             || (_selectionPersistenceFailed && _deletionIntent is null)
-            || (_deletionIntent is { } intent && !DeletionStateConsistent(intent)))
+            || (_deletionIntent is { } intent
+                && (!_deletionSettingsWritten || !DeletionStateConsistent(intent))))
         {
             // Never clear a deletion failure by skipping Applying through an old marker.
             _state = _state with { IsComplete = false };

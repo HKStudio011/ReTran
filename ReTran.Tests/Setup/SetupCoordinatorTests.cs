@@ -2305,6 +2305,54 @@ public class SetupCoordinatorTests : IDisposable
         Assert.DoesNotContain(deleted, _bridge.LlmDownloaded);
     }
 
+    [Fact]
+    public async Task Retry_DefaultReplacement_RequiresSuccessfulSettingsWriteBeforeJournalClear()
+    {
+        string replacement = AppSettings.Default.LlmActiveModel;
+        string deleted = FakeCoreBridge.LlmCatalogNames[1];
+        WriteCompleteSetup(llmModels: [deleted, replacement], activeLlm: deleted);
+        _settings.Save(AppSettings.Default with
+        {
+            OcrDet = FakeCoreBridge.DetModel,
+            OcrRec = FakeCoreBridge.RecModel,
+            LlmActiveModel = deleted,
+        });
+        _bridge.Installed.Add(FakeCoreBridge.DetModel);
+        _bridge.Installed.Add(FakeCoreBridge.RecModel);
+        var coordinator = NewCoordinator();
+        int settingsWrites = 0;
+        _settings.Changed += () => settingsWrites++;
+        File.Delete(_settingsJson);
+        Directory.CreateDirectory(_settingsJson);
+        Assert.Throws<InvalidOperationException>(() => coordinator.RemoveDeletedModel(
+            deleted,
+            [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel, replacement],
+            [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel, replacement]));
+
+        await coordinator.RetryAsync(TestContext.Current.CancellationToken);
+
+        Assert.False(coordinator.IsComplete);
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+        Assert.True(File.Exists(_deletionJson));
+        Assert.Equal(0, settingsWrites);
+
+        Directory.Delete(_settingsJson, recursive: true);
+        _settings.Save(AppSettings.Default with
+        {
+            OcrDet = FakeCoreBridge.DetModel,
+            OcrRec = FakeCoreBridge.RecModel,
+            LlmActiveModel = deleted,
+        });
+        settingsWrites = 0;
+        await coordinator.RetryAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.True(settingsWrites > 0);
+        Assert.Equal(replacement, _settings.Load().LlmActiveModel);
+        Assert.NotEqual(deleted, _settings.Load().LlmActiveModel);
+        Assert.False(File.Exists(_deletionJson));
+    }
+
     // ── fakes ─────────────────────────────────────────────────────────────────────────────────────
 
     private sealed class FakeAdapters(VideoAdapterInfo[] items) : IVideoAdapterSource
