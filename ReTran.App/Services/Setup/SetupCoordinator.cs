@@ -443,6 +443,8 @@ public sealed class SetupCoordinator
     /// </summary>
     /// <param name="force">Bypasses the complete-state short-circuit and clears step markers while preserving valid answers for repair. Bỏ qua nhánh tắt hoàn tất và xoá marker bước nhưng giữ câu trả lởi hợp lệ để sửa.</param>
     /// <param name="ct">Cancellation token; cancelling aborts the run (state is left where it was). Token hủy; hủy sẽ dừng lượt chạy (state giữ nguyên ở chỗ nó đang ở).</param>
+    /// <remarks>Unexpected faults are logged and published as <see cref="SetupStep.Failed"/> before the run lock is released. Lỗi không mong đợi được ghi log và publish ở <see cref="SetupStep.Failed"/> trước khi nhả khóa lượt chạy.</remarks>
+    /// <exception cref="OperationCanceledException">Thrown when the run is canceled; cancellation is not converted to a failure. Ném khi lượt chạy bị hủy; hủy không bị chuyển thành lỗi.</exception>
     public async Task StartAsync(bool force = false, CancellationToken ct = default)
     {
         if (!TryBeginRun()) return;
@@ -542,6 +544,14 @@ public sealed class SetupCoordinator
             }
 
             await ContinueAfterAnswersAsync(ct);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            SetupStep failedStep = Step == SetupStep.Failed ? _lastFailedStep : Step;
+            _logger?.LogError(ex, "setup: run faulted at {Step}", failedStep);
+            Error = SetupMessage.Of("setup.fail.unexpected", ex.Message);
+            EnterFailed(failedStep);
         }
         finally
         {
@@ -1614,13 +1624,15 @@ public sealed class SetupCoordinator
     /// catalog reports installed (a <c>.partial</c> model counts as not installed — the sidecar
     /// re-downloads it idempotently), then polls <c>ocr.models.list</c> every
     /// <see cref="_modelPollInterval"/> until ALL needed models are installed or the
-    /// <see cref="_modelDownloadTimeout"/> window elapses (a fresh attempt follows).
+    /// <see cref="_modelDownloadTimeout"/> window elapses (a fresh attempt follows). A needed model
+    /// reporting <c>downloadError</c> while idle ends its attempt immediately after the progress snapshot.
     /// DownloadingModels: tải mọi model mà câu trả lời đã lưu cần — cặp det+rec của từng tier được
     /// tick, rec legacy của ngôn ngữ chính khi ngoài phủ v6, và rec legacy của từng ngôn ngữ bổ sung
     /// (<see cref="OcrModelChoices.NeededModels"/>) — bỏ qua model catalog báo đã cài (model có
     /// <c>.partial</c> coi như chưa cài — sidecar tải lại idempotent), rồi poll <c>ocr.models.list</c>
     /// mỗi <see cref="_modelPollInterval"/> cho tới khi MỌI model cần đều installed hoặc hết cửa sổ
-    /// <see cref="_modelDownloadTimeout"/> (lượt thử mới sẽ chạy).
+    /// <see cref="_modelDownloadTimeout"/> (lượt thử mới sẽ chạy). Model cần tải báo <c>downloadError</c>
+    /// khi đã dừng sẽ kết thúc lượt thử ngay sau khi snapshot tiến độ được publish.
     /// </summary>
     private async Task<StepOutcome> RunDownloadModelsStepAsync(CancellationToken ct)
     {
@@ -1661,9 +1673,10 @@ public sealed class SetupCoordinator
                     var downloads = new List<SetupDownloadInfo>(ParseDownloads(list, "catalog"));
 
                     bool llmDone = true;
+                    JsonNode? llmList = null;
                     if (llmNeeded.Count > 0)
                     {
-                        JsonNode? llmList = await _bridge.CallAsync("llm.models.list", null, ct).ConfigureAwait(false);
+                        llmList = await _bridge.CallAsync("llm.models.list", null, ct).ConfigureAwait(false);
                         llmDone = llmNeeded.All(name => IsInstalledInLlmCatalog(llmList, name));
                         downloads.AddRange(ParseDownloads(llmList, null));
                     }
@@ -1679,6 +1692,15 @@ public sealed class SetupCoordinator
                         Total = needed.Contains(d.Name) ? needed.Count : 0,
                     })];
                     Publish();
+                    if (SetupModelSelection.FindFailedDownload(list, "catalog", needed) is { } ocrFailure)
+                        throw new InvalidOperationException(
+                            $"OCR model '{ocrFailure.Name}' download failed: {ocrFailure.Error}");
+                    if (llmNeeded.Count > 0
+                        && SetupModelSelection.FindFailedDownload(llmList, null, llmNeeded) is { } llmFailure)
+                    {
+                        throw new InvalidOperationException(
+                            $"LLM model '{llmFailure.Name}' download failed: {llmFailure.Error}");
+                    }
                     if (ocrDone && llmDone) break;
                     await Task.Delay(_modelPollInterval, window.Token).ConfigureAwait(false);
                 }

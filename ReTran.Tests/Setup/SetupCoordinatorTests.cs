@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.Extensions.Logging;
 using ReTran_App.Services;
 using ReTran_App.Services.Setup;
 
@@ -115,7 +116,9 @@ public class SetupCoordinatorTests : IDisposable
         Func<string, bool>? modelDirExists = null,
         Func<string, string>? readText = null,
         string? llmRoot = null,
-        string? deletionJournalPath = null)
+        string? deletionJournalPath = null,
+        TimeSpan? modelPollInterval = null,
+        ILogger<SetupCoordinator>? logger = null)
     {
         var coordinator = new SetupCoordinator(
             adapters ?? Adapters(NvidiaCurrent),
@@ -132,8 +135,9 @@ public class SetupCoordinatorTests : IDisposable
             readText: readText ?? ReadArtifactText,
             llmRoot: llmRoot,
             deletionJournalPath: deletionJournalPath ?? _deletionJson,
-            modelPollInterval: TimeSpan.FromMilliseconds(10),
-            modelDownloadTimeout: modelDownloadTimeout ?? TimeSpan.FromSeconds(5));
+            modelPollInterval: modelPollInterval ?? TimeSpan.FromMilliseconds(10),
+            modelDownloadTimeout: modelDownloadTimeout ?? TimeSpan.FromSeconds(5),
+            logger: logger);
         coordinator.Changed += () => Interlocked.Increment(ref _changedCount);
         return coordinator;
     }
@@ -2353,6 +2357,74 @@ public class SetupCoordinatorTests : IDisposable
         Assert.False(File.Exists(_deletionJson));
     }
 
+    // ── Task 3: observable setup faults and fail-fast model downloads ─────────────────────────────
+
+    [Fact]
+    public async Task StartAsync_SaveFault_PublishesFailedAndReleasesRun()
+    {
+        // A directory at setup.json makes the real atomic Save fail when it tries to replace that path.
+        Directory.CreateDirectory(_setupJson);
+        var logger = new RecordingLogger<SetupCoordinator>();
+        var coordinator = NewCoordinator(logger: logger);
+        SetupMessage? publishedError = null;
+        bool? runningAtFailurePublish = null;
+        coordinator.Changed += () =>
+        {
+            if (coordinator.Step != SetupStep.Failed) return;
+            publishedError = coordinator.Error;
+            runningAtFailurePublish = coordinator.IsRunning;
+        };
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+        Assert.Equal("setup.fail.unexpected", coordinator.Error?.Key);
+        Assert.NotEqual("setup.fail.unexpected", Text(coordinator.Error));
+        Assert.NotNull(publishedError);
+        Assert.Equal(true, runningAtFailurePublish); // Failed is observable before EndRun releases the button.
+        Assert.False(coordinator.IsRunning);
+        Assert.Contains(logger.Entries, entry => entry.Level == LogLevel.Error && entry.Exception is not null);
+    }
+
+    [Fact]
+    public async Task DownloadModels_DownloadError_FailsAttemptImmediately()
+    {
+        WriteCompleteSetup();
+        _bridge.OcrDownloadErrors[FakeCoreBridge.DetModel] = "fake background download failed";
+        var coordinator = NewCoordinator(
+            modelPollInterval: TimeSpan.FromMinutes(1),
+            modelDownloadTimeout: TimeSpan.FromMinutes(1));
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+
+        await coordinator.StartAsync(force: true, deadline.Token);
+
+        Assert.False(deadline.IsCancellationRequested); // no poll-interval or 60-minute wait after the failure
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+        Assert.Equal("setup.fail.models", coordinator.Error?.Key);
+        Assert.Equal(SetupCoordinator.MaxRetries + 1,
+            _bridge.Downloaded.Count(name => name == FakeCoreBridge.DetModel));
+        Assert.Equal(1, _bridge.Downloaded.Count(name => name == FakeCoreBridge.RecModel));
+        Assert.False(coordinator.IsRunning);
+    }
+
+    private sealed class RecordingLogger<T> : ILogger<T>
+    {
+        public List<(LogLevel Level, Exception? Exception)> Entries { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            Entries.Add((logLevel, exception));
+    }
+
     // ── fakes ─────────────────────────────────────────────────────────────────────────────────────
 
     private sealed class FakeAdapters(VideoAdapterInfo[] items) : IVideoAdapterSource
@@ -2434,6 +2506,9 @@ public class SetupCoordinatorTests : IDisposable
         public HashSet<string> Installed { get; } = [];
 
         public List<string> Downloaded { get; } = [];
+
+        /// <summary>Failed idle OCR downloads exposed by the catalog. Các lượt tải OCR đã dừng và báo lỗi trong catalog.</summary>
+        public Dictionary<string, string> OcrDownloadErrors { get; } = new(StringComparer.Ordinal);
 
         /// <summary>OCR pairs accepted via ocr.models.set, in order. Cặp OCR nhận qua ocr.models.set, theo thứ tự.</summary>
         public List<(string Det, string Rec)> OcrSetCalls { get; } = [];
@@ -2558,7 +2633,8 @@ public class SetupCoordinatorTests : IDisposable
         {
             string name = @params!["name"]!.GetValue<string>();
             Downloaded.Add(name);
-            Installed.Add(name); // the fake "download" completes immediately
+            if (!OcrDownloadErrors.ContainsKey(name))
+                Installed.Add(name); // the fake "download" completes immediately unless it failed in the background
             return Task.FromResult<JsonNode?>(new JsonObject { ["accepted"] = true });
         }
 
@@ -2643,6 +2719,8 @@ public class SetupCoordinatorTests : IDisposable
                     ["name"] = name,
                     ["kind"] = name.EndsWith("det", StringComparison.Ordinal) ? "det" : "rec",
                     ["installed"] = Installed.Contains(name),
+                    ["downloading"] = false,
+                    ["downloadError"] = OcrDownloadErrors.TryGetValue(name, out string? error) ? error : null,
                 });
             }
 

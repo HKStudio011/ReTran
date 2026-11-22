@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using ReTran_App.Services;
 
 namespace ReTran_App.Services.Setup;
@@ -32,6 +33,62 @@ public static class SetupModelSelection
             && (state.ActiveLlm is null
                 || state.LlmModels.Contains(state.ActiveLlm, StringComparer.Ordinal));
     }
+
+    /// <summary>
+    /// Finds the first needed model whose catalog entry reports a failed download that is no longer running.
+    /// Tìm model cần tải đầu tiên có entry catalog báo lỗi tải và không còn đang chạy.
+    /// </summary>
+    /// <param name="list">OCR or LLM catalog response. Phản hồi catalog OCR hoặc LLM.</param>
+    /// <param name="arrayKey">Property containing OCR entries, or <see langword="null"/> for a flat LLM array. Thuộc tính chứa các entry OCR, hoặc <see langword="null"/> cho mảng LLM phẳng.</param>
+    /// <param name="needed">Model names required by the current Setup answers. Tên các model mà câu trả lởi Setup hiện tại cần.</param>
+    /// <returns>The model name and catalog error, or <see langword="null"/> when no needed failed download is idle. Tên model và lỗi catalog, hoặc <see langword="null"/> khi không có model cần tải nào đã dừng với lỗi.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="needed"/> is null. Ném khi <paramref name="needed"/> là null.</exception>
+    public static (string Name, string Error)? FindFailedDownload(
+        JsonNode? list,
+        string? arrayKey,
+        IReadOnlyCollection<string> needed)
+    {
+        ArgumentNullException.ThrowIfNull(needed);
+        JsonArray? entries = arrayKey is null
+            ? list as JsonArray
+            : (list as JsonObject)?[arrayKey] as JsonArray;
+        if (entries is null) return null;
+
+        foreach (JsonNode? entry in entries)
+        {
+            if (entry is not JsonObject model
+                || model["name"] is not JsonValue nameValue
+                || !nameValue.TryGetValue<string>(out string? name)
+                || !needed.Contains(name, StringComparer.Ordinal))
+            {
+                continue;
+            }
+
+            bool downloading = model["downloading"] is JsonValue downloadingValue
+                && downloadingValue.TryGetValue<bool>(out bool isDownloading)
+                && isDownloading;
+            if (downloading
+                || model["downloadError"] is not JsonValue errorValue
+                || !errorValue.TryGetValue<string>(out string? error)
+                || string.IsNullOrWhiteSpace(error))
+            {
+                continue;
+            }
+
+            return (name, error);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Returns whether the user may explicitly continue from the optional LLM catalog step.
+    /// Trả về user có thể chủ động tiếp tục từ bước catalog LLM tuỳ chọn hay không.
+    /// </summary>
+    /// <param name="busy">Whether another Setup action is running. Một thao tác Setup khác đang chạy hay không.</param>
+    /// <param name="loading">Whether the catalog request is still in flight. Request catalog còn đang chạy hay không.</param>
+    /// <returns><see langword="true"/> only when neither busy nor loading. <see langword="true"/> chỉ khi không bận và không đang tải.</returns>
+    public static bool CanContinueLlm(bool busy, bool loading) => !busy && !loading;
 
     /// <summary>
     /// Checks only the artifacts required by the saved selections, without spawning a process or using the network.

@@ -255,14 +255,18 @@
                        động; chấm "Dùng chính" = bản chạy; trống ⇒ bỏ qua bước tải runtime llama.cpp. *@
                     <p class="text-sm text-surface">@(L["setup.llm.title"]) <span class="rt-hint">@(L["setup.llm.hint"])</span></p>
                     <p class="setup-hintline">@(L["setup.llm.note"])</p>
-                    @if (_llmLoadFailed)
+                    @if (_llmLoading)
+                    {
+                        <p class="setup-hintline"><span class="rt-spinner" aria-hidden="true"></span> @(L["setup.llm.loading"])</p>
+                    }
+                    else if (_llmLoadFailed)
                     {
                         <p class="setup-warn">@(L["setup.llm.loadFailed"])</p>
-                        <button type="button" class="rt-btn" @onclick="ReloadLlmAsync">@(L["setup.error.retry"])</button>
+                        <button type="button" class="rt-btn" disabled="@_busy" @onclick="ReloadLlmAsync">@(L["setup.error.retry"])</button>
                     }
                     else if (_llmModelsList.Count == 0)
                     {
-                        <p class="setup-hintline">@(L["setup.llm.loading"])</p>
+                        <p class="setup-hintline">@(L["setup.llm.empty"])</p>
                     }
                     @foreach (IGrouping<string, LlmModelInfo> group in _llmModelsList.GroupBy(m => m.SizeClass))
                     {
@@ -304,11 +308,11 @@
                         <p class="setup-hintline">@(L["setup.llm.noDownload"])</p>
                     }
                     <p class="setup-total">@(L.Fmt("setup.models.total", FormatMb(LlmTotalMb())))</p>
-                    @* Disable khi danh sách đang nạp: 1 click lúc list rỗng = trả lời rỗng ⇒ bước 4
-                       không bao giờ được hỏi lại (BA review 17-11). Khi loadFailed, trả lời trống vẫn hợp lệ. *@
+                    @* Chặn Continue khi danh sách đang nạp: 1 click lúc list rỗng = trả lời rỗng ⇒ bước 4
+                       không bao giờ được hỏi lại (BA review 17-11). Loaded-empty/loadFailed: trả lời trống vẫn hợp lệ. *@
                     <button type="button" class="rt-btn rt-btn-primary"
-                            disabled="@(_busy || (!_llmLoadFailed && _llmModelsList.Count == 0))"
-                            @onclick="ConfirmLlmModelsAsync">@(L["setup.next"])</button>
+                            disabled="@(!SetupModelSelection.CanContinueLlm(_busy, _llmLoading))"
+                            @onclick="ConfirmLlmModelsAsync">@(L[!_llmLoading && (_llmLoadFailed || _llmModelsList.Count == 0) ? "setup.llm.skip" : "setup.next"])</button>
                     break;
 
                 case SetupStep.ConfirmingFlavorSwitch:
@@ -424,6 +428,7 @@
     private string? _activeLangPick;
     private readonly Dictionary<string, string> _langVariantPick = new(StringComparer.Ordinal);
     private bool _llmInit;
+    private bool _llmLoading;
     private IReadOnlyList<LlmModelInfo> _llmModelsList = [];
     private bool _llmLoadFailed;
     private List<string> _llmTicks = [];
@@ -689,8 +694,15 @@
     // hiện "không đọc được danh sách" nhưng không chặn bước (để trống vẫn hợp lệ).
     private async Task EnsureLlmStateAsync()
     {
-        if (_llmInit) return;
+        if (_llmInit || _llmLoading) return;
         _llmInit = true;
+        _llmLoading = true;
+        _llmLoadFailed = false;
+        _llmModelsList = [];
+        _llmTicks = [];
+        _llmLocked = [];
+        _activeLlmPick = null;
+        await InvokeAsync(StateHasChanged);
         try
         {
             _llmModelsList = await Pipeline.ListLlmModelsAsync(CancellationToken.None);
@@ -698,19 +710,18 @@
         }
         catch (Exception ex)
         {
+            _llmLoading = false;
             _llmModelsList = [];
             _llmLoadFailed = true;
-            _llmInit = false; // nút "Thử lại" đọc lại được
+            // Giữ trạng thái loadFailed; chỉ nút Retry mới được phép phát request kế tiếp.
             Logger.LogWarning(ex, "setup-modal: đọc danh sách LLM từ Core thất bại");
             await InvokeAsync(StateHasChanged);
             return;
         }
 
+        _llmLoading = false;
         try
         {
-            _llmTicks = [];
-            _llmLocked = [];
-            _activeLlmPick = null;
             if (_llmModelsList.Count > 0)
             {
                 (IReadOnlyList<string> ticked, IReadOnlyList<string> locked, string? active) =
@@ -759,7 +770,7 @@
 
     private async Task ConfirmLlmModelsAsync()
     {
-        if (_busy) return;
+        if (!SetupModelSelection.CanContinueLlm(_busy, _llmLoading)) return;
         _busy = true;
         try
         {
