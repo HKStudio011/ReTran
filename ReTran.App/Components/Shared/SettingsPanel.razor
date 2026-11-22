@@ -879,7 +879,6 @@
         _ocrBusy = true;
         try
         {
-            await Pipeline.DeleteOcrModelAsync(model.Name, CancellationToken.None);
             string[] installed = (_ocrModels ?? [])
                 .Where(candidate => candidate.Installed && candidate.Name != model.Name)
                 .Select(candidate => candidate.Name)
@@ -888,6 +887,8 @@
                 .Where(candidate => candidate.InUse && candidate.Name != model.Name)
                 .Select(candidate => candidate.Name)
                 .ToArray();
+            Setup.BeginModelDeletion(model.Name, installed, engineActive);
+            await Pipeline.DeleteOcrModelAsync(model.Name, CancellationToken.None);
             Setup.RemoveDeletedModel(model.Name, installed, engineActive);
             AppSettings synchronized = SettingsStore.Load();
             _ocrDetPick = synchronized.OcrDet;
@@ -1353,7 +1354,6 @@
         _llmModelsBusy = true;
         try
         {
-            await Pipeline.DeleteLlmModelAsync(model.Name, CancellationToken.None);
             string[] installed = (_llmModels ?? [])
                 .Where(candidate => candidate.Installed && candidate.Name != model.Name)
                 .Select(candidate => candidate.Name)
@@ -1362,6 +1362,8 @@
                 .Where(candidate => candidate.InUse && candidate.Name != model.Name)
                 .Select(candidate => candidate.Name)
                 .ToArray();
+            Setup.BeginModelDeletion(model.Name, installed, engineActive);
+            await Pipeline.DeleteLlmModelAsync(model.Name, CancellationToken.None);
             Setup.RemoveDeletedModel(model.Name, installed, engineActive);
             AppSettings synchronized = SettingsStore.Load();
             _llmActiveModel = synchronized.LlmActiveModel;

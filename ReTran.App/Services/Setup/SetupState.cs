@@ -176,11 +176,11 @@ public sealed record SetupState(
     }
 
     /// <summary>
-    /// Whether the setup modal must run: the wizard has not finished, or the artifacts it produced are
-    /// gone from disk (deleted, overwritten by a fresh extraction). Cheap by design — only file and
-    /// directory checks, never a Python probe.
-    /// Wizard có phải chạy lại hay không: wizard chưa xong, hoặc các thư mục nó tạo ra đã biến mất trên
-    /// đĩa (bị xoá, hoặc giải nén đè). Cố ý rẻ — chỉ kiểm tra file/thư mục, không probe Python.
+    /// Whether the setup modal must run: the wizard has not finished, or selected artifacts are gone.
+    /// Cheap by design — file/directory probes plus reading and parsing the active runtime.json;
+    /// it never spawns Python/Core or uses the network.
+    /// Wizard có phải chạy lại hay không: wizard chưa xong hoặc artifact đã chọn đã biến mất. Preflight
+    /// rẻ gồm probe file/thư mục và đọc/parse runtime.json active; không spawn Python/Core hoặc dùng mạng.
     /// </summary>
     /// <param name="state">State loaded from <c>setup.json</c>. Trạng thái đọc từ <c>setup.json</c>.</param>
     /// <param name="venvPythonExe">Sidecar venv interpreter to test for existence. Đường dẫn interpreter venv sidecar cần kiểm tra.</param>

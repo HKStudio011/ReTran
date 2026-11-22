@@ -851,7 +851,8 @@
         }
     }
 
-    // [Bỏ qua thiết lập] — ẩn wizard tới hết phiên + mở gate; modal tự ẩn qua điều kiện render.
+    // [Bỏ qua thiết lập] — ẩn wizard/mở gate chỉ khi không có deletion journal fail-closed;
+    // Coordinator giữ cờ skip=false cho tới khi setup.json + settings.json nhất quán.
     private void ConfirmSkipForSession()
     {
         if (_busy) return;

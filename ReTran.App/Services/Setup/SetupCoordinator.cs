@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
 
@@ -147,6 +148,12 @@ public sealed class SetupCoordinator
 
     private static readonly TimeSpan DefaultModelPollInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DefaultModelDownloadTimeout = TimeSpan.FromMinutes(60);
+    private static readonly JsonSerializerOptions DeletionJournalJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true,
+        WriteIndented = true,
+    };
 
     // Pipeline steps in order; Checking and the pre-pipeline answers (det/rec models, languages, LLM)
     // run before it, Done after it.
@@ -175,12 +182,15 @@ public sealed class SetupCoordinator
     private readonly Func<string, bool> _modelDirExists;
     private readonly Func<string, string> _readText;
     private readonly string _llmRoot;
+    private readonly string _deletionJournalPath;
     private readonly TimeSpan _modelPollInterval;
     private readonly TimeSpan _modelDownloadTimeout;
     private readonly ILogger<SetupCoordinator>? _logger;
 
     private SetupState _state;
     private bool _selectionPersistenceFailed;
+    private ModelDeletionIntent? _deletionIntent;
+    private bool _deletionJournalUnreadable;
     private int _running; // 0 idle / 1 a run is in progress (Interlocked) - guards against double starts
     private SetupCheckItem[] _checks = []; // snapshot checklist Checking - thay nguyên khối mỗi event
     private SetupDownloadInfo[] _downloads = []; // snapshot tiến độ tải - thay nguyên khối mỗi poll
@@ -220,6 +230,7 @@ public sealed class SetupCoordinator
     /// <param name="modelDirExists">Installed-probe for one model directory under the models cache, used by the rerun reconcile; defaults to <see cref="IsModelDirInstalled"/> (the sidecar's strict rule — non-empty dir, no <c>.partial</c> marker). Probe "đã cài" cho thư mục của một model trong cache model, dùng bởi reconcile khi chạy lại; mặc định <see cref="IsModelDirInstalled"/> (luật nghiêm của sidecar — thư mục không rỗng, không có marker <c>.partial</c>).</param>
     /// <param name="readText">Text-read seam for selected-artifact JSON preflight; defaults to <see cref="File.ReadAllText"/>. Seam đọc text cho preflight JSON artifact đã chọn; mặc định <see cref="File.ReadAllText"/>.</param>
     /// <param name="llmRoot">Local LLM root for artifact preflight; defaults to <see cref="SetupPaths.LlmRoot"/>. Thư mục gốc LLM local cho preflight artifact; mặc định <see cref="SetupPaths.LlmRoot"/>.</param>
+    /// <param name="deletionJournalPath">Persistent model-deletion intent journal path; defaults to <see cref="SetupPaths.ModelDeletionJsonPath"/>. Đường dẫn journal intent xoá model bền; mặc định <see cref="SetupPaths.ModelDeletionJsonPath"/>.</param>
     /// <param name="modelPollInterval">Delay between <c>ocr.models.list</c> polls while models download; default 2 s. Khoảng cách giữa các lần poll <c>ocr.models.list</c> khi đang tải model; mặc định 2 s.</param>
     /// <param name="modelDownloadTimeout">Total window per download attempt; default 60 min. Cửa sổ tổng cho mỗi lượt tải; mặc định 60 phút.</param>
     /// <param name="logger">DI logger, or <see langword="null"/> to log nothing. Logger DI, hoặc <see langword="null"/> để không ghi log.</param>
@@ -238,6 +249,7 @@ public sealed class SetupCoordinator
         Func<string, bool>? modelDirExists = null,
         Func<string, string>? readText = null,
         string? llmRoot = null,
+        string? deletionJournalPath = null,
         TimeSpan? modelPollInterval = null,
         TimeSpan? modelDownloadTimeout = null,
         ILogger<SetupCoordinator>? logger = null)
@@ -263,10 +275,12 @@ public sealed class SetupCoordinator
         _modelDirExists = modelDirExists ?? IsModelDirInstalled;
         _readText = readText ?? File.ReadAllText;
         _llmRoot = llmRoot ?? SetupPaths.LlmRoot;
+        _deletionJournalPath = deletionJournalPath ?? SetupPaths.ModelDeletionJsonPath;
         _modelPollInterval = modelPollInterval ?? DefaultModelPollInterval;
         _modelDownloadTimeout = modelDownloadTimeout ?? DefaultModelDownloadTimeout;
         _logger = logger;
         _state = _stateFactory();
+        RestoreDeletionIntent();
 
         // A fresh launch on an already-set-up machine must not leave the singleton stuck at Checking:
         // SetupModal's cheap path (NeedsSetup false) never calls StartAsync, and both the pipeline gate
@@ -276,7 +290,7 @@ public sealed class SetupCoordinator
         // của SetupModal (NeedsSetup false) không bao giờ gọi StartAsync, và cả gate pipeline lẫn section
         // khôi phục trong Settings ("Chạy lại setup") đều đọc IsComplete từ Step. Chỉ là khởi tạo — không
         // Publish vì thời điểm construct chưa có subscriber nào.
-        if (_state.IsComplete) Step = SetupStep.Done;
+        if (_state.IsComplete && !_selectionPersistenceFailed) Step = SetupStep.Done;
     }
 
     /// <summary>
@@ -840,6 +854,42 @@ public sealed class SetupCoordinator
     }
 
     /// <summary>
+    /// Persists a model-deletion intent before the engine RPC and closes the pipeline gate until repair completes.
+    /// Ghi intent xoá model trước RPC engine và đóng cổng pipeline tới khi repair hoàn tất.
+    /// </summary>
+    /// <param name="name">Catalog name intended for deletion. Tên catalog dự định xoá.</param>
+    /// <param name="installed">Models expected to remain installed. Các model dự kiến còn cài.</param>
+    /// <param name="engineActive">Models active in the engine. Các model engine đang dùng.</param>
+    /// <exception cref="InvalidOperationException">Thrown when another deletion needs repair or the journal cannot be persisted. Ném khi một lượt xoá khác cần repair hoặc không ghi được journal.</exception>
+    public void BeginModelDeletion(
+        string name, IReadOnlyCollection<string> installed, IReadOnlyCollection<string> engineActive)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        ArgumentNullException.ThrowIfNull(installed);
+        ArgumentNullException.ThrowIfNull(engineActive);
+        if (_deletionJournalUnreadable)
+            throw new InvalidOperationException("The model-deletion journal is unreadable; repair is required.");
+        if (_deletionIntent is { } existing && existing.Name != name)
+            throw new InvalidOperationException(
+                $"Model deletion '{existing.Name}' still requires repair; cannot start '{name}'.");
+
+        _deletionIntent = new ModelDeletionIntent(name, [.. installed], [.. engineActive]);
+        _selectionPersistenceFailed = true;
+        SkippedForSession = false;
+        Error = null;
+        Step = SetupStep.Checking;
+        try
+        {
+            SaveDeletionIntent();
+            Publish();
+        }
+        catch (Exception ex)
+        {
+            throw FailDeletionPersistence("model-deletion.json", ex);
+        }
+    }
+
+    /// <summary>
     /// Removes a successfully deleted model from setup and settings and publishes the resulting lifecycle state.
     /// Loại model đã được engine xoá thành công khỏi setup và settings rồi publish trạng thái lifecycle.
     /// </summary>
@@ -853,6 +903,7 @@ public sealed class SetupCoordinator
         ArgumentException.ThrowIfNullOrEmpty(name);
         ArgumentNullException.ThrowIfNull(installed);
         ArgumentNullException.ThrowIfNull(engineActive);
+        BeginModelDeletion(name, installed, engineActive);
         (SetupState updatedSetup, AppSettings updatedSettings) = SetupModelSelection.AfterDelete(
             _state, _settings.Load(), name, installed, engineActive);
 
@@ -878,21 +929,88 @@ public sealed class SetupCoordinator
                 _state.Save();
             }
 
-            _selectionPersistenceFailed = false;
+            target = "model-deletion.json";
+            ClearDeletionIntent();
             Error = null;
             Step = _state.IsComplete ? SetupStep.Done : FirstIncompleteQuestionStep(_state);
             Publish();
         }
         catch (Exception ex)
         {
+            throw FailDeletionPersistence(target, ex);
+        }
+    }
+
+    private void RestoreDeletionIntent()
+    {
+        if (!File.Exists(_deletionJournalPath)) return;
+        try
+        {
+            ModelDeletionIntent? intent = JsonSerializer.Deserialize<ModelDeletionIntent>(
+                File.ReadAllText(_deletionJournalPath), DeletionJournalJsonOptions);
+            if (intent is null || string.IsNullOrWhiteSpace(intent.Name)
+                || intent.Installed is null || intent.EngineActive is null)
+            {
+                throw new JsonException("Invalid model-deletion journal.");
+            }
+
+            _deletionIntent = intent;
             _selectionPersistenceFailed = true;
+            SkippedForSession = false;
+            (SetupState updatedSetup, _) = SetupModelSelection.AfterDelete(
+                _state, _settings.Load(), intent.Name, intent.Installed, intent.EngineActive);
+            _state = updatedSetup with { IsComplete = false };
+            Step = SetupStep.Checking;
+            try
+            {
+                // Best effort: persist the repaired tombstoned selection immediately. The journal remains
+                // authoritative when this write fails, so a later coordinator still closes the gate.
+                _state.Save();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                _logger?.LogWarning(ex, "setup: could not persist restored deletion intent");
+            }
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException
+            or InvalidOperationException or ArgumentException or NotSupportedException)
+        {
+            _deletionJournalUnreadable = true;
+            _selectionPersistenceFailed = true;
+            SkippedForSession = false;
             _state = _state with { IsComplete = false };
             Error = SetupMessage.Of("settings.status.saveFailed");
-            EnterFailed(SetupStep.Checking);
-            _logger?.LogError(ex, "setup: deletion persistence failed for {Path}", target);
-            throw new InvalidOperationException(
-                $"Model deletion could not update {target}; setup repair is required: {ex.Message}", ex);
+            Step = SetupStep.Failed;
+            _logger?.LogError(ex, "setup: deletion journal is unreadable");
         }
+    }
+
+    private void SaveDeletionIntent()
+    {
+        string? dir = Path.GetDirectoryName(_deletionJournalPath);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+        string tmp = _deletionJournalPath + ".tmp";
+        File.WriteAllText(tmp, JsonSerializer.Serialize(_deletionIntent, DeletionJournalJsonOptions));
+        File.Move(tmp, _deletionJournalPath, overwrite: true);
+    }
+
+    private void ClearDeletionIntent()
+    {
+        File.Delete(_deletionJournalPath);
+        _deletionIntent = null;
+        _deletionJournalUnreadable = false;
+        _selectionPersistenceFailed = false;
+    }
+
+    private InvalidOperationException FailDeletionPersistence(string target, Exception ex)
+    {
+        _selectionPersistenceFailed = true;
+        _state = _state with { IsComplete = false };
+        Error = SetupMessage.Of("settings.status.saveFailed");
+        EnterFailed(SetupStep.Checking);
+        _logger?.LogError(ex, "setup: deletion persistence failed for {Path}", target);
+        return new InvalidOperationException(
+            $"Model deletion could not update {target}; setup repair is required: {ex.Message}", ex);
     }
 
     /// <summary>
@@ -914,7 +1032,11 @@ public sealed class SetupCoordinator
     /// </summary>
     public void SkipForSession()
     {
-        SkippedForSession = true;
+        // A deletion journal is stronger than the session escape hatch: skipping is allowed again only
+        // after setup/settings are consistent and the journal has been cleared.
+        SkippedForSession = !_selectionPersistenceFailed
+            && _deletionIntent is null
+            && !_deletionJournalUnreadable;
         Publish();
     }
 
@@ -1762,8 +1884,13 @@ public sealed class SetupCoordinator
             (string det, string rec) = OcrModelChoices.ExpectedPair(
                 _state.ActiveDet ?? "PP-OCRv6_small_det", _state.ActiveLang, _state.ActiveRec ?? "PP-OCRv6_small_rec");
             AppSettings settings = _settings.Load();
-            bool pairMismatch = settings.OcrDet != det || settings.OcrRec != rec
-                || (_state.ActiveLlm is not null && settings.LlmActiveModel != _state.ActiveLlm);
+            bool llmMismatch = _state.ActiveLlm is not null
+                ? settings.LlmActiveModel != _state.ActiveLlm
+                : _deletionIntent is not null
+                    && (_state.LlmModels is { Count: 0 }
+                        ? !string.IsNullOrEmpty(settings.LlmActiveModel)
+                        : settings.LlmActiveModel == _deletionIntent.Name);
+            bool pairMismatch = settings.OcrDet != det || settings.OcrRec != rec || llmMismatch;
             if (pairMismatch && steps.Remove(StepKey(SetupStep.Applying)))
             {
                 changed = true;
@@ -1796,10 +1923,55 @@ public sealed class SetupCoordinator
         Publish();
     }
 
+    private bool DeletionStateConsistent(ModelDeletionIntent intent)
+    {
+        if (!SetupModelSelection.HasCompleteAnswers(_state)) return false;
+        AppSettings settings = _settings.Load();
+        (string det, string rec) = OcrModelChoices.ExpectedPair(
+            _state.ActiveDet!, _state.ActiveLang, _state.ActiveRec!);
+        if (settings.OcrDet != det || settings.OcrRec != rec) return false;
+        if (_state.LlmModels is { Count: 0 } && !string.IsNullOrEmpty(settings.LlmActiveModel)) return false;
+        if (settings.LlmActiveModel == intent.Name) return false;
+        if (_state.ActiveDet == intent.Name || _state.ActiveRec == intent.Name
+            || _state.ActiveLang == intent.Name || _state.ActiveLlm == intent.Name)
+        {
+            return false;
+        }
+        return !ContainsModel(_state.Dets, intent.Name)
+            && !ContainsModel(_state.Recs, intent.Name)
+            && !ContainsModel(_state.Langs, intent.Name)
+            && !ContainsModel(_state.LlmModels, intent.Name);
+
+        static bool ContainsModel(List<string>? names, string name) =>
+            names?.Contains(name, StringComparer.Ordinal) == true;
+    }
+
     private void EnterDone()
     {
+        if (_deletionJournalUnreadable
+            || (_selectionPersistenceFailed && _deletionIntent is null)
+            || (_deletionIntent is { } intent && !DeletionStateConsistent(intent)))
+        {
+            // Never clear a deletion failure by skipping Applying through an old marker.
+            _state = _state with { IsComplete = false };
+            Error = SetupMessage.Of("settings.status.saveFailed");
+            EnterFailed(SetupStep.Applying);
+            return;
+        }
+
         _state = _state with { IsComplete = true };
         _state.Save();
+        if (_deletionIntent is not null)
+        {
+            try
+            {
+                ClearDeletionIntent();
+            }
+            catch (Exception ex)
+            {
+                throw FailDeletionPersistence("model-deletion.json", ex);
+            }
+        }
         _selectionPersistenceFailed = false;
         Error = null;
         Step = SetupStep.Done;
