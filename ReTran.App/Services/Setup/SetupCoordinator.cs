@@ -918,8 +918,9 @@ public sealed class SetupCoordinator
         ArgumentNullException.ThrowIfNull(installed);
         ArgumentNullException.ThrowIfNull(engineActive);
         BeginModelDeletion(name, installed, engineActive);
-        (SetupState updatedSetup, AppSettings updatedSettings) = SetupModelSelection.AfterDelete(
-            _state, _settings.Load(), name, installed, engineActive);
+        SetupState originalSetup = _state;
+        (SetupState updatedSetup, _) = SetupModelSelection.AfterDelete(
+            originalSetup, _settings.Load(), name, installed, engineActive);
 
         _selectionPersistenceFailed = true;
         SkippedForSession = false;
@@ -935,7 +936,13 @@ public sealed class SetupCoordinator
             // a complete selection be marked complete again; either failure therefore leaves a repair gate.
             _state.Save();
             target = "settings.json";
-            _settings.Save(updatedSettings);
+            _settings.Update(currentSettings =>
+            {
+                (SetupState latestSetup, AppSettings latestSettings) = SetupModelSelection.AfterDelete(
+                    originalSetup, currentSettings, name, installed, engineActive);
+                updatedSetup = latestSetup;
+                return latestSettings;
+            });
             _deletionSettingsWritten = true;
             if (updatedSetup.IsComplete)
             {
@@ -1820,7 +1827,7 @@ public sealed class SetupCoordinator
     /// remains best-effort (a refusal only logs — settings are already written, spec §6).
     /// Applying (Review Focus #5 — LUÔN chạy, kể cả khi không tải model nào): tính cặp từ câu trả lời
     /// đã lưu (<see cref="OcrModelChoices.ExpectedPair"/> — rec legacy đang chấm thắng rec v6) và ghi
-    /// cặp đó cùng <c>LlmActiveModel</c> vào settings qua <see cref="AppSettingsService.Save"/>. Khi có
+    /// cặp đó cùng <c>LlmActiveModel</c> vào settings qua <see cref="AppSettingsService.Update"/>. Khi có
     /// LLM "Dùng chính", gọi thêm <c>llm.models.set</c> kiểu best-effort (bị từ chối chỉ log — settings
     /// đã ghi, spec §6). Sau khi lưu settings, Applying gọi <c>ocr.models.set</c> và chỉ đánh dấu xong
     /// khi RPC này thành công; lỗi lưu hoặc RPC OCR đều đi qua vòng retry hiện có.
@@ -1833,8 +1840,7 @@ public sealed class SetupCoordinator
             {
                 (string det, string rec) = OcrModelChoices.ExpectedPair(
                     _state.ActiveDet ?? "PP-OCRv6_small_det", _state.ActiveLang, _state.ActiveRec ?? "PP-OCRv6_small_rec");
-                AppSettings settings = _settings.Load();
-                _settings.Save(settings with
+                _settings.Update(settings => settings with
                 {
                     OcrDet = det,
                     OcrRec = rec,

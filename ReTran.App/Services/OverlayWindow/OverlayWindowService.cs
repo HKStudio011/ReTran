@@ -221,7 +221,7 @@ public sealed class OverlayWindowService : IDisposable, IOverlayToggle
     {
         try
         {
-            _settings.Save(update(_settings.Load()));
+            _settings.Update(update);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

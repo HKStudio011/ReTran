@@ -82,6 +82,14 @@ internal static class SettingsPanelSync
     internal static bool CanSaveOcrParams([NotNullWhen(true)] IReadOnlyList<OcrParamSpec>? schema, bool schemaFailed) =>
         !schemaFailed && schema is { Count: > 0 };
 
+    /// <summary>
+    /// Returns whether an async runtime response still belongs to the selected flavor and revision.
+    /// Cho biết response runtime bất đồng bộ còn thuộc flavor và revision đang chọn hay không.
+    /// </summary>
+    internal static bool IsCurrentFlavor(
+        string requested, string current, int requestedRevision, int currentRevision) =>
+        requestedRevision == currentRevision && string.Equals(requested, current, StringComparison.Ordinal);
+
     /// <summary>Returns whether a component may render after its disposal state changes. Cho biết component còn được render sau khi trạng thái dispose thay đổi.</summary>
     internal static bool ShouldRender(bool disposed) => !disposed;
 

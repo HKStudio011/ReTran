@@ -172,4 +172,16 @@ public class SettingsPanelSyncTests
     {
         Assert.Equal(expected, SettingsPanelSync.NormalizeProvider(provider));
     }
+
+    [Theory]
+    [InlineData("cuda", "cuda", 3, 3, true)]
+    [InlineData("cuda", "cpu", 3, 3, false)]
+    [InlineData("cuda", "cuda", 2, 3, false)]
+    [InlineData("cuda", "cuda", 4, 3, false)]
+    public void IsCurrentFlavor_RejectsStaleFlavorOrRevision(
+        string requested, string current, int requestedRevision, int currentRevision, bool expected)
+    {
+        Assert.Equal(expected, SettingsPanelSync.IsCurrentFlavor(
+            requested, current, requestedRevision, currentRevision));
+    }
 }

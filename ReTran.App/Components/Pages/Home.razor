@@ -603,7 +603,7 @@
     {
         try
         {
-            SettingsStore.Save(SettingsStore.Load() with { Dst = _quickDst });
+            SettingsStore.Update(current => current with { Dst = _quickDst });
         }
         catch (Exception)
         {

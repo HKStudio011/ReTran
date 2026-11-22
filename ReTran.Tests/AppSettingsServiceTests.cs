@@ -306,4 +306,41 @@ public class AppSettingsServiceTests : IDisposable
         Assert.Null(settings.LlmSystemPrompt);
         Assert.Null(settings.LlmUserPrompt);
     }
+
+    [Fact]
+    public async Task Update_ConcurrentWriters_PreserveBothFields()
+    {
+        var ocrWriter = new AppSettingsService(_path);
+        var languageWriter = new AppSettingsService(_path);
+        ocrWriter.Save(AppSettings.Default);
+        using var start = new ManualResetEventSlim(false);
+        Task[] writers = Enumerable.Range(0, 24).SelectMany(_ => new[]
+        {
+            Task.Run(() =>
+            {
+                start.Wait();
+                ocrWriter.Update(current => current with { OcrDet = "PP-OCRv6_medium_det" });
+            }),
+            Task.Run(() =>
+            {
+                start.Wait();
+                languageWriter.Update(current => current with { Dst = "en" });
+            }),
+        }).ToArray();
+
+        start.Set();
+        await Task.WhenAll(writers);
+
+        AppSettings settings = ocrWriter.Load();
+        Assert.Equal("PP-OCRv6_medium_det", settings.OcrDet);
+        Assert.Equal("en", settings.Dst);
+    }
+
+    [Fact]
+    public void Update_NullUpdater_Throws()
+    {
+        var service = new AppSettingsService(_path);
+
+        Assert.Throws<ArgumentNullException>(() => service.Update(null!));
+    }
 }

@@ -75,7 +75,7 @@
         <div class="rt-srow">
             <span>@(L["deck.llm.runtime.title"])</span>
             <div class="rt-select">
-                <select value="@_llmFlavor" @onchange="OnLlmFlavorChanged" aria-label="@(L["deck.llm.runtime.flavor"])">
+                <select value="@_llmFlavor" @onchange="OnLlmFlavorChanged" disabled="@_llmRuntimeBusy" aria-label="@(L["deck.llm.runtime.flavor"])">
                     <option value="cuda">@(L["deck.llm.runtime.flavor.cuda"])</option>
                     <option value="cpu">@(L["deck.llm.runtime.flavor.cpu"])</option>
                 </select>
@@ -586,6 +586,7 @@
     private LlmRuntimeStatusInfo? _llmRuntime;
     private LlmRuntimeCheckInfo? _llmRuntimeCheck;
     private bool _llmRuntimeBusy;
+    private int _llmRuntimeRevision;
     private LlmServerStatusInfo? _llmServerStatus;
     private bool _llmServerStatusFailed;
     private bool _llmServerStatusBusy;
@@ -699,7 +700,7 @@
         try
         {
             // `with` giữ nguyên overlay/capture options hiện có — form này sửa provider/ngôn ngữ/LLM.
-            SettingsStore.Save(SettingsStore.Load() with
+            SettingsStore.Update(current => current with
             {
                 Provider = _model.Provider,
                 Src = _model.Src,
@@ -917,7 +918,7 @@
         {
             // Cặp đã chọn phải vào settings.json trước tiên — core.start lần sau gửi đúng cặp
             // này kể cả khi bên dưới bị hoãn (đang chạy thì không đổi model giữa phiên, C8).
-            SettingsStore.Save(SettingsStore.Load() with { OcrDet = _ocrDetPick, OcrRec = _ocrRecPick });
+            SettingsStore.Update(current => current with { OcrDet = _ocrDetPick, OcrRec = _ocrRecPick });
             _ocrDetBaseline = _ocrDetPick;
             _ocrRecBaseline = _ocrRecPick;
             // C8: pipeline đang chạy → không gọi ocr.models.set (sidecar giữ predictor đang
@@ -1056,8 +1057,8 @@
             }
 
             OcrConfigSetResult result = await Pipeline.SetOcrConfigAsync(map, CancellationToken.None);
-            SettingsStore.Save(SettingsPanelSync.WithOcrParams(
-                SettingsStore.Load(), map, ocrFps, captureFps,
+            SettingsStore.Update(current => SettingsPanelSync.WithOcrParams(
+                current, map, ocrFps, captureFps,
                 _mergeLines, mergeGap, mergeHeight, mergeOverlap));
             _ocrValues = new Dictionary<string, JsonNode?>(map);
             SetOcrStatus(L[result.Deferred.Count > 0 ? "deck.ocr.params.deferred" : "deck.ocr.params.applied"],
@@ -1211,6 +1212,10 @@
     private static readonly TimeSpan LlmRuntimePollInterval = TimeSpan.FromSeconds(2);
     private const int LlmRuntimePollAttempts = 300;
 
+    private bool IsCurrentLlmFlavor(string requestedFlavor, int requestedRevision) =>
+        SettingsPanelSync.IsCurrentFlavor(
+            requestedFlavor, _llmFlavor, requestedRevision, _llmRuntimeRevision);
+
     // Chỉ hiện nút Cập nhật khi check thấy tag mới khác tag đang cài.
     private bool LlmUpdateAvailable =>
         _llmRuntimeCheck?.Latest is { } latest
@@ -1296,9 +1301,14 @@
 
     private async Task LoadLlmRuntimeAsync()
     {
+        string requestedFlavor = _llmFlavor;
+        int requestedRevision = _llmRuntimeRevision;
         try
         {
-            _llmRuntime = await Pipeline.GetLlmRuntimeStatusAsync(CancellationToken.None, _llmFlavor);
+            LlmRuntimeStatusInfo status = await Pipeline.GetLlmRuntimeStatusAsync(
+                CancellationToken.None, requestedFlavor);
+            if (!IsCurrentLlmFlavor(requestedFlavor, requestedRevision)) return;
+            _llmRuntime = status;
         }
         catch (Exception)
         {
@@ -1390,7 +1400,7 @@
         try
         {
             await Pipeline.SetLlmModelAsync(model.Name, CancellationToken.None);
-            SettingsStore.Save(SettingsStore.Load() with { LlmActiveModel = model.Name });
+            SettingsStore.Update(current => current with { LlmActiveModel = model.Name });
             _llmActiveModel = model.Name;
             _llmActiveModelBaseline = model.Name;
             Toast.Show(L.Fmt("deck.llm.useSaved", model.Name));
@@ -1409,9 +1419,11 @@
 
     private void OnLlmFlavorChanged(ChangeEventArgs args)
     {
+        if (_llmRuntimeBusy) return;
         string selected = args.Value?.ToString() == "cpu" ? "cpu" : "cuda";
         if (selected == _llmFlavor) return;
         _llmFlavor = selected;
+        _llmRuntimeRevision++;
         _llmRuntimeCheck = null; // kết quả check thuộc flavor cũ
         _llmRuntime = null;
         _ = LoadLlmRuntimeAsync();
@@ -1421,15 +1433,21 @@
     {
         if (_llmRuntimeBusy) return;
         _llmRuntimeBusy = true;
+        string requestedFlavor = _llmFlavor;
+        int requestedRevision = _llmRuntimeRevision;
         try
         {
-            _llmRuntimeCheck = await Pipeline.CheckLlmRuntimeAsync(_llmFlavor, CancellationToken.None);
+            LlmRuntimeCheckInfo check = await Pipeline.CheckLlmRuntimeAsync(
+                requestedFlavor, CancellationToken.None);
+            if (!IsCurrentLlmFlavor(requestedFlavor, requestedRevision)) return;
+            _llmRuntimeCheck = check;
             await LoadLlmRuntimeAsync();
-            if (_llmRuntimeCheck.Latest is not { } latest)
+            if (!IsCurrentLlmFlavor(requestedFlavor, requestedRevision)) return;
+            if (check.Latest is not { } latest)
             {
                 Toast.Show(L["deck.llm.runtime.noAsset"]);
             }
-            else if (string.Equals(latest, _llmRuntimeCheck.Current, StringComparison.Ordinal))
+            else if (string.Equals(latest, check.Current, StringComparison.Ordinal))
             {
                 Toast.Show(L.Fmt("deck.llm.runtime.latest", latest));
             }
@@ -1440,7 +1458,8 @@
         }
         catch (Exception ex)
         {
-            Toast.Show(L.Fmt("deck.llm.runtime.checkFailed", ex.Message), ToastSeverity.Error);
+            if (IsCurrentLlmFlavor(requestedFlavor, requestedRevision))
+                Toast.Show(L.Fmt("deck.llm.runtime.checkFailed", ex.Message), ToastSeverity.Error);
         }
         finally
         {
@@ -1454,17 +1473,23 @@
     {
         if (_llmRuntimeBusy) return;
         _llmRuntimeBusy = true;
+        string requestedFlavor = _llmFlavor;
+        int requestedRevision = _llmRuntimeRevision;
         try
         {
-            long downloadAttempt = await Pipeline.DownloadLlmRuntimeAsync(_llmFlavor, CancellationToken.None);
-            Toast.Show(L.Fmt("deck.llm.runtime.downloadStarted", L["deck.llm.runtime.flavor." + _llmFlavor]));
+            long downloadAttempt = await Pipeline.DownloadLlmRuntimeAsync(requestedFlavor, CancellationToken.None);
+            if (!IsCurrentLlmFlavor(requestedFlavor, requestedRevision)) return;
+            Toast.Show(L.Fmt("deck.llm.runtime.downloadStarted", L["deck.llm.runtime.flavor." + requestedFlavor]));
             for (int i = 0; i < LlmRuntimePollAttempts; i++)
             {
                 await Task.Delay(LlmRuntimePollInterval);
-                if (_disposed) return;
-                _llmRuntime = await Pipeline.GetLlmRuntimeStatusAsync(CancellationToken.None, _llmFlavor);
+                if (_disposed || !IsCurrentLlmFlavor(requestedFlavor, requestedRevision)) return;
+                LlmRuntimeStatusInfo status = await Pipeline.GetLlmRuntimeStatusAsync(
+                    CancellationToken.None, requestedFlavor);
+                if (!IsCurrentLlmFlavor(requestedFlavor, requestedRevision)) return;
+                _llmRuntime = status;
                 RequestRender();
-                switch (LlmRuntimePoll.Evaluate(_llmRuntime, downloadAttempt))
+                switch (LlmRuntimePoll.Evaluate(status, downloadAttempt))
                 {
                     case LlmRuntimePollOutcome.Superseded:
                         Toast.Show(L["deck.llm.runtime.downloadSuperseded"], ToastSeverity.Error);
@@ -1473,23 +1498,28 @@
                         // Hủy chủ động không phải success và cũng không cần error toast.
                         return;
                     case LlmRuntimePollOutcome.Failed:
-                        Toast.Show(_llmRuntime.DownloadError is { } error
+                        Toast.Show(status.DownloadError is { } error
                             ? L.Fmt("deck.llm.runtime.downloadFailedDetail", error)
                             : L["deck.llm.runtime.downloadFailed"], ToastSeverity.Error);
                         return;
                     case LlmRuntimePollOutcome.Completed:
                         // Check lại theo đúng flavor sau MỌI lượt thành công: repair cùng tag không
                         // làm badge Update bị xoá nhầm, flavor mới không bị so với release CUDA.
-                        _llmRuntimeCheck = await Pipeline.CheckLlmRuntimeAsync(_llmFlavor, CancellationToken.None);
+                        LlmRuntimeCheckInfo check = await Pipeline.CheckLlmRuntimeAsync(
+                            requestedFlavor, CancellationToken.None);
+                        if (!IsCurrentLlmFlavor(requestedFlavor, requestedRevision)) return;
+                        _llmRuntimeCheck = check;
                         Toast.Show(L["deck.llm.runtime.installedToast"]);
                         return;
                 }
             }
-            Toast.Show(L["deck.llm.runtime.downloadTimeout"], ToastSeverity.Error);
+            if (IsCurrentLlmFlavor(requestedFlavor, requestedRevision))
+                Toast.Show(L["deck.llm.runtime.downloadTimeout"], ToastSeverity.Error);
         }
         catch (Exception ex)
         {
-            Toast.Show(L.Fmt("deck.llm.actionFailed", ex.Message), ToastSeverity.Error);
+            if (IsCurrentLlmFlavor(requestedFlavor, requestedRevision))
+                Toast.Show(L.Fmt("deck.llm.actionFailed", ex.Message), ToastSeverity.Error);
         }
         finally
         {

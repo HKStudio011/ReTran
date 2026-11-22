@@ -879,18 +879,18 @@ public sealed class FloatingMenuService : IDisposable
     }
 
     /// <summary>
-    /// Read-modify-write under the gate so concurrent savers cannot lose updates; a failed save is
-    /// logged, not thrown — an intent must not die because the disk refused (same pattern as
-    /// OverlayWindowService.Persist).
-    /// Đọc-sửa-ghi dưới gate để các thread lưu song song không mất cập nhật; lỗi ghi được log chứ
-    /// không ném — intent không được chết chỉ vì đĩa từ chối (cùng pattern như Persist của
-    /// OverlayWindowService).
+    /// Read-modify-write through the settings store's per-path lock so concurrent savers cannot lose
+    /// updates; a failed save is logged, not thrown — an intent must not die because the disk refused
+    /// (same pattern as OverlayWindowService.Persist).
+    /// Đọc-sửa-ghi qua lock theo đường dẫn của settings store để các thread lưu song song không mất
+    /// cập nhật; lỗi ghi được log chứ không ném — intent không được chết chỉ vì đĩa từ chối (cùng
+    /// pattern như Persist của OverlayWindowService).
     /// </summary>
     private void Persist(Func<AppSettings, AppSettings> update) // caller holds _gate
     {
         try
         {
-            _settings.Save(update(_settings.Load()));
+            _settings.Update(update);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
