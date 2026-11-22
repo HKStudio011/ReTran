@@ -118,7 +118,8 @@ public class SetupCoordinatorTests : IDisposable
         string? llmRoot = null,
         string? deletionJournalPath = null,
         TimeSpan? modelPollInterval = null,
-        ILogger<SetupCoordinator>? logger = null)
+        ILogger<SetupCoordinator>? logger = null,
+        Func<SetupState>? stateFactory = null)
     {
         var coordinator = new SetupCoordinator(
             adapters ?? Adapters(NvidiaCurrent),
@@ -128,7 +129,7 @@ public class SetupCoordinatorTests : IDisposable
             _bridge,
             _settings,
             () => _closeAppCalled = true,
-            stateFactory: () => SetupState.Load(_setupJson),
+            stateFactory: stateFactory ?? (() => SetupState.Load(_setupJson)),
             fileExists: fileExists ?? (path => !path.EndsWith(".partial", StringComparison.Ordinal)),
             countModelEntries: countModelEntries ?? (_ => 0),
             modelDirExists: modelDirExists ?? (_ => true),
@@ -2384,6 +2385,31 @@ public class SetupCoordinatorTests : IDisposable
         Assert.Equal(true, runningAtFailurePublish); // Failed is observable before EndRun releases the button.
         Assert.False(coordinator.IsRunning);
         Assert.Contains(logger.Entries, entry => entry.Level == LogLevel.Error && entry.Exception is not null);
+    }
+
+    [Fact]
+    public async Task StartAsync_FaultFromDoneBeforeChecking_RetryRecoversFromChecking()
+    {
+        WriteCompleteSetup();
+        int stateLoads = 0;
+        SetupState StateFactory()
+        {
+            stateLoads++;
+            if (stateLoads == 2) throw new InvalidOperationException("injected pre-check load fault");
+            return SetupState.Load(_setupJson);
+        }
+        var coordinator = NewCoordinator(stateFactory: StateFactory);
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+
+        await coordinator.StartAsync(force: true, TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+
+        await coordinator.RetryAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.NotEmpty(coordinator.Checks); // Retry really re-entered Checking instead of indexing PipelineSteps[-1].
+        Assert.Single(_uvFake.SyncCalls);    // The normal recovery pipeline then ran through Done.
+        Assert.False(coordinator.IsRunning);
     }
 
     [Fact]

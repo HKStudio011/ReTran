@@ -549,6 +549,8 @@ public sealed class SetupCoordinator
         catch (Exception ex)
         {
             SetupStep failedStep = Step == SetupStep.Failed ? _lastFailedStep : Step;
+            if (failedStep != SetupStep.Checking && !PipelineSteps.Contains(failedStep))
+                failedStep = SetupStep.Checking;
             _logger?.LogError(ex, "setup: run faulted at {Step}", failedStep);
             Error = SetupMessage.Of("setup.fail.unexpected", ex.Message);
             EnterFailed(failedStep);
