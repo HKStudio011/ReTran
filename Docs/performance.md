@@ -1089,3 +1089,63 @@ dotnet run -c Debug --project Tools/Perf/annotbench
 5. Mode **API** với endpoint thật (nếu có): nhập baseUrl/key/model → Start → dịch chạy qua endpoint.
 6. Khi pipeline DỪNG: **Xoá** một model không dùng → file biến mất; nút Xoá trên model "Đang dùng" bị chặn.
 7. Dừng app giữa chừng khi `llama-server` đang chạy → tiến trình con bị kill theo; nếu Core crash (kill cứng) → kiểm tra còn orphan `llama-server.exe` không (kỳ vọng: có thể còn, kill tay).
+
+---
+
+## Settings/Setup reliability — LLM Start progress + OCR medium (2026-11-23)
+
+### Phạm vi và cách đo
+
+- Code implementation tới `c186679`; `ReTran.Core` **Release**. Smoke dùng một console harness tạm (`AssemblyName=ReTran.Tests` để truy cập internal) host chính `JsonRpcServer`, `LlmRpcHandlers`, `LlmServerRpc`, `LlamaRuntimeManager` và `LlamaServerSlot` của assembly Release. Đây là test process/RPC/model thật của các lớp mới, **không phải** E2E `ReTran.Core Program`, App UI hay game.
+- Lý do không chạy `Program` với `LOCALAPPDATA` giả: trên Windows, `Environment.GetFolderPath(LocalApplicationData)` trong process Core vẫn resolve profile thật dù env `LOCALAPPDATA` của process đã đổi. Chạy App/Core thật lúc này có thể ghi settings/DB/log thật nên bị chặn bởi yêu cầu cô lập; không sửa product code chỉ để thêm test hook.
+- Fixture duy nhất: `C:\Users\trucn\AppData\Local\Temp\opencode\retran-task6-20261123-c186679`. GGUF và runtime được **copy** sang fixture; model copy có cùng SHA-256 với nguồn (`95EB5378451187E05BC4BF15F62B0C68CD91FD6ABF8CE4C79FE357D42C4EE2A2`). Không tải/xoá/sửa model, runtime, `settings.json` hoặc `setup.json` thật; không dừng process có sẵn.
+- Kết quả dùng runtime **b12532**. Runtime active thật đang là `b12556` nhưng thiếu `llama-server.exe`; không repair state thật. `b12546` cũng được thử từ bản copy nhưng không healthy (mục blocker bên dưới).
+- “Cold” dưới đây là lần nạp đầu thành công trong process mới với `b12532`, **không purge OS file/CUDA cache** và sau các lần thử runtime khác; không phải cold-disk benchmark. “Warm” là process mới ngay sau lần cold, cùng fixture. N=1 mỗi loại.
+- Không có game/OBS trong phép đo; không đo model hàng trăm GB, stall 10 phút hay gaming budget.
+
+### Local 1.8B — health, RAM và Stop
+
+Model `Hy-MT2-1.8B-UD-Q4_K_XL.gguf`, 1.169.028.064 byte; poll `llm.server.status` mục tiêu ~500 ms.
+
+| Metric | Cold process, b12532 | Warm process, b12532 |
+| --- | ---: | ---: |
+| `llm.server.start` accepted round-trip | 37,269 ms | 39,336 ms |
+| Spawn đầu tiên quan sát được | 233,984 ms | 247,953 ms |
+| Start → `state=ready` | **59.653,449 ms (59,653 s)** | **2.224,786 ms (2,225 s)** |
+| Status RT trong load: count / mean / p95 / max | 86 / 0,527 / 1,351 / 3,957 ms | 4 / 0,957 / 1,481 / 1,481 ms |
+| WorkingSet llama-server khi ready | 1.653.047.296 B (**1.576,5 MiB**) | 1.635.549.184 B (**1.559,8 MiB**) |
+| PeakWorkingSet llama-server | 1.959.243.776 B (**1.868,5 MiB**) | 1.635.549.184 B (**1.559,8 MiB**) |
+| `llm.server.stop` round-trip | 299,470 ms | 322,162 ms |
+| Process con biến mất sau Stop | 189,365 ms | 156,669 ms |
+
+- Cả hai lần đều trả accepted trước health, status đọc được trong load, `progressAvailable=true` và byte high-water không lùi. Tuy nhiên IO counter chỉ đạt **18.241.534 / 1.169.028.064 byte** khi cold ready và **512 byte** khi warm ready. Nó không phản ánh phần model nạp qua đường memory-mapped/cache; ready mới là tín hiệu 100%, không được diễn giải IO counter này là byte weights tuyệt đối.
+- Cancel thật ở RPC: accepted 39,702 ms; process xuất hiện 286,763 ms; gửi Stop lúc vẫn `loading` ở **815,520 ms**; Stop trả `stopped` sau **139,632 ms**, process con thoát sau **179,343 ms**. Không cần force-kill; không có llama-server/Core/App sót lại sau smoke.
+
+### Overhead poll khi ready (22 request trong ~10 s mỗi lượt)
+
+| Metric | Cold | Warm |
+| --- | ---: | ---: |
+| Window / request count | 10,124 s / 22 | 10,164 s / 22 |
+| Status RT mean / p95 / max | **0,814 / 3,580 / 4,592 ms** | **0,755 / 2,147 / 2,230 ms** |
+| Request + response wire bytes/s | 175,137 + 496,765 = **671,902 B/s** | 173,064 + 489,086 = **662,150 B/s** |
+| CPU toàn harness trong window | 0,000 CPU-s (dưới resolution của sample) | 0,296875 CPU-s = **2,921 % một core / 0,183 % 16 luồng** |
+| CPU llama-server trong cùng window | 0,03125 CPU-s | 0,000 CPU-s |
+
+CPU là của **toàn harness** (không tách được riêng handler status khỏi JIT/GC/background work), không phải overhead thuần của một request và không gồm App/WebView. Wire rate chỉ tính các dòng JSON-RPC status, không phải toàn bộ IPC khi pipeline chạy.
+
+### OCR medium — RPC remount và inference
+
+Fixture OCR có source/cache nhân bản; chạy qua `uv run --frozen`, venv sẵn có, `PYTHONDONTWRITEBYTECODE=1`. Ban đầu sidecar active `small/small`; `ocr.models.set(medium/medium)` hoàn tất **0,097 ms**. `ocr.models.list` ngay sau đó (mô phỏng lần Settings mount/sync lại trong cùng sidecar) trả **1,470 ms**, `active` và đúng hai `inUse` đều là medium.
+
+- GPU: model det/rec medium đều load từ cache nhưng `ocr.spot` fail vì **`cudnn64_9.dll` error 126**; không cài hoặc sửa dependency trong Task 6.
+- CPU (`device=cpu`, `enable_mkldnn=false`): `ocr.spot` thật **4.825 ms**, 2 spots trên fixture 960×240; `ocr.models.list` sau inference vẫn `medium/medium` (**3,386 ms**).
+- Đây là bằng chứng RPC/model thật, **không phải** smoke nút Applying trong App hay Settings Razor remount.
+
+### Blocker/chưa kiểm chứng của round này
+
+1. `b12546`: lần đầu không ready sau 240 s; lần kiểm có samples vẫn `loading` sau 90 s tại 18.241.534 byte IO, WorkingSet 1.895.280.640 B (1.807,5 MiB), status vẫn phản hồi dưới 1 ms ở các sample cuối. Đã Stop/dọn process, **không chờ stall window 600 s** và không kết luận đây là stall timeout của code.
+2. Runtime active thật `b12556` thiếu `llama-server.exe`; đường chạy với state thật vì thế chưa được smoke. Chỉ dùng bản sao `b12532` hợp lệ, không sửa active state.
+3. Chưa kiểm chứng popup Home/floating menu, nút Hủy trên UI, Start Google/API không preload bằng App thật, Setup Applying và Settings Razor remount. Các hành vi này có automation trong full suite nhưng không được thay bằng tuyên bố E2E UI.
+4. Không đo game + streaming, model hàng trăm GB, HTTP timeout thật hoặc stall 600 s thật; các trường hợp controlled fake nằm trong test suite, không lặp bằng real wait/download.
+
+Raw JSON/CSV/stderr và hai harness tạm nằm trong fixture `%TEMP%` nêu trên; report đầy đủ ở `.superpowers/sdd/2026-11-21-settings-setup-reliability/task-6-report.md`.
