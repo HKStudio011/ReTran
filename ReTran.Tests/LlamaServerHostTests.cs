@@ -214,7 +214,9 @@ public class LlamaServerHostTests
             clock.Advance(TimeSpan.FromSeconds(5));
             await metrics.WaitForReadAsync(2);
             Assert.Equal(2 * MiB, host.LoadProgress.BytesLoaded); // IO regression cannot move percent backwards
-            Assert.Equal(25, host.LoadProgress.Percent);
+            Assert.False(host.LoadProgress.ProgressAvailable); // a flat/regressed high-water is indeterminate
+            Assert.Null(host.LoadProgress.BytesPerSec);
+            Assert.Null(host.LoadProgress.Percent);
 
             clock.Advance(TimeSpan.FromSeconds(5));
             await metrics.WaitForReadAsync(3);
@@ -228,6 +230,57 @@ public class LlamaServerHostTests
             await startup.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
             Assert.Equal("ready", host.LoadProgress.Phase);
             Assert.Equal(100, host.LoadProgress.Percent);
+        }
+        finally
+        {
+            host.Dispose();
+            await ObserveCancellationAsync(startup);
+            DeleteTempDir(dir);
+        }
+    }
+
+    [Fact]
+    public async Task Progress_RequiresFivePercentAndIncreasingHighWater()
+    {
+        const long threshold = (TestModelBytes + 19) / 20; // ceiling of exactly five percent
+        string dir = NewTempDir();
+        var clock = new FakeTimeProvider();
+        var metrics = new ScriptedMetrics(read => new LlamaProcessSample(
+            TimeSpan.Zero,
+            WorkingSetBytes: 0,
+            ReadBytes: read switch
+            {
+                0 => threshold - 1,
+                1 => threshold,
+                2 => threshold,
+                _ => threshold + 1,
+            },
+            PageFaults: 0));
+        using LlamaServerHost host = CreateHost(dir, metrics, clock, LongRunningCommand);
+        Task startup = host.EnsureStartedAsync(TestContext.Current.CancellationToken);
+        try
+        {
+            await metrics.WaitForReadAsync(1);
+            Assert.False(host.LoadProgress.ProgressAvailable);
+            Assert.Null(host.LoadProgress.BytesPerSec);
+            Assert.Null(host.LoadProgress.Percent);
+
+            clock.Advance(TimeSpan.FromSeconds(5));
+            await metrics.WaitForReadAsync(2);
+            Assert.True(host.LoadProgress.ProgressAvailable); // exactly 5%, and the high-water increased
+            Assert.NotNull(host.LoadProgress.BytesPerSec);
+            Assert.NotNull(host.LoadProgress.Percent);
+
+            clock.Advance(TimeSpan.FromSeconds(5));
+            await metrics.WaitForReadAsync(3);
+            Assert.False(host.LoadProgress.ProgressAvailable); // high-water stopped increasing
+            Assert.Null(host.LoadProgress.BytesPerSec); // no ETA input while indeterminate
+            Assert.Null(host.LoadProgress.Percent);
+
+            clock.Advance(TimeSpan.FromSeconds(5));
+            await metrics.WaitForReadAsync(4);
+            Assert.True(host.LoadProgress.ProgressAvailable);
+            Assert.NotNull(host.LoadProgress.BytesPerSec);
         }
         finally
         {

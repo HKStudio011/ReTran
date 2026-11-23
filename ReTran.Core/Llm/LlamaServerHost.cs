@@ -265,12 +265,16 @@ public sealed class LlamaServerHost : ILlamaServerHost
 
             activity |= sample.WorkingSetBytes - ramHighWater >= ActivityRamBytes;
             ramHighWater = Math.Max(ramHighWater, sample.WorkingSetBytes);
+            long previousBytesHighWater = bytesHighWater;
             bytesHighWater = Math.Max(bytesHighWater, sample.ReadBytes);
             if (activity) deadline = now + StallWindow;
             long? modelBytes = LoadProgress.BytesTotal;
-            string phase = modelBytes > 0 && bytesHighWater >= modelBytes ? "finalizing" : "loading";
+            bool progressAvailable = modelBytes > 0
+                && bytesHighWater > previousBytesHighWater
+                && (double)bytesHighWater >= modelBytes.Value * 0.05;
+            string phase = progressAvailable && bytesHighWater >= modelBytes ? "finalizing" : "loading";
             SetProgress(new LlmLoadProgressSnapshot(
-                phase, bytesHighWater, modelBytes, speed, modelBytes > 0));
+                phase, bytesHighWater, modelBytes, progressAvailable ? speed : null, progressAvailable));
             previous = sample;
             previousSampleAt = now;
             havePrevious = true;

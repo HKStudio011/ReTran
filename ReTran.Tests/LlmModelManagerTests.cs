@@ -125,7 +125,7 @@ public class LlmModelManagerTests : IDisposable
     }
 
     [Fact]
-    public void Delete_RefusesActive_RefusesDownloading()
+    public async Task Delete_RefusesActive_RefusesDownloading()
     {
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         LlmModelManager manager = Create(async (spec, path, ct) =>
@@ -141,6 +141,7 @@ public class LlmModelManagerTests : IDisposable
         Assert.True(manager.StartDownload("Hy-MT2-1.8B-Q8_0"));
         Assert.Throws<RpcMethodException>(() => manager.Delete("Hy-MT2-1.8B-Q8_0"));
         gate.SetResult();
+        Assert.True(await WaitUntilInstalledAsync(manager, "Hy-MT2-1.8B-Q8_0")); // join the background file work before Dispose deletes the fixture
     }
 
     [Fact]

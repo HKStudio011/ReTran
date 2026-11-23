@@ -109,8 +109,7 @@ public sealed record AppSettings(
 /// <c>%LOCALAPPDATA%\ReTran\settings.json</c>). File thiếu hoặc hỏng trả về
 /// <see cref="AppSettings.Default"/>; việc ghi là nguyên tử (ghi file tạm rồi move).
 /// </summary>
-/// <param name="path">File path, or <see langword="null"/> to use <see cref="DefaultPath"/>. Đường dẫn file, hoặc <see langword="null"/> để dùng <see cref="DefaultPath"/>.</param>
-public sealed class AppSettingsService(string? path = null)
+public sealed class AppSettingsService
 {
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
@@ -120,8 +119,28 @@ public sealed class AppSettingsService(string? path = null)
     };
 
     private static readonly ConcurrentDictionary<string, object> PathLocks = new(StringComparer.OrdinalIgnoreCase);
-    private readonly string _path = Path.GetFullPath(path ?? DefaultPath);
+    private readonly string _path;
+    private readonly Func<string, bool> _fileExists;
+    private readonly Func<string, string> _readText;
     private object PathLock => PathLocks.GetOrAdd(_path, static _ => new object());
+
+    /// <summary>
+    /// Creates a settings store at the supplied path or <see cref="DefaultPath"/>.
+    /// Tạo kho settings tại đường dẫn được cung cấp hoặc <see cref="DefaultPath"/>.
+    /// </summary>
+    /// <param name="path">File path, or <see langword="null"/> for the default. Đường dẫn file, hoặc <see langword="null"/> để dùng mặc định.</param>
+    public AppSettingsService(string? path = null)
+        : this(path, File.Exists, File.ReadAllText)
+    {
+    }
+
+    internal AppSettingsService(
+        string? path, Func<string, bool> fileExists, Func<string, string> readText)
+    {
+        _path = Path.GetFullPath(path ?? DefaultPath);
+        _fileExists = fileExists ?? throw new ArgumentNullException(nameof(fileExists));
+        _readText = readText ?? throw new ArgumentNullException(nameof(readText));
+    }
 
     /// <summary>
     /// Raised after a successful <see cref="Save"/> or <see cref="Update"/> so open screens can
@@ -184,7 +203,9 @@ public sealed class AppSettingsService(string? path = null)
     /// <param name="update">Transformation applied to the latest settings. Phép biến đổi áp dụng trên settings mới nhất.</param>
     /// <returns>The transformed settings persisted to disk. Settings đã biến đổi và lưu xuống đĩa.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="update"/> or its result is null. Ném khi <paramref name="update"/> hoặc kết quả của nó là null.</exception>
-    /// <exception cref="IOException">Thrown when the temporary or destination file cannot be written or replaced. Ném khi không ghi hoặc thay thế được file tạm/đích.</exception>
+    /// <exception cref="JsonException">Thrown when an existing settings file contains malformed JSON. Ném khi file settings hiện có chứa JSON hỏng.</exception>
+    /// <exception cref="InvalidOperationException">Thrown when an existing settings file lacks required provider/language fields. Ném khi file settings hiện có thiếu trường provider/ngôn ngữ bắt buộc.</exception>
+    /// <exception cref="IOException">Thrown when an existing file cannot be read or the temporary/destination file cannot be written or replaced. Ném khi không đọc được file hiện có hoặc không ghi/thay thế được file tạm/đích.</exception>
     /// <exception cref="UnauthorizedAccessException">Thrown when the settings directory or file denies access. Ném khi thư mục hoặc file settings từ chối quyền truy cập.</exception>
     public AppSettings Update(Func<AppSettings, AppSettings> update)
     {
@@ -192,7 +213,7 @@ public sealed class AppSettingsService(string? path = null)
         AppSettings updated;
         lock (PathLock)
         {
-            updated = update(LoadCore());
+            updated = update(LoadForUpdateCore());
             ArgumentNullException.ThrowIfNull(updated);
             SaveCore(updated);
         }
@@ -204,22 +225,43 @@ public sealed class AppSettingsService(string? path = null)
     {
         try
         {
-            if (!File.Exists(_path)) return AppSettings.Default;
-            AppSettings? settings =
-                JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(_path), SerializerOptions);
-            if (settings is null
-                || string.IsNullOrEmpty(settings.Provider)
-                || string.IsNullOrEmpty(settings.Src)
-                || string.IsNullOrEmpty(settings.Dst))
-            {
-                return AppSettings.Default;
-            }
-            return settings;
+            if (!_fileExists(_path)) return AppSettings.Default;
+            return DeserializeRequired(_readText(_path));
         }
-        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException
+            or InvalidOperationException)
         {
             return AppSettings.Default;
         }
+    }
+
+    private AppSettings LoadForUpdateCore()
+    {
+        // Unlike the public compatibility fallback, an update must never turn an existing but
+        // unreadable/invalid file into defaults and then overwrite the user's other settings.
+        // Read directly: File.Exists can also return false for an inaccessible existing file.
+        try
+        {
+            return DeserializeRequired(_readText(_path));
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return AppSettings.Default;
+        }
+    }
+
+    private static AppSettings DeserializeRequired(string json)
+    {
+        AppSettings? settings = JsonSerializer.Deserialize<AppSettings>(json, SerializerOptions);
+        if (settings is null
+            || string.IsNullOrEmpty(settings.Provider)
+            || string.IsNullOrEmpty(settings.Src)
+            || string.IsNullOrEmpty(settings.Dst))
+        {
+            throw new InvalidOperationException(
+                "The existing settings file is incomplete; update aborted without writing defaults.");
+        }
+        return settings;
     }
 
     private void SaveCore(AppSettings s)

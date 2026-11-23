@@ -2303,6 +2303,182 @@ public class SetupCoordinatorTests : IDisposable
     }
 
     [Fact]
+    public async Task Delete_RpcRejectedBeforeDelete_RestoresSelectionsAndOriginalError()
+    {
+        (string deleted, string replacement) = PrepareLlmDeletion();
+        _bridge.DeleteError = new InvalidOperationException("RPC rejected before delete");
+        var coordinator = NewCoordinator();
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            coordinator.DeleteLlmModelAsync(deleted, [replacement], [], TestContext.Current.CancellationToken));
+
+        Assert.Equal("RPC rejected before delete", error.Message);
+        Assert.True(coordinator.IsComplete);
+        Assert.Equal(deleted, coordinator.ActiveLlm);
+        Assert.Equal(deleted, ReadSetupJson().ActiveLlm);
+        Assert.Equal(deleted, _settings.Load().LlmActiveModel);
+        Assert.Equal("fixture-secret", _settings.Load().ApiKey);
+        Assert.False(File.Exists(_deletionJson));
+        Assert.Single(_bridge.DeleteCalls);
+        Assert.Empty(_bridge.LlmDownloaded);
+    }
+
+    [Fact]
+    public async Task Delete_RpcErrorAfterConfirmedDelete_CompletesDeletedConfirmedState()
+    {
+        (string deleted, string replacement) = PrepareLlmDeletion();
+        _bridge.DeleteError = new InvalidOperationException("response lost after delete");
+        _bridge.DeleteErrorAfterRemoval = true;
+        var coordinator = NewCoordinator();
+
+        await coordinator.DeleteLlmModelAsync(
+            deleted, [replacement], [], TestContext.Current.CancellationToken);
+
+        Assert.True(coordinator.IsComplete);
+        Assert.Equal(replacement, coordinator.ActiveLlm);
+        Assert.Equal(replacement, ReadSetupJson().ActiveLlm);
+        Assert.Equal(replacement, _settings.Load().LlmActiveModel);
+        Assert.False(File.Exists(_deletionJson));
+        Assert.Single(_bridge.DeleteCalls);
+        Assert.Empty(_bridge.LlmDownloaded);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Delete_AmbiguousOutcome_SameSessionRetryReconcilesActualCatalog(bool confirmedMissing)
+    {
+        (string deleted, string replacement) = PrepareLlmDeletion();
+        _bridge.DeleteError = new InvalidOperationException("unknown RPC outcome");
+        _bridge.DeleteErrorAfterRemoval = confirmedMissing;
+        _bridge.LlmListError = new IOException("catalog temporarily unavailable");
+        var coordinator = NewCoordinator();
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            coordinator.DeleteLlmModelAsync(deleted, [replacement], [], TestContext.Current.CancellationToken));
+
+        Assert.Contains("unknown RPC outcome", error.Message, StringComparison.Ordinal);
+        Assert.Contains("retry", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+        Assert.Equal(deleted, coordinator.ActiveLlm);
+        Assert.Equal(deleted, ReadSetupJson().ActiveLlm);
+        Assert.Equal("Pending", JsonDocument.Parse(File.ReadAllText(_deletionJson)).RootElement.GetProperty("state").GetString());
+        Assert.Empty(_bridge.LlmDownloaded);
+
+        _bridge.LlmListError = null;
+        await coordinator.RetryAsync(TestContext.Current.CancellationToken);
+
+        string expected = confirmedMissing ? replacement : deleted;
+        Assert.Equal(expected, coordinator.ActiveLlm);
+        Assert.Equal(expected, ReadSetupJson().ActiveLlm);
+        Assert.Equal(expected, _settings.Load().LlmActiveModel);
+        Assert.True(coordinator.IsComplete);
+        Assert.False(File.Exists(_deletionJson));
+        Assert.Single(_bridge.DeleteCalls); // retry reconciles; it never deletes again
+        Assert.Empty(_bridge.LlmDownloaded);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Delete_AmbiguousOutcome_RestartReconcilesBeforeAnyDownload(bool confirmedMissing)
+    {
+        (string deleted, string replacement) = PrepareLlmDeletion();
+        _bridge.DeleteError = new InvalidOperationException("process lost the RPC response");
+        _bridge.DeleteErrorAfterRemoval = confirmedMissing;
+        _bridge.LlmListError = new IOException("catalog temporarily unavailable");
+        var coordinator = NewCoordinator();
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            coordinator.DeleteLlmModelAsync(deleted, [replacement], [], TestContext.Current.CancellationToken));
+
+        var restarted = NewCoordinator();
+        Assert.Equal(SetupStep.Failed, restarted.Step);
+        Assert.Equal(deleted, restarted.ActiveLlm); // restart alone proves nothing about deletion
+        Assert.Equal(deleted, ReadSetupJson().ActiveLlm);
+
+        _bridge.LlmListError = null;
+        await restarted.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        string expected = confirmedMissing ? replacement : deleted;
+        Assert.Equal(expected, restarted.ActiveLlm);
+        Assert.Equal(expected, ReadSetupJson().ActiveLlm);
+        Assert.Equal(expected, _settings.Load().LlmActiveModel);
+        Assert.True(restarted.IsComplete);
+        Assert.False(File.Exists(_deletionJson));
+        Assert.Single(_bridge.DeleteCalls);
+        Assert.Empty(_bridge.LlmDownloaded);
+    }
+
+    [Fact]
+    public async Task Delete_ConfirmedMarkerPrecedesFailClosedSelectionPersistence()
+    {
+        (string deleted, string replacement) = PrepareLlmDeletion();
+        var coordinator = NewCoordinator();
+        File.Delete(_setupJson);
+        Directory.CreateDirectory(_setupJson);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            coordinator.DeleteLlmModelAsync(deleted, [replacement], [], TestContext.Current.CancellationToken));
+
+        using JsonDocument journal = JsonDocument.Parse(File.ReadAllText(_deletionJson));
+        Assert.Equal("DeletedConfirmed", journal.RootElement.GetProperty("state").GetString());
+        Assert.Equal(deleted, journal.RootElement.GetProperty("name").GetString());
+        Assert.False(coordinator.IsComplete);
+        Assert.DoesNotContain(deleted, _bridge.LlmInstalled);
+        Assert.DoesNotContain("fixture-secret", File.ReadAllText(_deletionJson), StringComparison.Ordinal);
+    }
+
+    private (string Deleted, string Replacement) PrepareLlmDeletion()
+    {
+        string deleted = FakeCoreBridge.LlmCatalogNames[1];
+        string replacement = FakeCoreBridge.LlmCatalogNames[0];
+        WriteCompleteSetup(llmModels: [deleted, replacement], activeLlm: deleted);
+        _settings.Save(AppSettings.Default with
+        {
+            ApiKey = "fixture-secret",
+            LlmApiKey = "fixture-llm-secret",
+            OcrDet = FakeCoreBridge.DetModel,
+            OcrRec = FakeCoreBridge.RecModel,
+            LlmActiveModel = deleted,
+        });
+        _bridge.LlmInstalled.Add(deleted);
+        _bridge.LlmInstalled.Add(replacement);
+        _bridge.LlmRuntimeInstalled = true;
+        _bridge.LlmRuntimeTag = "b7234";
+        _bridge.LlmRuntimeLatestTag = "b7234";
+        return (deleted, replacement);
+    }
+
+    [Fact]
+    public void PendingDeletion_Restart_DoesNotApplyAfterDeleteOrExposeSecrets()
+    {
+        string deleted = FakeCoreBridge.LlmCatalogNames[1];
+        WriteCompleteSetup(llmModels: [deleted], activeLlm: deleted);
+        _settings.Save(AppSettings.Default with
+        {
+            ApiKey = "fixture-secret-never-journal",
+            LlmApiKey = "fixture-llm-secret-never-journal",
+            OcrDet = FakeCoreBridge.DetModel,
+            OcrRec = FakeCoreBridge.RecModel,
+            LlmActiveModel = deleted,
+        });
+        var coordinator = NewCoordinator();
+        coordinator.BeginModelDeletion(deleted, [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel], []);
+
+        var restarted = NewCoordinator();
+
+        Assert.Equal(deleted, restarted.ActiveLlm); // Pending is intent, not proof of deletion
+        Assert.Equal(SetupStep.Failed, restarted.Step);
+        Assert.False(restarted.IsComplete);
+        string journal = File.ReadAllText(_deletionJson);
+        Assert.Contains("pending", journal, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("fixture-secret", journal, StringComparison.Ordinal);
+        Assert.DoesNotContain("apiKey", journal, StringComparison.Ordinal);
+        Assert.Contains("rollback", journal, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(deleted, ReadSetupJson().ActiveLlm);
+    }
+
+    [Fact]
     public async Task Retry_NullActiveLlm_DoesNotCompleteUntilDeletedSettingsSynced()
     {
         string deleted = FakeCoreBridge.LlmCatalogNames[1];
@@ -2634,6 +2810,19 @@ public class SetupCoordinatorTests : IDisposable
         /// <summary>GGUF names the fake reports installed. Tên GGUF fake báo đã cài.</summary>
         public HashSet<string> LlmInstalled { get; } = [];
 
+        /// <summary>Optional delete failure used to exercise rejection and lost-response outcomes. Lỗi xoá tùy chọn để kiểm tra reject và mất phản hồi.</summary>
+        public Exception? DeleteError { get; set; }
+
+        /// <summary>Whether the fake removes the artifact before throwing <see cref="DeleteError"/>. Có xoá artifact trước khi ném <see cref="DeleteError"/> hay không.</summary>
+        public bool DeleteErrorAfterRemoval { get; set; }
+
+        /// <summary>Optional catalog failures for ambiguous deletion reconciliation. Lỗi catalog tùy chọn cho reconcile xoá chưa rõ kết quả.</summary>
+        public Exception? OcrListError { get; set; }
+        public Exception? LlmListError { get; set; }
+
+        /// <summary>Delete RPC names in call order. Tên các RPC xoá theo thứ tự gọi.</summary>
+        public List<string> DeleteCalls { get; } = [];
+
         /// <summary>GGUF names accepted via <c>llm.models.download</c>, in order. Tên GGUF nhận qua <c>llm.models.download</c>, theo thứ tự.</summary>
         public List<string> LlmDownloaded { get; } = [];
 
@@ -2710,7 +2899,8 @@ public class SetupCoordinatorTests : IDisposable
             return method switch
             {
                 "sidecar.ping" => Task.FromResult<JsonNode?>(JsonValue.Create("pong")),
-                "ocr.models.list" => Task.FromResult<JsonNode?>(BuildList()),
+                "ocr.models.list" => ListOcrModels(),
+                "ocr.models.delete" => DeleteOcrModel(@params),
                 "ocr.models.recommend" => Task.FromResult<JsonNode?>(new JsonObject
                 {
                     ["det"] = DetModel,
@@ -2722,7 +2912,8 @@ public class SetupCoordinatorTests : IDisposable
                 "llm.runtime.status" => Task.FromResult<JsonNode?>(BuildLlmRuntimeStatus()),
                 "llm.runtime.download" => DownloadLlmRuntime(@params),
                 "llm.runtime.check" => CheckLlmRuntime(@params),
-                "llm.models.list" => Task.FromResult<JsonNode?>(BuildLlmList()),
+                "llm.models.list" => ListLlmModels(),
+                "llm.models.delete" => DeleteLlmModel(@params),
                 "llm.models.download" => DownloadLlmModel(@params),
                 "llm.models.set" => SetLlmModel(@params),
                 _ => Task.FromResult<JsonNode?>(null),
@@ -2830,6 +3021,36 @@ public class SetupCoordinatorTests : IDisposable
             if (LlmSetThrows) throw new InvalidOperationException("fake: model not installed");
             LlmSetCalls.Add(@params!["name"]!.GetValue<string>());
             return Task.FromResult<JsonNode?>(new JsonObject { ["active"] = @params!["name"]!.GetValue<string>() });
+        }
+
+        private Task<JsonNode?> ListOcrModels()
+        {
+            if (OcrListError is not null) throw OcrListError;
+            return Task.FromResult<JsonNode?>(BuildList());
+        }
+
+        private Task<JsonNode?> ListLlmModels()
+        {
+            if (LlmListError is not null) throw LlmListError;
+            return Task.FromResult<JsonNode?>(BuildLlmList());
+        }
+
+        private Task<JsonNode?> DeleteOcrModel(JsonNode? @params)
+        {
+            string name = @params!["name"]!.GetValue<string>();
+            DeleteCalls.Add($"ocr:{name}");
+            if (DeleteError is null || DeleteErrorAfterRemoval) Installed.Remove(name);
+            if (DeleteError is not null) throw DeleteError;
+            return Task.FromResult<JsonNode?>(new JsonObject { ["deleted"] = true });
+        }
+
+        private Task<JsonNode?> DeleteLlmModel(JsonNode? @params)
+        {
+            string name = @params!["name"]!.GetValue<string>();
+            DeleteCalls.Add($"llm:{name}");
+            if (DeleteError is null || DeleteErrorAfterRemoval) LlmInstalled.Remove(name);
+            if (DeleteError is not null) throw DeleteError;
+            return Task.FromResult<JsonNode?>(new JsonObject { ["deleted"] = true });
         }
 
         private JsonNode BuildLlmList()

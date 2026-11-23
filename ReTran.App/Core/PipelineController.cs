@@ -210,7 +210,21 @@ public sealed record LlmServerStatusInfo(
 /// <param name="Error">Startup error shown until the user closes the popup. Lỗi khởi động hiển thị tới khi đóng popup.</param>
 public sealed record LlmStartupInfo(
     long Attempt, string Model, string Phase, long? BytesLoaded, long? BytesTotal,
-    double? BytesPerSec, bool ProgressAvailable, string? Error);
+    double? BytesPerSec, bool ProgressAvailable, string? Error)
+{
+    /// <summary>App-local startup identity, including the pre-accept phase when <see cref="Attempt"/> is zero. Định danh khởi động local của App, gồm cả giai đoạn trước accept khi <see cref="Attempt"/> bằng 0.</summary>
+    public long Generation { get; init; }
+}
+
+/// <summary>
+/// Generation-scoped visibility rules for the shared startup popup.
+/// Quy tắc hiển thị popup khởi động dùng chung theo generation.
+/// </summary>
+internal static class LlmStartupModalState
+{
+    internal static bool IsVisible(LlmStartupInfo? info, long? dismissedGeneration) =>
+        info is not null && !(info.Phase == "error" && info.Generation == dismissedGeneration);
+}
 
 /// <summary>
 /// App-side orchestrator over <see cref="ICorePeer"/>: starts/stops the Core pipeline
@@ -239,7 +253,7 @@ public sealed class PipelineController : IPipelineControl
     private readonly SemaphoreSlim _cacheGate = new(1, 1);
     private readonly object _startupGate = new();
     private CancellationTokenSource? _startupCts;
-    private TaskCompletionSource? _startupCompletion;
+    private TaskCompletionSource<Exception?>? _startupCompletion;
     private LlmStartupInfo? _llmStartup;
     private long _startupGeneration;
     private static readonly TimeSpan LlmStatusPollInterval = TimeSpan.FromMilliseconds(500);
@@ -376,7 +390,7 @@ public sealed class PipelineController : IPipelineControl
     /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
     /// <returns>A task that completes once Core acknowledges the start. Task hoàn tất khi Core xác nhận start.</returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="source"/> is null. Ném khi <paramref name="source"/> là null.</exception>
-    /// <exception cref="InvalidOperationException">Thrown for a concurrent Start or a failed/superseded local server attempt. Ném khi có Start đồng thởi hoặc attempt server local fail/bị thay thế.</exception>
+    /// <exception cref="InvalidOperationException">Thrown when already running, for a concurrent Start, a failed/superseded local server attempt, or unacknowledged cleanup. Ném khi pipeline đã chạy, có Start đồng thởi, attempt server local fail/bị thay thế, hoặc cleanup không được xác nhận.</exception>
     /// <exception cref="RpcException">
     /// Propagated unchanged from Core for invalid params, unknown provider, a session already
     /// running, or a requested OCR model that is not installed (<c>ocr-model-missing</c> — see
@@ -388,23 +402,45 @@ public sealed class PipelineController : IPipelineControl
     public async Task StartAsync(SourceSelection source, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(source);
+        AppSettings settings = _settings.Load();
+        bool localLlm = string.Equals(settings.Provider, "llm", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(settings.LlmMode, "local", StringComparison.OrdinalIgnoreCase);
         CancellationTokenSource startupCts;
-        TaskCompletionSource completion;
+        TaskCompletionSource<Exception?> completion;
         long generation;
         lock (_startupGate)
         {
+            if (IsRunning) throw new InvalidOperationException("pipeline already running");
             if (_startupCts is not null)
                 throw new InvalidOperationException("pipeline start is already in progress");
             startupCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            completion = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
             _startupCts = startupCts;
             _startupCompletion = completion;
             generation = ++_startupGeneration;
+            if (localLlm)
+            {
+                _llmStartup = new LlmStartupInfo(
+                    0, settings.LlmActiveModel ?? string.Empty, "loading",
+                    null, null, null, false, null)
+                {
+                    Generation = generation,
+                };
+            }
         }
 
+        Exception? completionError = null;
         try
         {
-            await StartFlowAsync(source, startupCts.Token, generation).ConfigureAwait(false);
+            // This event is deliberately before the first await: pre-accept failures and cancellation
+            // need a visible local generation even when Core never allocates an attempt.
+            if (localLlm) LlmStartupChanged?.Invoke();
+            await StartFlowAsync(source, settings, localLlm, startupCts.Token, generation).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            completionError = ex is OperationCanceledException ? null : ex;
+            throw;
         }
         finally
         {
@@ -417,7 +453,7 @@ public sealed class PipelineController : IPipelineControl
                 }
             }
             startupCts.Dispose();
-            completion.TrySetResult();
+            completion.TrySetResult(completionError);
         }
     }
 
@@ -427,13 +463,29 @@ public sealed class PipelineController : IPipelineControl
     /// </summary>
     /// <param name="ct">Token used to cancel waiting for cleanup, not the cleanup itself. Token hủy việc chờ cleanup, không hủy chính cleanup.</param>
     /// <returns>A task that completes after rollback, or immediately when no start is active. Task hoàn tất sau rollback, hoặc ngay khi không có start đang chạy.</returns>
-    public async Task CancelLlmStartupAsync(CancellationToken ct)
+    public Task CancelLlmStartupAsync(CancellationToken ct)
     {
-        Task? completion;
+        long? generation;
+        lock (_startupGate) generation = _startupCts is null ? null : _startupGeneration;
+        return generation is long current
+            ? CancelLlmStartupAsync(current, ct)
+            : Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Cancels only the specified local startup generation; a stale popup cannot cancel a newer Start.
+    /// Chỉ hủy generation khởi động local được chỉ định; popup cũ không thể hủy Start mới hơn.
+    /// </summary>
+    /// <param name="generation">Generation captured from <see cref="LlmStartupInfo.Generation"/>. Generation đọc từ <see cref="LlmStartupInfo.Generation"/>.</param>
+    /// <param name="ct">Token used to cancel waiting for cleanup, not the cleanup itself. Token hủy việc chờ cleanup, không hủy chính cleanup.</param>
+    /// <returns>A task that completes after acknowledged rollback, or immediately for a stale generation. Task hoàn tất sau rollback được xác nhận, hoặc ngay nếu generation đã cũ.</returns>
+    public async Task CancelLlmStartupAsync(long generation, CancellationToken ct)
+    {
+        Task<Exception?>? completion;
         bool changed = false;
         lock (_startupGate)
         {
-            if (_startupCts is null) return;
+            if (_startupCts is null || generation != _startupGeneration) return;
             _startupCts.Cancel();
             completion = _startupCompletion?.Task;
             if (_llmStartup is not null && _llmStartup.Phase != "error")
@@ -443,24 +495,24 @@ public sealed class PipelineController : IPipelineControl
             }
         }
         if (changed) LlmStartupChanged?.Invoke();
-        if (completion is not null) await completion.WaitAsync(ct).ConfigureAwait(false);
+        if (completion is not null)
+        {
+            Exception? error = await completion.WaitAsync(ct).ConfigureAwait(false);
+            if (error is not null) throw error;
+        }
     }
 
-    private async Task StartFlowAsync(SourceSelection source, CancellationToken ct, long generation)
+    private async Task StartFlowAsync(
+        SourceSelection source, AppSettings settings, bool localLlm, CancellationToken ct, long generation)
     {
-        bool localLlm = false;
         bool llmStopNeeded = false;
         bool coreStartSent = false;
         long attempt = 0;
-        string model = string.Empty;
+        string model = settings.LlmActiveModel ?? string.Empty;
         try
         {
             await EnsureCoreStartedAsync(ct).ConfigureAwait(false);
             EnsureHandlersWired();
-            AppSettings settings = _settings.Load();
-            localLlm = string.Equals(settings.Provider, "llm", StringComparison.OrdinalIgnoreCase)
-                && string.Equals(settings.LlmMode, "local", StringComparison.OrdinalIgnoreCase);
-            model = settings.LlmActiveModel ?? string.Empty;
 
             var ocr = new JsonObject { ["det"] = settings.OcrDet, ["rec"] = settings.OcrRec };
             ocr["mergeLines"] = settings.OcrMergeLines;
@@ -531,7 +583,10 @@ public sealed class PipelineController : IPipelineControl
                 if (attempt <= 0) throw new InvalidOperationException("llm-server start returned an invalid attempt.");
                 model = ReadNullableString(accepted, "model") ?? model;
                 PublishLlmStartup(generation, new LlmStartupInfo(
-                    attempt, model, "loading", null, null, null, false, null));
+                    attempt, model, "loading", null, null, null, false, null)
+                {
+                    Generation = generation,
+                });
 
                 while (true)
                 {
@@ -545,7 +600,10 @@ public sealed class PipelineController : IPipelineControl
                     }
                     PublishLlmStartup(generation, new LlmStartupInfo(
                         attempt, model, status.Phase, status.BytesLoaded, status.BytesTotal,
-                        status.BytesPerSec, status.ProgressAvailable, status.Error));
+                        status.BytesPerSec, status.ProgressAvailable, status.Error)
+                    {
+                        Generation = generation,
+                    });
                     if (status.State == "ready") break;
                     if (status.State == "error")
                         throw new InvalidOperationException(status.Error ?? "llm-server startup failed.");
@@ -568,44 +626,87 @@ public sealed class PipelineController : IPipelineControl
         }
         catch (OperationCanceledException)
         {
-            await RollbackStartAsync(coreStartSent, llmStopNeeded).ConfigureAwait(false);
+            InvalidOperationException? cleanupError = await RollbackStartAsync(
+                coreStartSent, llmStopNeeded).ConfigureAwait(false);
+            if (cleanupError is not null)
+            {
+                if (localLlm) PublishLlmStartupError(generation, attempt, model, cleanupError.Message);
+                throw cleanupError;
+            }
             if (localLlm) PublishLlmStartup(generation, null);
+            throw;
+        }
+        catch (Exception ex) when (IsPipelineAlreadyRunning(ex))
+        {
+            // The Core session belongs to somebody else. Never roll it back, including its LLM host.
+            if (localLlm) PublishLlmStartupError(generation, attempt, model, ex.Message);
             throw;
         }
         catch (Exception ex)
         {
-            await RollbackStartAsync(coreStartSent, llmStopNeeded).ConfigureAwait(false);
-            if (localLlm)
+            InvalidOperationException? cleanupError = await RollbackStartAsync(
+                coreStartSent, llmStopNeeded).ConfigureAwait(false);
+            if (cleanupError is not null)
             {
-                LlmStartupInfo? current;
-                lock (_startupGate) current = _llmStartup;
-                PublishLlmStartup(generation, (current ?? new LlmStartupInfo(
-                    attempt, model, "error", null, null, null, false, null)) with
-                {
-                    Phase = "error",
-                    Error = ex.Message,
-                });
+                var combined = new InvalidOperationException(
+                    $"{ex.Message} {cleanupError.Message}", new AggregateException(ex, cleanupError));
+                if (localLlm) PublishLlmStartupError(generation, attempt, model, combined.Message);
+                throw combined;
             }
+            if (localLlm) PublishLlmStartupError(generation, attempt, model, ex.Message);
             throw;
         }
     }
 
-    private async Task RollbackStartAsync(bool coreStartSent, bool llmStopNeeded)
+    private async Task<InvalidOperationException?> RollbackStartAsync(bool coreStartSent, bool llmStopNeeded)
     {
+        var failures = new List<string>();
         if (coreStartSent)
         {
             try { await _peer.CallAsync("core.stop", null, CancellationToken.None).ConfigureAwait(false); }
-            catch (Exception ex) { _log.LogWarning(ex, "core.stop rollback after Start failure was not acknowledged."); }
+            catch (Exception ex)
+            {
+                failures.Add($"core.stop: {ex.Message}");
+                _log.LogWarning(ex, "core.stop rollback after Start failure was not acknowledged.");
+            }
         }
         if (llmStopNeeded)
         {
             try { await _peer.CallAsync("llm.server.stop", null, CancellationToken.None).ConfigureAwait(false); }
-            catch (Exception ex) { _log.LogWarning(ex, "llm.server.stop rollback after Start failure was not acknowledged."); }
+            catch (Exception ex)
+            {
+                failures.Add($"llm.server.stop: {ex.Message}");
+                _log.LogWarning(ex, "llm.server.stop rollback after Start failure was not acknowledged.");
+            }
         }
+        if (failures.Count > 0)
+        {
+            return new InvalidOperationException(
+                $"Cleanup was not acknowledged ({string.Join(", ", failures)}). " +
+                "Pipeline state was preserved; retry Stop or cancel.");
+        }
+
         IsRunning = false;
         ActiveSource = null;
         ClearOverlayFrames();
+        return null;
     }
+
+    private void PublishLlmStartupError(long generation, long attempt, string model, string error)
+    {
+        LlmStartupInfo? current;
+        lock (_startupGate) current = _llmStartup;
+        PublishLlmStartup(generation, (current ?? new LlmStartupInfo(
+            attempt, model, "error", null, null, null, false, null)) with
+        {
+            Generation = generation,
+            Phase = "error",
+            Error = error,
+        });
+    }
+
+    private static bool IsPipelineAlreadyRunning(Exception ex) =>
+        ex is RpcException && ex.Message.StartsWith("pipeline already running", StringComparison.Ordinal);
 
     private void PublishLlmStartup(long generation, LlmStartupInfo? info)
     {
@@ -627,9 +728,18 @@ public sealed class PipelineController : IPipelineControl
     /// </summary>
     /// <param name="ct">Token used to cancel the call. Token dùng để hủy lời gọi.</param>
     /// <returns>A task that completes once Core acknowledges the stop. Task hoàn tất khi Core xác nhận dừng.</returns>
+    /// <exception cref="InvalidOperationException">Thrown when stop is not acknowledged; running/source state is preserved and Stop must be retried. Ném khi stop không được xác nhận; trạng thái running/source được giữ và phải thử Stop lại.</exception>
     public async Task StopAsync(CancellationToken ct)
     {
-        await _peer.CallAsync("core.stop", null, ct).ConfigureAwait(false);
+        try
+        {
+            await _peer.CallAsync("core.stop", null, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                "core.stop was not acknowledged; the pipeline state was preserved. Retry Stop.", ex);
+        }
         IsRunning = false;
         ActiveSource = null;
         ClearOverlayFrames();

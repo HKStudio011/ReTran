@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
@@ -450,6 +451,8 @@ public sealed class SetupCoordinator
         if (!TryBeginRun()) return;
         try
         {
+            if (!await ResolveDeletionBeforeSetupAsync(ct).ConfigureAwait(false)) return;
+
             // An explicit run (the modal's first-run trigger or the Settings re-run) revokes the
             // session skip: after "skip setup", the way back IS this run, and the wizard must be
             // visible again while it runs.
@@ -829,6 +832,27 @@ public sealed class SetupCoordinator
         try
         {
             if (Step != SetupStep.Failed) return;
+            try
+            {
+                if (!await ResolveDeletionBeforeSetupAsync(ct).ConfigureAwait(false)) return;
+            }
+            catch (InvalidOperationException ex) when (_deletionIntent is not null)
+            {
+                _logger?.LogWarning(ex, "setup: deletion repair is still incomplete");
+                return; // persistence helpers already published the fail-closed state
+            }
+            if (Step != SetupStep.Failed)
+            {
+                if (Step == SetupStep.ChoosingLlmModels
+                    && SetupModelSelection.HasCompleteAnswers(_state))
+                {
+                    // A stale settings-only active model can fail closed even though every Setup
+                    // answer is already valid. Finish the real Applying/write instead of re-asking.
+                    Step = SetupStep.Failed;
+                    _lastFailedStep = SetupStep.Checking;
+                }
+                else return;
+            }
 
             Error = null;
             CanSwitchToCpuFlavor = false;
@@ -867,26 +891,122 @@ public sealed class SetupCoordinator
     }
 
     /// <summary>
+    /// Deletes an OCR model and reconciles the real catalog before changing any saved selection.
+    /// Xoá model OCR và reconcile catalog thật trước khi thay đổi lựa chọn đã lưu.
+    /// </summary>
+    /// <param name="name">Catalog model to delete. Tên model catalog cần xoá.</param>
+    /// <param name="installed">Other installed models known before the RPC. Các model khác được biết là còn cài trước RPC.</param>
+    /// <param name="engineActive">Other engine-active models used for replacement preference. Các model engine active khác dùng để ưu tiên thay thế.</param>
+    /// <param name="ct">Token used for the delete RPC; reconciliation uses an uncancelled read when the outcome is unknown. Token cho RPC xoá; reconcile dùng lượt đọc không bị hủy khi kết quả chưa rõ.</param>
+    /// <returns>A task completed after confirmed deletion and consistent selection persistence, or after an acknowledged failed delete is reconciled. Task hoàn tất sau khi xoá được xác nhận và lựa chọn được lưu nhất quán, hoặc sau khi reconcile lượt xoá lỗi.</returns>
+    public Task DeleteOcrModelAsync(
+        string name, IReadOnlyCollection<string> installed, IReadOnlyCollection<string> engineActive,
+        CancellationToken ct = default) =>
+        DeleteModelAsync("ocr", name, installed, engineActive, ct);
+
+    /// <summary>
+    /// Deletes a GGUF model and reconciles the real catalog before changing any saved selection.
+    /// Xoá model GGUF và reconcile catalog thật trước khi thay đổi lựa chọn đã lưu.
+    /// </summary>
+    /// <param name="name">Catalog model to delete. Tên model catalog cần xoá.</param>
+    /// <param name="installed">Other installed models known before the RPC. Các model khác được biết là còn cài trước RPC.</param>
+    /// <param name="engineActive">Other engine-active models used for replacement preference. Các model engine active khác dùng để ưu tiên thay thế.</param>
+    /// <param name="ct">Token used for the delete RPC; reconciliation uses an uncancelled read when the outcome is unknown. Token cho RPC xoá; reconcile dùng lượt đọc không bị hủy khi kết quả chưa rõ.</param>
+    /// <returns>A task completed after confirmed deletion and consistent selection persistence, or after an acknowledged failed delete is reconciled. Task hoàn tất sau khi xoá được xác nhận và lựa chọn được lưu nhất quán, hoặc sau khi reconcile lượt xoá lỗi.</returns>
+    public Task DeleteLlmModelAsync(
+        string name, IReadOnlyCollection<string> installed, IReadOnlyCollection<string> engineActive,
+        CancellationToken ct = default) =>
+        DeleteModelAsync("llm", name, installed, engineActive, ct);
+
+    private async Task DeleteModelAsync(
+        string kind, string name, IReadOnlyCollection<string> installed,
+        IReadOnlyCollection<string> engineActive, CancellationToken ct)
+    {
+        if (!TryBeginRun()) throw new InvalidOperationException("Setup is busy; retry model deletion later.");
+        try
+        {
+            BeginModelDeletion(name, installed, engineActive, kind);
+            Exception? deleteError = null;
+            try
+            {
+                await _bridge.CallAsync($"{kind}.models.delete",
+                    new JsonObject { ["name"] = name }, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                deleteError = ex;
+            }
+
+            if (deleteError is null)
+            {
+                MarkDeletedConfirmed(installed, engineActive);
+                ApplyConfirmedDeletion();
+                return;
+            }
+
+            DeletionCatalog? catalog = await TryReadDeletionCatalogAsync(
+                kind, name, CancellationToken.None).ConfigureAwait(false);
+            if (catalog?.TargetInstalled == true)
+            {
+                RollbackModelDeletion();
+                ExceptionDispatchInfo.Capture(deleteError).Throw();
+                throw new InvalidOperationException("Unreachable", deleteError);
+            }
+            if (catalog?.TargetInstalled == false)
+            {
+                MarkDeletedConfirmed(catalog.Installed, catalog.EngineActive);
+                ApplyConfirmedDeletion();
+                return;
+            }
+
+            string guidance = $"Model deletion outcome is unknown; no selections or downloads were changed. Retry repair. Original error: {deleteError.Message}";
+            MarkDeletionPending(guidance);
+            throw new InvalidOperationException(guidance, deleteError);
+        }
+        finally
+        {
+            EndRun();
+        }
+    }
+
+    /// <summary>
     /// Persists a model-deletion intent before the engine RPC and closes the pipeline gate until repair completes.
     /// Ghi intent xoá model trước RPC engine và đóng cổng pipeline tới khi repair hoàn tất.
     /// </summary>
     /// <param name="name">Catalog name intended for deletion. Tên catalog dự định xoá.</param>
     /// <param name="installed">Models expected to remain installed. Các model dự kiến còn cài.</param>
     /// <param name="engineActive">Models active in the engine. Các model engine đang dùng.</param>
+    /// <param name="kind">Optional catalog family (<c>ocr</c>/<c>llm</c>); null infers it from current selections. Nhóm catalog tùy chọn (<c>ocr</c>/<c>llm</c>); null suy ra từ lựa chọn hiện tại.</param>
     /// <exception cref="InvalidOperationException">Thrown when another deletion needs repair or the journal cannot be persisted. Ném khi một lượt xoá khác cần repair hoặc không ghi được journal.</exception>
     public void BeginModelDeletion(
-        string name, IReadOnlyCollection<string> installed, IReadOnlyCollection<string> engineActive)
+        string name, IReadOnlyCollection<string> installed, IReadOnlyCollection<string> engineActive,
+        string? kind = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(name);
         ArgumentNullException.ThrowIfNull(installed);
         ArgumentNullException.ThrowIfNull(engineActive);
+        if (kind is not null && kind is not "ocr" and not "llm")
+            throw new ArgumentException("Model kind must be 'ocr' or 'llm'.", nameof(kind));
         if (_deletionJournalUnreadable)
             throw new InvalidOperationException("The model-deletion journal is unreadable; repair is required.");
-        if (_deletionIntent is { } existing && existing.Name != name)
-            throw new InvalidOperationException(
-                $"Model deletion '{existing.Name}' still requires repair; cannot start '{name}'.");
+        if (_deletionIntent is { } existing)
+        {
+            if (existing.Name != name)
+                throw new InvalidOperationException(
+                    $"Model deletion '{existing.Name}' still requires repair; cannot start '{name}'.");
+            return; // keep the original rollback snapshot and persisted lifecycle state
+        }
 
-        _deletionIntent = new ModelDeletionIntent(name, [.. installed], [.. engineActive]);
+        AppSettings settings = _settings.Load();
+        var rollback = new ModelDeletionRollback(
+            _state.Dets is null ? null : [.. _state.Dets], _state.ActiveDet,
+            _state.Recs is null ? null : [.. _state.Recs], _state.ActiveRec,
+            _state.Langs is null ? null : [.. _state.Langs], _state.ActiveLang,
+            _state.LlmModels is null ? null : [.. _state.LlmModels], _state.ActiveLlm,
+            _state.IsComplete, settings.OcrDet, settings.OcrRec, settings.LlmActiveModel);
+        _deletionIntent = new ModelDeletionIntent(
+            name, [.. installed], [.. engineActive], "Pending", rollback,
+            kind ?? InferDeletionKind(_state, name));
         _deletionSettingsWritten = false;
         _selectionPersistenceFailed = true;
         SkippedForSession = false;
@@ -917,11 +1037,44 @@ public sealed class SetupCoordinator
         ArgumentException.ThrowIfNullOrEmpty(name);
         ArgumentNullException.ThrowIfNull(installed);
         ArgumentNullException.ThrowIfNull(engineActive);
-        BeginModelDeletion(name, installed, engineActive);
-        SetupState originalSetup = _state;
-        (SetupState updatedSetup, _) = SetupModelSelection.AfterDelete(
-            originalSetup, _settings.Load(), name, installed, engineActive);
+        if (_deletionIntent is null) BeginModelDeletion(name, installed, engineActive);
+        if (_deletionIntent?.Name != name)
+            throw new InvalidOperationException("A different model deletion still requires repair.");
+        MarkDeletedConfirmed(installed, engineActive);
+        ApplyConfirmedDeletion();
+    }
 
+    private void MarkDeletedConfirmed(
+        IReadOnlyCollection<string> installed, IReadOnlyCollection<string> engineActive)
+    {
+        ModelDeletionIntent intent = _deletionIntent
+            ?? throw new InvalidOperationException("No model-deletion intent exists.");
+        _deletionIntent = intent with
+        {
+            State = "DeletedConfirmed",
+            Installed = [.. installed.Where(name => name != intent.Name)],
+            EngineActive = [.. engineActive.Where(name => name != intent.Name)],
+        };
+        try
+        {
+            SaveDeletionIntent();
+        }
+        catch (Exception ex)
+        {
+            throw FailDeletionPersistence("model-deletion.json", ex);
+        }
+    }
+
+    private void ApplyConfirmedDeletion()
+    {
+        ModelDeletionIntent intent = _deletionIntent
+            ?? throw new InvalidOperationException("No confirmed model deletion exists.");
+        if (intent.State != "DeletedConfirmed")
+            throw new InvalidOperationException("Pending deletion intent is not proof of deletion.");
+
+        SetupState originalSetup = RestoreSetupSelections(_state, intent.Rollback);
+        (SetupState updatedSetup, _) = SetupModelSelection.AfterDelete(
+            originalSetup, _settings.Load(), intent.Name, intent.Installed, intent.EngineActive);
         _selectionPersistenceFailed = true;
         SkippedForSession = false;
         Error = null;
@@ -932,14 +1085,12 @@ public sealed class SetupCoordinator
         string target = "setup.json";
         try
         {
-            // The first persisted state is always incomplete. Only after settings are synchronized may
-            // a complete selection be marked complete again; either failure therefore leaves a repair gate.
-            _state.Save();
+            _state.Save(); // always fail-closed before the settings write
             target = "settings.json";
             _settings.Update(currentSettings =>
             {
                 (SetupState latestSetup, AppSettings latestSettings) = SetupModelSelection.AfterDelete(
-                    originalSetup, currentSettings, name, installed, engineActive);
+                    originalSetup, currentSettings, intent.Name, intent.Installed, intent.EngineActive);
                 updatedSetup = latestSetup;
                 return latestSettings;
             });
@@ -952,11 +1103,8 @@ public sealed class SetupCoordinator
             }
 
             target = "setup.json/settings.json";
-            if (_deletionIntent is { } intent
-                && !DeletionStateConsistent(intent, requireCompleteAnswers: false))
-            {
+            if (!DeletionStateConsistent(intent, requireCompleteAnswers: false))
                 throw new InvalidOperationException("Model deletion state is still inconsistent.");
-            }
 
             target = "model-deletion.json";
             ClearDeletionIntent();
@@ -970,6 +1118,201 @@ public sealed class SetupCoordinator
         }
     }
 
+    private void RollbackModelDeletion()
+    {
+        ModelDeletionIntent intent = _deletionIntent
+            ?? throw new InvalidOperationException("No model-deletion intent exists.");
+        if (intent.State != "Pending")
+            throw new InvalidOperationException("A confirmed deletion cannot be rolled back as still installed.");
+
+        ModelDeletionRollback? rollback = intent.Rollback;
+        SetupState restored = RestoreSetupSelections(_state, rollback);
+        AppSettings current = _settings.Load();
+        string ocrDet = rollback?.OcrDet ?? current.OcrDet;
+        string ocrRec = rollback?.OcrRec ?? current.OcrRec;
+        string llmActive = rollback?.LlmActiveModel ?? current.LlmActiveModel;
+        bool wasComplete = rollback?.IsComplete == true && SetupModelSelection.HasCompleteAnswers(restored);
+
+        _selectionPersistenceFailed = true;
+        Error = null;
+        Step = SetupStep.Checking;
+        _state = restored with { IsComplete = false };
+        Publish();
+        string target = "setup.json";
+        try
+        {
+            _state.Save();
+            target = "settings.json";
+            _settings.Update(latest => latest with
+            {
+                OcrDet = ocrDet,
+                OcrRec = ocrRec,
+                LlmActiveModel = llmActive,
+            });
+            _deletionSettingsWritten = true; // cleanup requires a real write, even for a rejected RPC
+            target = "setup.json";
+            _state = restored with { IsComplete = wasComplete };
+            _state.Save();
+            target = "setup.json/settings.json";
+            if (!RollbackStateConsistent(rollback, wasComplete))
+                throw new InvalidOperationException("Model deletion rollback is still inconsistent.");
+
+            target = "model-deletion.json";
+            ClearDeletionIntent();
+            Error = null;
+            Step = _state.IsComplete ? SetupStep.Done : FirstIncompleteQuestionStep(_state);
+            Publish();
+        }
+        catch (Exception ex)
+        {
+            throw FailDeletionPersistence(target, ex);
+        }
+    }
+
+    private bool RollbackStateConsistent(ModelDeletionRollback? rollback, bool wasComplete)
+    {
+        AppSettings settings = _settings.Load();
+        if (rollback is null) return _state.IsComplete == wasComplete;
+        return _state.IsComplete == wasComplete
+            && SameNames(_state.Dets, rollback.Dets)
+            && SameNames(_state.Recs, rollback.Recs)
+            && SameNames(_state.Langs, rollback.Langs)
+            && SameNames(_state.LlmModels, rollback.LlmModels)
+            && _state.ActiveDet == rollback.ActiveDet
+            && _state.ActiveRec == rollback.ActiveRec
+            && _state.ActiveLang == rollback.ActiveLang
+            && _state.ActiveLlm == rollback.ActiveLlm
+            && settings.OcrDet == rollback.OcrDet
+            && settings.OcrRec == rollback.OcrRec
+            && settings.LlmActiveModel == rollback.LlmActiveModel;
+
+        static bool SameNames(List<string>? left, List<string>? right) =>
+            left is null ? right is null : right is not null && left.SequenceEqual(right, StringComparer.Ordinal);
+    }
+
+    private static SetupState RestoreSetupSelections(SetupState current, ModelDeletionRollback? rollback) =>
+        rollback is null ? current : current with
+        {
+            Dets = rollback.Dets is null ? null : [.. rollback.Dets],
+            ActiveDet = rollback.ActiveDet,
+            Recs = rollback.Recs is null ? null : [.. rollback.Recs],
+            ActiveRec = rollback.ActiveRec,
+            Langs = rollback.Langs is null ? null : [.. rollback.Langs],
+            ActiveLang = rollback.ActiveLang,
+            LlmModels = rollback.LlmModels is null ? null : [.. rollback.LlmModels],
+            ActiveLlm = rollback.ActiveLlm,
+            IsComplete = rollback.IsComplete,
+        };
+
+    private static string? InferDeletionKind(SetupState state, string name)
+    {
+        bool ocr = (state.Dets?.Contains(name, StringComparer.Ordinal) == true)
+            || (state.Recs?.Contains(name, StringComparer.Ordinal) == true)
+            || (state.Langs?.Contains(name, StringComparer.Ordinal) == true);
+        bool llm = state.LlmModels?.Contains(name, StringComparer.Ordinal) == true;
+        return ocr == llm ? null : ocr ? "ocr" : "llm";
+    }
+
+    private async Task<bool> ResolveDeletionBeforeSetupAsync(CancellationToken ct)
+    {
+        if (_deletionIntent is not { } intent) return true;
+        if (intent.State == "DeletedConfirmed")
+        {
+            ApplyConfirmedDeletion();
+            return true;
+        }
+
+        DeletionCatalog? catalog = await FindDeletionCatalogAsync(intent, ct).ConfigureAwait(false);
+        if (catalog?.TargetInstalled == true)
+        {
+            RollbackModelDeletion();
+            return true;
+        }
+        if (catalog?.TargetInstalled == false)
+        {
+            MarkDeletedConfirmed(catalog.Installed, catalog.EngineActive);
+            ApplyConfirmedDeletion();
+            return true;
+        }
+
+        MarkDeletionPending("Model deletion is still unconfirmed; selections and downloads remain unchanged. Retry repair.");
+        return false;
+    }
+
+    private async Task<DeletionCatalog?> FindDeletionCatalogAsync(ModelDeletionIntent intent, CancellationToken ct)
+    {
+        if (intent.Kind is "ocr" or "llm")
+            return await TryReadDeletionCatalogAsync(intent.Kind, intent.Name, ct).ConfigureAwait(false);
+
+        foreach (string kind in new[] { "ocr", "llm" })
+        {
+            DeletionCatalog? catalog = await TryReadDeletionCatalogAsync(kind, intent.Name, ct).ConfigureAwait(false);
+            if (catalog?.TargetInstalled is not null) return catalog;
+        }
+        return null;
+    }
+
+    private async Task<DeletionCatalog?> TryReadDeletionCatalogAsync(
+        string kind, string name, CancellationToken ct)
+    {
+        try
+        {
+            JsonNode? reply = await _bridge.CallAsync($"{kind}.models.list", null, ct).ConfigureAwait(false);
+            JsonArray? entries = kind == "ocr"
+                ? (reply as JsonObject)?["catalog"] as JsonArray
+                : reply as JsonArray;
+            if (entries is null) return null;
+            var installed = new List<string>();
+            var engineActive = new List<string>();
+            bool found = false;
+            bool targetInstalled = false;
+            foreach (JsonNode? node in entries)
+            {
+                if (node is not JsonObject entry
+                    || entry["name"] is not JsonValue nameValue
+                    || !nameValue.TryGetValue(out string? entryName)) continue;
+                bool isInstalled = entry["installed"] is JsonValue installedValue
+                    && installedValue.TryGetValue(out bool installedFlag) && installedFlag;
+                bool inUse = entry["inUse"] is JsonValue inUseValue
+                    && inUseValue.TryGetValue(out bool inUseFlag) && inUseFlag;
+                if (isInstalled) installed.Add(entryName);
+                if (inUse) engineActive.Add(entryName);
+                if (entryName == name)
+                {
+                    found = true;
+                    targetInstalled = isInstalled;
+                }
+            }
+            if (kind == "ocr" && reply is JsonObject root && root["active"] is JsonObject active)
+            {
+                foreach (string key in new[] { "det", "rec" })
+                {
+                    if (active[key]?.GetValue<string>() is { } activeName) engineActive.Add(activeName);
+                }
+            }
+            return new DeletionCatalog(
+                found ? targetInstalled : null,
+                installed.Where(candidate => candidate != name).Distinct(StringComparer.Ordinal).ToArray(),
+                engineActive.Where(candidate => candidate != name).Distinct(StringComparer.Ordinal).ToArray());
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger?.LogWarning(ex, "setup: could not reconcile {Kind} model deletion for {Name}", kind, name);
+            return null;
+        }
+    }
+
+    private void MarkDeletionPending(string message)
+    {
+        _selectionPersistenceFailed = true;
+        _state = _state with { IsComplete = false };
+        Error = SetupMessage.Of("setup.fail.unexpected", message);
+        EnterFailed(SetupStep.Checking);
+    }
+
+    private sealed record DeletionCatalog(
+        bool? TargetInstalled, IReadOnlyCollection<string> Installed, IReadOnlyCollection<string> EngineActive);
+
     private void RestoreDeletionIntent()
     {
         if (!File.Exists(_deletionJournalPath)) return;
@@ -978,7 +1321,8 @@ public sealed class SetupCoordinator
             ModelDeletionIntent? intent = JsonSerializer.Deserialize<ModelDeletionIntent>(
                 File.ReadAllText(_deletionJournalPath), DeletionJournalJsonOptions);
             if (intent is null || string.IsNullOrWhiteSpace(intent.Name)
-                || intent.Installed is null || intent.EngineActive is null)
+                || intent.Installed is null || intent.EngineActive is null
+                || intent.State is not ("Pending" or "DeletedConfirmed"))
             {
                 throw new JsonException("Invalid model-deletion journal.");
             }
@@ -987,14 +1331,26 @@ public sealed class SetupCoordinator
             _deletionSettingsWritten = false;
             _selectionPersistenceFailed = true;
             SkippedForSession = false;
+            if (intent.State == "Pending")
+            {
+                // Journal existence is only intent. Keep every answer untouched until Retry/Start
+                // reconciles the live catalog; never turn a rejected RPC into AfterDelete on restart.
+                _state = _state with { IsComplete = false };
+                Error = SetupMessage.Of("settings.status.saveFailed");
+                Step = SetupStep.Failed;
+                _lastFailedStep = SetupStep.Checking;
+                return;
+            }
+
+            SetupState original = RestoreSetupSelections(_state, intent.Rollback);
             (SetupState updatedSetup, _) = SetupModelSelection.AfterDelete(
-                _state, _settings.Load(), intent.Name, intent.Installed, intent.EngineActive);
+                original, _settings.Load(), intent.Name, intent.Installed, intent.EngineActive);
             _state = updatedSetup with { IsComplete = false };
             Step = SetupStep.Checking;
             try
             {
-                // Best effort: persist the repaired tombstoned selection immediately. The journal remains
-                // authoritative when this write fails, so a later coordinator still closes the gate.
+                // DeletedConfirmed is durable proof, so repair may continue after restart. The journal
+                // remains authoritative until a real settings write and consistency check complete.
                 _state.Save();
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)

@@ -99,7 +99,8 @@ public static class Program
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ReTran", "llm");
         var llmModels = new LlmModelManager(
             Path.Combine(llmRoot, "models"), Path.Combine(llmRoot, "models.json"));
-        var llmRuntime = new LlamaRuntimeManager(Path.Combine(llmRoot, "runtime"), HttpUa.CreateClient());
+        var llmRuntime = new LlamaRuntimeManager(
+            Path.Combine(llmRoot, "runtime"), HttpUa.CreateClient(), errorWriter: Console.Error);
         var llmServers = new LlamaServerSlot();
         AppDomain.CurrentDomain.ProcessExit += (_, _) => llmServers.Stop();
 

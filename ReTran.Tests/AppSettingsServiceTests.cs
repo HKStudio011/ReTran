@@ -308,6 +308,117 @@ public class AppSettingsServiceTests : IDisposable
     }
 
     [Fact]
+    public void Update_TrulyMissingFile_UsesDefaultsAndCreatesIt()
+    {
+        var service = new AppSettingsService(_path);
+
+        AppSettings updated = service.Update(current => current with { Dst = "en" });
+
+        Assert.Equal("en", updated.Dst);
+        Assert.Equal("en", service.Load().Dst);
+        Assert.True(File.Exists(_path));
+    }
+
+    [Fact]
+    public void Update_MalformedExistingFile_AbortsWithoutWriteOrDataLoss()
+    {
+        Directory.CreateDirectory(_dir);
+        byte[] original = """{"provider":"google","src":"auto","dst":"""u8.ToArray();
+        File.WriteAllBytes(_path, original);
+        var service = new AppSettingsService(_path);
+        bool updaterCalled = false;
+
+        Assert.Throws<System.Text.Json.JsonException>(() => service.Update(current =>
+        {
+            updaterCalled = true;
+            return current with { Dst = "en" };
+        }));
+
+        Assert.False(updaterCalled);
+        Assert.Equal(original, File.ReadAllBytes(_path));
+        Assert.Empty(Directory.GetFiles(_dir, "*.tmp"));
+        Assert.Equal(AppSettings.Default, service.Load()); // public compatibility fallback remains
+    }
+
+    [Theory]
+    [InlineData("""{"provider":"google","src":"auto"}""")]
+    [InlineData("""{"provider":"","src":"auto","dst":"vi"}""")]
+    public void Update_IncompleteRequiredFields_AbortsWithoutWriteOrDataLoss(string json)
+    {
+        Directory.CreateDirectory(_dir);
+        byte[] original = System.Text.Encoding.UTF8.GetBytes(json);
+        File.WriteAllBytes(_path, original);
+        var service = new AppSettingsService(_path);
+        bool updaterCalled = false;
+
+        Assert.Throws<InvalidOperationException>(() => service.Update(current =>
+        {
+            updaterCalled = true;
+            return current with { OcrDet = "PP-OCRv6_medium_det" };
+        }));
+
+        Assert.False(updaterCalled);
+        Assert.Equal(original, File.ReadAllBytes(_path));
+        Assert.Empty(Directory.GetFiles(_dir, "*.tmp"));
+    }
+
+    [Fact]
+    public void Update_ExistingFileReadIOException_DoesNotRunUpdaterOrReplaceBytes()
+    {
+        Directory.CreateDirectory(_dir);
+        byte[] original = """{"provider":"google","src":"auto","dst":"vi","ocrDet":"keep-me"}"""u8.ToArray();
+        File.WriteAllBytes(_path, original);
+        var service = new AppSettingsService(_path);
+        bool updaterCalled = false;
+        Exception? error;
+        using (new FileStream(_path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            error = Record.Exception(() => service.Update(current =>
+            {
+                updaterCalled = true;
+                return current with { OcrDet = "overwrite-me" };
+            }));
+        }
+
+        Assert.True(error is IOException or UnauthorizedAccessException);
+        Assert.False(updaterCalled);
+        Assert.Equal(original, File.ReadAllBytes(_path));
+    }
+
+    [Theory]
+    [InlineData("io")]
+    [InlineData("unauthorized")]
+    public void Update_InjectedExistingFileReadFailure_NeverRunsUpdaterOrWrites(string failure)
+    {
+        Directory.CreateDirectory(_dir);
+        byte[] original = """{"provider":"google","src":"auto","dst":"vi","ocrDet":"keep-me"}"""u8.ToArray();
+        File.WriteAllBytes(_path, original);
+        var service = new AppSettingsService(
+            _path,
+            fileExists: _ => true,
+            readText: _ => throw (failure == "io"
+                ? new IOException("fixture read failure")
+                : new UnauthorizedAccessException("fixture access denied")));
+        bool updaterCalled = false;
+
+        Exception error = failure == "io"
+            ? Assert.Throws<IOException>(() => service.Update(Update))
+            : Assert.Throws<UnauthorizedAccessException>(() => service.Update(Update));
+
+        Assert.NotNull(error);
+        Assert.False(updaterCalled);
+        Assert.Equal(original, File.ReadAllBytes(_path));
+        Assert.Empty(Directory.GetFiles(_dir, "*.tmp"));
+        Assert.Equal(AppSettings.Default, service.Load());
+
+        AppSettings Update(AppSettings current)
+        {
+            updaterCalled = true;
+            return current with { OcrDet = "overwrite-me" };
+        }
+    }
+
+    [Fact]
     public async Task Update_ConcurrentWriters_PreserveBothFields()
     {
         var ocrWriter = new AppSettingsService(_path);

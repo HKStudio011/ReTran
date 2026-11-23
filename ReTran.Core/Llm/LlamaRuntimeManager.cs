@@ -97,10 +97,12 @@ public sealed record LlmRuntimeDownload(long Attempt, Task Task);
 /// <param name="rootDir">Directory holding <c>&lt;tag&gt;/</c> build folders and <c>runtime.json</c>. Thư mục chứa các bản build theo tag và <c>runtime.json</c>.</param>
 /// <param name="github">HTTP client for the GitHub API and asset downloads. HTTP client cho GitHub API và tải asset.</param>
 /// <param name="downloader">Optional (uri, targetPath) downloader; tests inject a fake. Hàm tải tuỳ chọn (uri, đường dẫn đích); test inject bản giả.</param>
+/// <param name="errorWriter">Optional failure sink supplied by the host; null discards diagnostics. Sink lỗi tùy chọn do host cung cấp; null bỏ qua diagnostic.</param>
 public sealed class LlamaRuntimeManager(
     string rootDir,
     HttpClient github,
-    Func<Uri, string, CancellationToken, Task>? downloader = null)
+    Func<Uri, string, CancellationToken, Task>? downloader = null,
+    TextWriter? errorWriter = null)
 {
     /// <summary>GitHub releases endpoint scanned for Windows build assets. Endpoint releases GitHub quét để tìm asset bản Windows.</summary>
     public static readonly string ReleasesUrl =
@@ -108,6 +110,7 @@ public sealed class LlamaRuntimeManager(
 
     private readonly string _rootDir = rootDir ?? throw new ArgumentNullException(nameof(rootDir));
     private readonly HttpClient _github = github ?? throw new ArgumentNullException(nameof(github));
+    private readonly TextWriter _errorWriter = errorWriter ?? TextWriter.Null;
 
     // Resolved at use: the default downloader reports progress, so it must be an instance method (a
     // field initializer cannot reference one). Giải quyết lúc dùng: downloader mặc định báo tiến độ
@@ -331,7 +334,7 @@ public sealed class LlamaRuntimeManager(
                     _downloadError = ex.Message;
                 }
             }
-            Console.Error.WriteLine($"llm.runtime.download failed for '{flavor}': {ex.Message}");
+            _errorWriter.WriteLine($"llm.runtime.download failed for '{flavor}': {ex.Message}");
             throw;
         }
         catch (Exception ex)
@@ -348,7 +351,7 @@ public sealed class LlamaRuntimeManager(
                     _downloadError = ex.Message;
                 }
             }
-            Console.Error.WriteLine($"llm.runtime.download failed for '{flavor}': {ex.Message}");
+            _errorWriter.WriteLine($"llm.runtime.download failed for '{flavor}': {ex.Message}");
             throw;
         }
         finally

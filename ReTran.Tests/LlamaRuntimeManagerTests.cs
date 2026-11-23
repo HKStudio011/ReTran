@@ -340,6 +340,22 @@ public class LlamaRuntimeManagerTests : IDisposable
     }
 
     [Fact]
+    public async Task DownloadFailure_WritesThroughInjectedErrorWriter()
+    {
+        using var errorWriter = new StringWriter();
+        var manager = new LlamaRuntimeManager(
+            _dir, new HttpClient(new GhHandler(ReleasesJson)),
+            (uri, target, ct) => Task.FromException(new HttpRequestException("network down")),
+            errorWriter);
+
+        await Assert.ThrowsAsync<HttpRequestException>(() =>
+            manager.DownloadAsync("cpu", TestContext.Current.CancellationToken));
+
+        Assert.Contains("llm.runtime.download failed for 'cpu': network down",
+            errorWriter.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Download_CallerCancellation_MarksCancelled()
     {
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

@@ -1113,7 +1113,7 @@ Model `Hy-MT2-1.8B-UD-Q4_K_XL.gguf`, 1.169.028.064 byte; poll `llm.server.status
 | Spawn đầu tiên quan sát được | 233,984 ms | 247,953 ms |
 | Start → `state=ready` | **59.653,449 ms (59,653 s)** | **2.224,786 ms (2,225 s)** |
 | Status RT trong load: count / mean / p95 / max | 86 / 0,527 / 1,351 / 3,957 ms | 4 / 0,957 / 1,481 / 1,481 ms |
-| WorkingSet llama-server khi ready | 1.653.047.296 B (**1.576,5 MiB**) | 1.635.549.184 B (**1.559,8 MiB**) |
+| WorkingSet llama-server sau ready-poll | 1.653.047.296 B (**1.576,5 MiB**) | 1.635.549.184 B (**1.559,8 MiB**) |
 | PeakWorkingSet llama-server | 1.959.243.776 B (**1.868,5 MiB**) | 1.635.549.184 B (**1.559,8 MiB**) |
 | `llm.server.stop` round-trip | 299,470 ms | 322,162 ms |
 | Process con biến mất sau Stop | 189,365 ms | 156,669 ms |

@@ -888,9 +888,7 @@
                 .Where(candidate => candidate.InUse && candidate.Name != model.Name)
                 .Select(candidate => candidate.Name)
                 .ToArray();
-            Setup.BeginModelDeletion(model.Name, installed, engineActive);
-            await Pipeline.DeleteOcrModelAsync(model.Name, CancellationToken.None);
-            Setup.RemoveDeletedModel(model.Name, installed, engineActive);
+            await Setup.DeleteOcrModelAsync(model.Name, installed, engineActive, CancellationToken.None);
             AppSettings synchronized = SettingsStore.Load();
             _ocrDetPick = synchronized.OcrDet;
             _ocrRecPick = synchronized.OcrRec;
@@ -1372,9 +1370,7 @@
                 .Where(candidate => candidate.InUse && candidate.Name != model.Name)
                 .Select(candidate => candidate.Name)
                 .ToArray();
-            Setup.BeginModelDeletion(model.Name, installed, engineActive);
-            await Pipeline.DeleteLlmModelAsync(model.Name, CancellationToken.None);
-            Setup.RemoveDeletedModel(model.Name, installed, engineActive);
+            await Setup.DeleteLlmModelAsync(model.Name, installed, engineActive, CancellationToken.None);
             AppSettings synchronized = SettingsStore.Load();
             _llmActiveModel = synchronized.LlmActiveModel;
             _llmActiveModelBaseline = synchronized.LlmActiveModel;
@@ -1596,8 +1592,8 @@
         _ = Coordinator.StartUpdateAsync(release);
     }
 
-    // "Chạy lại setup": force wizard = SỬA LỖI chạy lại từ bước 1 (xoá answers + marker, hỏi lại cả
-    // 3 màn, pipeline xác minh lại; model đã cài thật vẫn không tải lại — spec BA 17-11).
+    // "Chạy lại setup": force wizard = SỬA LỖI chạy lại từ bước 1, giữ answers còn hợp lệ,
+    // xoá step markers/IsComplete và chỉ repair artifact hoặc hỏi lại phần còn thiếu; model hợp lệ không tải lại.
     private bool _rerunStarted;
 
     private void RerunSetup()

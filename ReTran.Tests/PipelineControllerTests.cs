@@ -975,6 +975,205 @@ public class PipelineControllerTests : IDisposable
         Assert.True(controller.IsRunning);
     }
 
+    [Fact]
+    public async Task Start_PublishesImmediately_AndCancelsBeforeAccepted()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        UseLocalLlm();
+        var serverStartCalled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        peer.AsyncReply = (method, _, ct) => method switch
+        {
+            "llm.server.start" => WaitForAcceptance(method, ct),
+            "llm.server.status" => Task.FromResult<JsonNode?>(LocalStatus(state: "loading", phase: "loading")),
+            _ => Task.FromResult<JsonNode?>(new JsonObject { ["running"] = false }),
+        };
+        PipelineController controller = CreateController(peer, new OverlayState());
+        Task start = controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None);
+        try
+        {
+            await serverStartCalled.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+            Assert.NotNull(controller.LlmStartup); // local generation is visible before Core accepts an attempt
+            Assert.Equal(0, controller.LlmStartup.Attempt);
+
+            await controller.CancelLlmStartupAsync(CancellationToken.None);
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => start);
+            Assert.DoesNotContain(peer.Calls, call => call.Method == "core.start");
+            Assert.Single(peer.Calls, call => call.Method == "llm.server.stop");
+            Assert.Null(controller.LlmStartup);
+        }
+        finally
+        {
+            if (!start.IsCompleted)
+            {
+                try { await controller.CancelLlmStartupAsync(CancellationToken.None); } catch (InvalidOperationException) { }
+            }
+            try { await start; } catch (OperationCanceledException) { } catch (InvalidOperationException) { }
+        }
+
+        async Task<JsonNode?> WaitForAcceptance(string method, CancellationToken ct)
+        {
+            serverStartCalled.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            return AcceptedLocalStart();
+        }
+    }
+
+    [Fact]
+    public async Task Cancel_StalePreAcceptGeneration_DoesNotStopAnotherSession()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        UseLocalLlm();
+        int serverStarts = 0;
+        var firstCalled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondCalled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        peer.AsyncReply = (method, _, ct) => method switch
+        {
+            "llm.server.start" => HoldServerStart(ct),
+            _ => Task.FromResult<JsonNode?>(new JsonObject { ["running"] = false }),
+        };
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        Task first = controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None);
+        await firstCalled.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        long staleGeneration = controller.LlmStartup!.Generation;
+        await controller.CancelLlmStartupAsync(staleGeneration, CancellationToken.None);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
+
+        Task second = controller.StartAsync(new SourceSelection(false, 1, null), CancellationToken.None);
+        await secondCalled.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        int stopsBeforeStaleCancel = peer.Calls.Count(call => call.Method == "llm.server.stop");
+        await controller.CancelLlmStartupAsync(staleGeneration, CancellationToken.None);
+
+        Assert.False(second.IsCompleted);
+        Assert.Equal(stopsBeforeStaleCancel, peer.Calls.Count(call => call.Method == "llm.server.stop"));
+        Assert.NotEqual(staleGeneration, controller.LlmStartup!.Generation);
+
+        await controller.CancelLlmStartupAsync(controller.LlmStartup.Generation, CancellationToken.None);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => second);
+
+        async Task<JsonNode?> HoldServerStart(CancellationToken ct)
+        {
+            int current = Interlocked.Increment(ref serverStarts);
+            if (current == 1) firstCalled.TrySetResult();
+            if (current == 2) secondCalled.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            return AcceptedLocalStart();
+        }
+    }
+
+    [Theory]
+    [InlineData("google")]
+    [InlineData("api")]
+    [InlineData("local")]
+    public async Task Start_AfterSuccessfulStart_RejectsWithoutStoppingExistingSession(string mode)
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        if (mode == "local") UseLocalLlm();
+        else
+        {
+            new AppSettingsService(_settingsPath).Save(AppSettings.Default with
+            {
+                Provider = mode == "google" ? "google" : "llm",
+                LlmMode = mode == "api" ? "api" : "local",
+            });
+        }
+        PipelineController controller = CreateController(peer, new OverlayState());
+        var source = new SourceSelection(false, 0, null);
+        await controller.StartAsync(source, CancellationToken.None);
+        int callsAfterSuccess = peer.Calls.Count;
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            controller.StartAsync(new SourceSelection(true, 0, "0xBEEF"), CancellationToken.None));
+
+        Assert.Equal("pipeline already running", error.Message);
+        Assert.Equal(callsAfterSuccess, peer.Calls.Count);
+        Assert.DoesNotContain(peer.Calls, call => call.Method is "core.stop" or "llm.server.stop");
+        Assert.True(controller.IsRunning);
+        Assert.Equal(source, controller.ActiveSource);
+    }
+
+    [Theory]
+    [InlineData("google")]
+    [InlineData("local")]
+    public async Task Start_CoreAlreadyRunning_NeverRollsBackExistingSession(string mode)
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        if (mode == "local") UseLocalLlm();
+        else new AppSettingsService(_settingsPath).Save(AppSettings.Default);
+        peer.Reply = method => method switch
+        {
+            "llm.server.start" => AcceptedLocalStart(),
+            "llm.server.status" => LocalStatus(),
+            "core.start" => throw new RpcException(-32600, "pipeline already running (core.stop first)."),
+            _ => null,
+        };
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        RpcException error = await Assert.ThrowsAsync<RpcException>(() =>
+            controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None));
+
+        Assert.Contains("pipeline already running", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(peer.Calls, call => call.Method is "core.stop" or "llm.server.stop");
+        Assert.False(controller.IsRunning); // this controller never owned the external Core session
+        Assert.Null(controller.ActiveSource);
+    }
+
+    [Fact]
+    public async Task Cancel_LlmStopFailure_IsNotReportedAsCleanCancellation()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        UseLocalLlm();
+        var accepted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        peer.Called += method => { if (method == "llm.server.start") accepted.TrySetResult(); };
+        peer.Reply = method => method switch
+        {
+            "llm.server.start" => AcceptedLocalStart(),
+            "llm.server.status" => LocalStatus(state: "loading", phase: "loading"),
+            "llm.server.stop" => throw new RpcException(-32603, "stop was not acknowledged"),
+            _ => null,
+        };
+        PipelineController controller = CreateController(peer, new OverlayState());
+        Task start = controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None);
+        await accepted.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+
+        InvalidOperationException cancelError = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            controller.CancelLlmStartupAsync(CancellationToken.None));
+        InvalidOperationException startError = await Assert.ThrowsAsync<InvalidOperationException>(() => start);
+
+        Assert.Contains("retry", cancelError.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("llm.server.stop", startError.Message, StringComparison.Ordinal);
+        Assert.Equal("error", controller.LlmStartup?.Phase);
+        Assert.Contains("retry", controller.LlmStartup?.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.False(controller.IsRunning);
+        Assert.Null(controller.ActiveSource);
+    }
+
+    [Fact]
+    public async Task Start_RollbackFailure_SurfacesCleanupErrorAndRetryGuidance()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        UseLocalLlm();
+        peer.Reply = method => method switch
+        {
+            "llm.server.start" => AcceptedLocalStart(),
+            "llm.server.status" => LocalStatus(),
+            "core.start" => throw new RpcException(-32603, "core start exploded"),
+            "llm.server.stop" => throw new RpcException(-32603, "stop was not acknowledged"),
+            _ => null,
+        };
+        PipelineController controller = CreateController(peer, new OverlayState());
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            controller.StartAsync(new SourceSelection(false, 0, null), CancellationToken.None));
+
+        Assert.Contains("core start exploded", error.Message, StringComparison.Ordinal);
+        Assert.Contains("llm.server.stop", error.Message, StringComparison.Ordinal);
+        Assert.Contains("retry", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("error", controller.LlmStartup?.Phase);
+        Assert.Contains("retry", controller.LlmStartup?.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Theory]
     [InlineData("error")]
     [InlineData("superseded")]
@@ -1520,6 +1719,26 @@ public class PipelineControllerTests : IDisposable
         await controller.StopAsync(CancellationToken.None);
 
         Assert.Null(controller.ActiveSource);
+    }
+
+    [Fact]
+    public async Task Stop_CleanupFailure_PreservesSessionAndSurfacesRetryGuidance()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        new AppSettingsService(_settingsPath).Save(AppSettings.Default);
+        PipelineController controller = CreateController(peer, new OverlayState());
+        var source = new SourceSelection(false, 0, null);
+        await controller.StartAsync(source, CancellationToken.None);
+        peer.Reply = method => method == "core.stop"
+            ? throw new RpcException(-32603, "core.stop was not acknowledged") : null;
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            controller.StopAsync(CancellationToken.None));
+
+        Assert.Contains("core.stop", error.Message, StringComparison.Ordinal);
+        Assert.Contains("retry", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(controller.IsRunning);
+        Assert.Equal(source, controller.ActiveSource);
     }
 
     [Fact]

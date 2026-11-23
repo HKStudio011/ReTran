@@ -73,8 +73,8 @@
 
 @code {
     private ElementReference _dialogRef;
-    private long? _dismissedAttempt;
-    private long? _visibleAttempt;
+    private long? _dismissedGeneration;
+    private long? _visibleGeneration;
     private bool _wasVisible;
     private bool _focusPending;
     private bool _canceling;
@@ -87,8 +87,7 @@
     public required PipelineController Pipeline { get; set; }
 
     private LlmStartupInfo? Current => Pipeline.LlmStartup;
-    private bool Visible => Current is { } info
-        && !(info.Phase == "error" && _dismissedAttempt == info.Attempt);
+    private bool Visible => LlmStartupModalState.IsVisible(Current, _dismissedGeneration);
 
     private string PhaseText => Current?.Phase switch
     {
@@ -126,7 +125,7 @@
         get
         {
             if (Current is not { BytesPerSec: > 0, BytesLoaded: long loaded, BytesTotal: long total } info
-                || info.Phase == "ready") return null;
+                || !info.ProgressAvailable || info.Phase == "ready") return null;
             long remaining = total - Math.Min(loaded, total);
             return remaining > 0
                 ? TimeSpan.FromSeconds(remaining / info.BytesPerSec.Value)
@@ -140,7 +139,7 @@
         L.Changed += OnLanguageChanged;
         _focusPending = Visible;
         _wasVisible = Visible;
-        _visibleAttempt = Current?.Attempt;
+        _visibleGeneration = Current?.Generation;
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -156,12 +155,12 @@
 
     private void OnStartupChanged() => _ = InvokeAsync(() =>
     {
-        if (Current?.Phase != "error") _dismissedAttempt = null;
+        if (Current?.Phase != "error") _dismissedGeneration = null;
         if (Current is null || Current.Phase == "error") _canceling = false;
         bool visible = Visible;
-        if (visible && (!_wasVisible || _visibleAttempt != Current?.Attempt)) _focusPending = true;
+        if (visible && (!_wasVisible || _visibleGeneration != Current?.Generation)) _focusPending = true;
         _wasVisible = visible;
-        _visibleAttempt = Current?.Attempt;
+        _visibleGeneration = Current?.Generation;
         StateHasChanged();
     });
 
@@ -169,9 +168,14 @@
 
     private async Task CancelAsync()
     {
-        if (_canceling) return;
+        if (_canceling || Current is not { } current) return;
         _canceling = true;
-        try { await Pipeline.CancelLlmStartupAsync(CancellationToken.None); }
+        long generation = current.Generation;
+        try
+        {
+            try { await Pipeline.CancelLlmStartupAsync(generation, CancellationToken.None); }
+            catch (InvalidOperationException) { /* controller publishes cleanup failure + retry guidance */ }
+        }
         finally
         {
             _canceling = false;
@@ -181,7 +185,7 @@
 
     private void Close()
     {
-        if (Current is { Phase: "error" } info) _dismissedAttempt = info.Attempt;
+        if (Current is { Phase: "error" } info) _dismissedGeneration = info.Generation;
         _wasVisible = false;
     }
 
