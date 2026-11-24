@@ -560,9 +560,13 @@ Các công cụ/skill dưới đây đã được cài sẵn trong môi trườn
 
 ### OpenCodeReview / OCR delegate (đã cài sẵn)
 
-- Dùng `ocr_health` để kiểm tra cấu hình, `ocr_review` với `preview=true` để xem phạm vi trước, rồi review commit/range hoặc workspace phù hợp.
-- OCR yêu cầu LLM endpoint hợp lệ. Nếu thiếu endpoint, báo đúng blocker; không cấu hình credential khi chưa được phép và không tuyên bố OCR đã chạy thành công.
-- Review thủ công hoặc subagent review là biện pháp thay thế có kiểm soát, nhưng không được gắn nhãn là OCR/OpenCodeReview.
+- Khi user yêu cầu **OCR delegate**, dùng đúng chuỗi host-agent delegation, không cần LLM endpoint:
+  1. `ocr delegate preview --from <base-ref> --to <target-ref> --background-file <requirements.md> --format json` để lấy metadata/phạm vi.
+  2. `ocr delegate rule --from <base-ref> --to <target-ref> --background-file <requirements.md> --format json <paths...>` để lấy review spec theo nhóm nội dung.
+  3. Host agent (session chính hoặc subagent được dispatch) đọc rule JSON và review theo spec đó; không phải review tự do.
+- Chỉ dùng `ocr_review` hoặc `ocr scan` khi workflow cần LLM trực tiếp. Dùng `ocr_health` để kiểm tra cấu hình và `preview=true` để xem phạm vi trước khi review commit/range.
+- Nếu thiếu endpoint, báo đúng blocker cho các workflow cần LLM; không cấu hình credential khi chưa được phép và không tuyên bố OCR đã chạy thành công.
+- Review thủ công không theo `ocr delegate rule` không được gắn nhãn là OCR delegate.
 
 ### `security-audit` skill
 
