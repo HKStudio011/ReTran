@@ -77,6 +77,13 @@ public interface ISetupCoreBridge
     /// Disposes and starts the core process again (the existing kill+start path).
     /// Dispose và khởi động lại tiến trình core (đường kill+start có sẵn).
     /// </summary>
+    /// <summary>
+    /// Ensures the Core process is running without restarting an already healthy peer.
+    /// Đảm bảo tiến trình Core đang chạy mà không khởi động lại peer vẫn khỏe.
+    /// </summary>
+    /// <param name="ct">Cancellation token. Token hủy.</param>
+    Task EnsureStartedAsync(CancellationToken ct);
+
     /// <param name="ct">Cancellation token. Token hủy.</param>
     Task RestartAsync(CancellationToken ct);
 }
@@ -1241,6 +1248,7 @@ public sealed class SetupCoordinator
 
     private async Task<DeletionCatalog?> FindDeletionCatalogAsync(ModelDeletionIntent intent, CancellationToken ct)
     {
+        await _bridge.EnsureStartedAsync(ct).ConfigureAwait(false);
         if (intent.Kind is "ocr" or "llm")
             return await TryReadDeletionCatalogAsync(intent.Kind, intent.Name, ct).ConfigureAwait(false);
 

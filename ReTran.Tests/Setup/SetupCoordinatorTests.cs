@@ -2409,6 +2409,40 @@ public class SetupCoordinatorTests : IDisposable
         Assert.Empty(_bridge.LlmDownloaded);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Delete_AmbiguousOutcome_ColdCoreIsStartedBeforeCatalogReconciliation(
+        bool confirmedMissing, bool useRetry)
+    {
+        (string deleted, string replacement) = PrepareLlmDeletion();
+        _bridge.DeleteError = new InvalidOperationException("process lost the RPC response");
+        _bridge.DeleteErrorAfterRemoval = confirmedMissing;
+        _bridge.LlmListError = new IOException("catalog temporarily unavailable");
+        var coordinator = NewCoordinator();
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            coordinator.DeleteLlmModelAsync(deleted, [replacement], [], TestContext.Current.CancellationToken));
+
+        _bridge.LlmListError = null;
+        _bridge.ColdCore = true;
+        var restarted = NewCoordinator();
+        if (useRetry) await restarted.RetryAsync(TestContext.Current.CancellationToken);
+        else await restarted.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        string expected = confirmedMissing ? replacement : deleted;
+        Assert.Equal(expected, restarted.ActiveLlm);
+        Assert.Equal(expected, ReadSetupJson().ActiveLlm);
+        Assert.Equal(expected, _settings.Load().LlmActiveModel);
+        Assert.True(restarted.IsComplete);
+        Assert.Equal(1, _bridge.EnsureStartedCount);
+        Assert.False(_bridge.ColdCore);
+        Assert.False(File.Exists(_deletionJson));
+        Assert.Single(_bridge.DeleteCalls);
+        Assert.Empty(_bridge.LlmDownloaded);
+    }
+
     [Fact]
     public async Task Delete_ConfirmedMarkerPrecedesFailClosedSelectionPersistence()
     {
@@ -2878,6 +2912,24 @@ public class SetupCoordinatorTests : IDisposable
 
         public int RestartCount { get; private set; }
 
+        /// <summary>Simulates a peer whose JSON-RPC calls fail until EnsureStartedAsync is called.</summary>
+        public bool ColdCore { get; set; }
+
+        /// <summary>Number of cold starts performed by EnsureStartedAsync.</summary>
+        public int EnsureStartedCount { get; private set; }
+
+        /// <summary>Starts the fake core only when it is cold.</summary>
+        public Task EnsureStartedAsync(CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (ColdCore)
+            {
+                ColdCore = false;
+                EnsureStartedCount++;
+            }
+            return Task.CompletedTask;
+        }
+
         /// <summary>The dev machine's GPU (RTX 5060 Ti, CC 12.0 — measured 2026-11-08).</summary>
         public JsonNode? DeviceResult { get; set; } = new JsonObject
         {
@@ -2895,6 +2947,7 @@ public class SetupCoordinatorTests : IDisposable
         public Task<JsonNode?> CallAsync(string method, JsonNode? @params, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
+            if (ColdCore) throw new InvalidOperationException("Core not started");
             Calls.Add((method, @params));
             return method switch
             {
