@@ -96,6 +96,12 @@ jobs:
           if (-not (Test-Path "${{ env.OUTPUT_DIR }}/ReTran.Core.exe")) {
             throw "ReTran.Core.exe missing from publish output"
           }
+          # ReferenceOutputAssembly=false requires explicit Core dependency closure in App packaging.
+          foreach ($name in @("Vortice.Direct3D11.dll", "Vortice.DirectX.dll", "Vortice.DXGI.dll", "Vortice.Mathematics.dll", "SharpGen.Runtime.dll", "SharpGen.Runtime.COM.dll")) {
+            if (-not (Test-Path "${{ env.OUTPUT_DIR }}/$name")) {
+              throw "$name missing from publish output"
+            }
+          }
           if (-not (Test-Path "${{ env.OUTPUT_DIR }}/runtimes/win-x64/uv.exe")) {
             throw "uv.exe missing from publish output"
           }

@@ -91,6 +91,21 @@
         </ProjectReference>
     </ItemGroup>
 
+    <ItemGroup>
+        <!-- ReferenceOutputAssembly=false keeps App/Core code isolation, so carry the managed
+             Vortice + SharpGen dependency closure explicitly; otherwise a clean publish has
+             ReTran.Core.deps.json but no DLLs.
+             Giữ App/Core độc lập code, nên phải copy tường minh toàn bộ DLL Vortice + SharpGen
+             managed; nếu không, bản publish sạch có ReTran.Core.deps.json nhưng loader không
+             tìm thấy các DLL này. -->
+        <Content Include="..\ReTran.Core\bin\$(Configuration)\net10.0-windows\Vortice.Direct3D11.dll" Link="Vortice.Direct3D11.dll" CopyToOutputDirectory="PreserveNewest" />
+        <Content Include="..\ReTran.Core\bin\$(Configuration)\net10.0-windows\Vortice.DirectX.dll" Link="Vortice.DirectX.dll" CopyToOutputDirectory="PreserveNewest" />
+        <Content Include="..\ReTran.Core\bin\$(Configuration)\net10.0-windows\Vortice.DXGI.dll" Link="Vortice.DXGI.dll" CopyToOutputDirectory="PreserveNewest" />
+        <Content Include="..\ReTran.Core\bin\$(Configuration)\net10.0-windows\Vortice.Mathematics.dll" Link="Vortice.Mathematics.dll" CopyToOutputDirectory="PreserveNewest" />
+        <Content Include="..\ReTran.Core\bin\$(Configuration)\net10.0-windows\SharpGen.Runtime.dll" Link="SharpGen.Runtime.dll" CopyToOutputDirectory="PreserveNewest" />
+        <Content Include="..\ReTran.Core\bin\$(Configuration)\net10.0-windows\SharpGen.Runtime.COM.dll" Link="SharpGen.Runtime.COM.dll" CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+
     <!-- First-run setup: source sidecar + uv standalone vào mọi build output (spec
          2026-11-03-first-run-setup-wizard §5.3) — cùng cơ chế với ProjectReference Updater.
          uv.lock đi kèm pyproject: wizard sync với cờ frozen, nên bản resolve đã đo phải có mặt
