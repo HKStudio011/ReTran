@@ -157,12 +157,17 @@ function Assert-AppPayloadUnchanged {
             $changes += "$relative (hash changed)"
         }
     }
-
-    if ($changes.Count -gt 0) {
-        throw "Core publish overwrote App dependencies: $($changes -join '; ')"
+    foreach ($relative in $After.Keys) {
+        if (-not $Before.ContainsKey($relative)) {
+            $changes += "$relative (added after Core copy)"
+        }
     }
 
-    Write-Host "Verified $($Before.Count) App payload hashes unchanged across Core copy."
+    if ($changes.Count -gt 0) {
+        throw "Core publish changed the App payload: $($changes -join '; ')"
+    }
+
+    Write-Host "Verified $($Before.Count) App payload hashes unchanged and no unexpected files added across Core copy."
 }
 
 function Assert-PublishGate {

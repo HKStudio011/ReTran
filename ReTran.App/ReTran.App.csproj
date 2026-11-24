@@ -36,12 +36,6 @@
         <SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">10.0.17763.0</SupportedOSPlatformVersion>
         <TargetPlatformMinVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">10.0.17763.0</TargetPlatformMinVersion>
 
-        <!-- The App defaults to win-x64 even for Debug, while Core only uses a RID output when
-             self-contained publish passes the RID globally. Select the path that Core actually uses.
-             App mặc định win-x64 ngay cả trong Debug, còn Core chỉ dùng output theo RID khi publish
-             self-contained truyền RID xuống toàn solution. Chọn đúng path mà Core thực sự dùng. -->
-        <CoreDependencyOutputPath>..\ReTran.Core\bin\$(Configuration)\net10.0-windows\</CoreDependencyOutputPath>
-        <CoreDependencyOutputPath Condition="'$(SelfContained)' == 'true' and '$(RuntimeIdentifier)' != ''">..\ReTran.Core\bin\$(Configuration)\net10.0-windows\$(RuntimeIdentifier)\</CoreDependencyOutputPath>
     </PropertyGroup>
 
     <ItemGroup>
@@ -100,17 +94,19 @@
 
     <ItemGroup>
         <!-- ReferenceOutputAssembly=false keeps App/Core code isolation, so carry the managed
-             Vortice + SharpGen dependency closure explicitly; otherwise a clean publish has
-             ReTran.Core.deps.json but no DLLs.
+             Vortice + SharpGen dependency closure explicitly. Resolve the existing NuGet assets
+             instead of inferring Core's RID-dependent output layout. Package IDs and versions
+             match ReTran.Core/obj/project.assets.json; no App package reference is introduced.
              Giữ App/Core độc lập code, nên phải copy tường minh toàn bộ DLL Vortice + SharpGen
-             managed; nếu không, bản publish sạch có ReTran.Core.deps.json nhưng loader không
-             tìm thấy các DLL này. -->
-        <Content Include="$(CoreDependencyOutputPath)Vortice.Direct3D11.dll" Link="Vortice.Direct3D11.dll" CopyToOutputDirectory="PreserveNewest" />
-        <Content Include="$(CoreDependencyOutputPath)Vortice.DirectX.dll" Link="Vortice.DirectX.dll" CopyToOutputDirectory="PreserveNewest" />
-        <Content Include="$(CoreDependencyOutputPath)Vortice.DXGI.dll" Link="Vortice.DXGI.dll" CopyToOutputDirectory="PreserveNewest" />
-        <Content Include="$(CoreDependencyOutputPath)Vortice.Mathematics.dll" Link="Vortice.Mathematics.dll" CopyToOutputDirectory="PreserveNewest" />
-        <Content Include="$(CoreDependencyOutputPath)SharpGen.Runtime.dll" Link="SharpGen.Runtime.dll" CopyToOutputDirectory="PreserveNewest" />
-        <Content Include="$(CoreDependencyOutputPath)SharpGen.Runtime.COM.dll" Link="SharpGen.Runtime.COM.dll" CopyToOutputDirectory="PreserveNewest" />
+             managed. Resolve trực tiếp NuGet assets hiện có thay vì suy luận output phụ thuộc RID
+             của Core. Package ID/version khớp ReTran.Core/obj/project.assets.json; không thêm
+             package reference nào vào App. -->
+        <Content Include="$(NuGetPackageRoot)vortice.direct3d11\3.8.3\lib\net10.0\Vortice.Direct3D11.dll" Link="Vortice.Direct3D11.dll" CopyToOutputDirectory="PreserveNewest" />
+        <Content Include="$(NuGetPackageRoot)vortice.directx\3.8.3\lib\net10.0\Vortice.DirectX.dll" Link="Vortice.DirectX.dll" CopyToOutputDirectory="PreserveNewest" />
+        <Content Include="$(NuGetPackageRoot)vortice.dxgi\3.8.3\lib\net10.0\Vortice.DXGI.dll" Link="Vortice.DXGI.dll" CopyToOutputDirectory="PreserveNewest" />
+        <Content Include="$(NuGetPackageRoot)vortice.mathematics\2.1.0\lib\net10.0\Vortice.Mathematics.dll" Link="Vortice.Mathematics.dll" CopyToOutputDirectory="PreserveNewest" />
+        <Content Include="$(NuGetPackageRoot)sharpgen.runtime\2.4.2-beta\lib\net9.0\SharpGen.Runtime.dll" Link="SharpGen.Runtime.dll" CopyToOutputDirectory="PreserveNewest" />
+        <Content Include="$(NuGetPackageRoot)sharpgen.runtime.com\2.4.2-beta\lib\net9.0\SharpGen.Runtime.COM.dll" Link="SharpGen.Runtime.COM.dll" CopyToOutputDirectory="PreserveNewest" />
     </ItemGroup>
 
     <!-- First-run setup: source sidecar + uv standalone vào mọi build output (spec
