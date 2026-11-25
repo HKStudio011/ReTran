@@ -225,10 +225,19 @@ public class FloatingMenuRendererTests
     {
         using Bitmap bitmap = Render(State(collapsed: true));
 
-        for (int y = 0; y < FloatingMenuLayout.ShadowMargin - 1; y++)
-            for (int x = 0; x < FloatingMenuLayout.ShadowMargin - 1; x++)
-                Assert.True(bitmap.GetPixel(x, y).A == 0,
-                    $"shadow-margin pixel ({x},{y}) must be transparent");
+        (int X, int Y)[] origins =
+        [
+            (0, 0),
+            (bitmap.Width - FloatingMenuLayout.ShadowMargin, 0),
+            (0, bitmap.Height - FloatingMenuLayout.ShadowMargin),
+            (bitmap.Width - FloatingMenuLayout.ShadowMargin, bitmap.Height - FloatingMenuLayout.ShadowMargin),
+        ];
+
+        foreach ((int originX, int originY) in origins)
+            for (int offsetY = 0; offsetY < FloatingMenuLayout.ShadowMargin; offsetY++)
+                for (int offsetX = 0; offsetX < FloatingMenuLayout.ShadowMargin; offsetX++)
+                    Assert.True(bitmap.GetPixel(originX + offsetX, originY + offsetY).A == 0,
+                        $"shadow-margin origin ({originX},{originY}), offset ({offsetX},{offsetY}) must be transparent");
     }
 
     [Fact]

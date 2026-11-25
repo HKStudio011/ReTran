@@ -43,20 +43,28 @@ public sealed class TrayIconSource : IDisposable
     internal static SD.Bitmap RenderBitmap()
     {
         var bitmap = new SD.Bitmap(Size, Size, SD.Imaging.PixelFormat.Format32bppArgb);
-        using (SD.Graphics g = SD.Graphics.FromImage(bitmap))
+        try
         {
-            g.SmoothingMode = SD.Drawing2D.SmoothingMode.AntiAlias;
-            g.Clear(SD.Color.Transparent);
+            using (SD.Graphics g = SD.Graphics.FromImage(bitmap))
+            {
+                g.SmoothingMode = SD.Drawing2D.SmoothingMode.AntiAlias;
+                g.Clear(SD.Color.Transparent);
 
-            using var pillBrush = new SD.SolidBrush(BoxAnnotationStyle.PillFill);
-            using var path = new SD.Drawing2D.GraphicsPath();
-            BoxAnnotationStyle.BuildRoundedRect(path, new SD.RectangleF(0f, 0f, Size, Size), CornerRadius);
-            g.FillPath(pillBrush, path);
+                using var pillBrush = new SD.SolidBrush(SD.Color.FromArgb(255, 7, 32, 30));
+                using var path = new SD.Drawing2D.GraphicsPath();
+                BoxAnnotationStyle.BuildRoundedRect(path, new SD.RectangleF(0f, 0f, Size, Size), CornerRadius);
+                g.FillPath(pillBrush, path);
 
-            BrandMarkRenderer.Draw(g, new SD.RectangleF(4f, 4f, 24f, 24f));
+                BrandMarkRenderer.Draw(g, new SD.RectangleF(4f, 4f, 24f, 24f));
+            }
+
+            return bitmap;
         }
-
-        return bitmap;
+        catch
+        {
+            bitmap.Dispose();
+            throw;
+        }
     }
 
     /// <summary>

@@ -35,6 +35,14 @@ public class TrayIconSourceTests
     }
 
     [Fact]
+    public void RenderBitmap_UsesOpaqueInkBackground()
+    {
+        using var bitmap = TrayIconSource.RenderBitmap();
+
+        Assert.Equal(Color.FromArgb(255, 7, 32, 30), bitmap.GetPixel(2, 16));
+    }
+
+    [Fact]
     public void Handle_NonZero_AndStable()
     {
         using var icon = new TrayIconSource();
