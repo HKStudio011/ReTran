@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace ReTran_App.Services.Update;
@@ -313,10 +314,18 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
                 _publishedDownloadAttemptId, DownloadedZipPath, DownloadedSignaturePath);
         }
 
-        if (snapshot.AttemptId > 0 && snapshot.ZipPath is not null && snapshot.SignaturePath is not null &&
-            _packageVerifier(snapshot.ZipPath, snapshot.SignaturePath, _signingPublicKeyBase64))
+        try
         {
-            return true;
+            if (snapshot.AttemptId > 0 && snapshot.ZipPath is not null && snapshot.SignaturePath is not null &&
+                _packageVerifier(snapshot.ZipPath, snapshot.SignaturePath, _signingPublicKeyBase64))
+            {
+                return true;
+            }
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or CryptographicException)
+        {
+            // Unreadable/locked files and verifier failures are verification failures, never coordinator faults.
+            // Fall through to the same snapshot-scoped cleanup as an invalid signature.
         }
 
         // Fail-closed cleanup is scoped to the consistent snapshot, never to paths a newer attempt may publish.

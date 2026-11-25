@@ -35,9 +35,9 @@ public interface IAppShutdown
 
 /// <summary>
 /// Stops the app services that would hold file locks or the overlay port during install
-/// (pipeline, core process, overlay feed server — spec §6.2 step 3).
+/// (pipeline, core process, <c>OverlayFeedServer</c> — spec §6.2 step 3).
 /// Dừng các service của app đang giữ khóa file hoặc cổng overlay trong lúc cài
-/// (pipeline, core process, overlay feed server — spec §6.2 bước 3).
+/// (pipeline, core process, <c>OverlayFeedServer</c> — spec §6.2 bước 3).
 /// </summary>
 public interface IUpdateStopper
 {

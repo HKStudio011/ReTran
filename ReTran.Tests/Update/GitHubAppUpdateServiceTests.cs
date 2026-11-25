@@ -1,4 +1,6 @@
 using System.Net;
+using System.Security.Cryptography;
+using Microsoft.Extensions.Logging.Abstractions;
 using ReTran_App.Services.Update;
 
 namespace ReTran.Tests.Update;
@@ -307,6 +309,73 @@ public class GitHubAppUpdateServiceTests
     }
 
     [Fact]
+    public async Task Verify_LockedPackage_ReturnsFalse()
+    {
+        var payload = "PK-zip"u8.ToArray();
+        using var key = new TestSigningKey();
+        var release = SignedRelease(payload, key, out var signatureBase64);
+        var service = ServiceWith(new SignedZipHandler(payload, signatureBase64),
+            publicKeyBase64: key.PublicKeyBase64);
+        var downloaded = await service.DownloadUpdateAsync(release, null, TestContext.Current.CancellationToken);
+
+        try
+        {
+            Assert.NotNull(downloaded);
+            await using var lockedPackage = new FileStream(
+                downloaded, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+
+            Assert.False(service.VerifyDownloadedPackage());
+            Assert.Null(service.DownloadedZipPath);
+            Assert.Null(service.DownloadedSignaturePath);
+            Assert.False(await service.InstallUpdateAsync());
+        }
+        finally
+        {
+            TryDeleteAttemptDirectory(Path.GetFileName(Path.GetDirectoryName(downloaded)));
+        }
+    }
+
+    [Theory]
+    [InlineData("unauthorized")]
+    [InlineData("io")]
+    [InlineData("crypto")]
+    public async Task Verify_ReadFailure_MapsToVerifyFailedWithoutLaunchingUpdater(string failureKind)
+    {
+        var payload = "PK-zip"u8.ToArray();
+        using var key = new TestSigningKey();
+        var release = SignedRelease(payload, key, out var signatureBase64);
+        var service = ServiceWith(new SignedZipHandler(payload, signatureBase64),
+            publicKeyBase64: key.PublicKeyBase64,
+            packageVerifier: (_, _, _) => throw CreateVerifierFailure(failureKind));
+        var updates = new TrackingUpdateService(service);
+        var stopper = new TrackingStopper();
+        var shutdown = new TrackingShutdown();
+        using var coordinator = new UpdateCoordinator(
+            updates, stopper, shutdown, NullLogger<UpdateCoordinator>.Instance);
+        var failures = new List<UpdateError>();
+        coordinator.Failed += failures.Add;
+
+        try
+        {
+            await coordinator.StartUpdateAsync(release);
+
+            Assert.Equal(UpdateError.VerifyFailed, Assert.Single(failures));
+            Assert.Equal(0, updates.InstallCallCount);
+            Assert.False(stopper.StopCalled);
+            Assert.False(shutdown.QuitCalled);
+            Assert.Null(service.DownloadedZipPath);
+            Assert.Null(service.DownloadedSignaturePath);
+            Assert.NotNull(updates.LastDownloadedPath);
+            Assert.False(File.Exists(updates.LastDownloadedPath));
+            Assert.False(File.Exists(updates.LastDownloadedPath + ".sig"));
+        }
+        finally
+        {
+            TryDeleteAttemptDirectory(Path.GetFileName(Path.GetDirectoryName(updates.LastDownloadedPath)));
+        }
+    }
+
+    [Fact]
     public async Task Verify_OlderAttemptFailureCannotDeleteOrClearNewerAttempt()
     {
         var payload = "PK-zip"u8.ToArray();
@@ -582,6 +651,14 @@ public class GitHubAppUpdateServiceTests
         }
     }
 
+    private static Exception CreateVerifierFailure(string failureKind) => failureKind switch
+    {
+        "unauthorized" => new UnauthorizedAccessException("Simulated read access denied."),
+        "io" => new IOException("Simulated locked package."),
+        "crypto" => new CryptographicException("Simulated cryptographic failure."),
+        _ => throw new ArgumentOutOfRangeException(nameof(failureKind)),
+    };
+
     /// <summary>
     /// Release có cả zip lẫn file .sig cạnh nhau (đúng cấu trúc release thật);
     /// chữ ký được tạo bởi <paramref name="key"/> — test nào cần sai key tự ký bằng keypair khác.
@@ -609,6 +686,54 @@ public class GitHubAppUpdateServiceTests
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
+    }
+
+    private sealed class TrackingUpdateService(IAppUpdateService inner) : IAppUpdateService
+    {
+        public string? LastDownloadedPath { get; private set; }
+
+        public int InstallCallCount { get; private set; }
+
+        public string CurrentVersion => inner.CurrentVersion;
+
+        public string? DownloadedZipPath => inner.DownloadedZipPath;
+
+        public Task<ReleaseInfo?> CheckForUpdatesAsync() => inner.CheckForUpdatesAsync();
+
+        public bool IsUpdateAvailable(ReleaseInfo release) => inner.IsUpdateAvailable(release);
+
+        public async Task<string?> DownloadUpdateAsync(
+            ReleaseInfo release, IProgress<int>? progress, CancellationToken cancellationToken = default)
+        {
+            LastDownloadedPath = await inner.DownloadUpdateAsync(release, progress, cancellationToken);
+            return LastDownloadedPath;
+        }
+
+        public bool VerifyDownloadedPackage() => inner.VerifyDownloadedPackage();
+
+        public Task<bool> InstallUpdateAsync()
+        {
+            InstallCallCount++;
+            return inner.InstallUpdateAsync();
+        }
+    }
+
+    private sealed class TrackingStopper : IUpdateStopper
+    {
+        public bool StopCalled { get; private set; }
+
+        public Task StopServicesAsync(CancellationToken cancellationToken)
+        {
+            StopCalled = true;
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class TrackingShutdown : IAppShutdown
+    {
+        public bool QuitCalled { get; private set; }
+
+        public void Quit() => QuitCalled = true;
     }
 
     // ===== HTTP doubles (pattern FreeModelSyncServiceTests) =====

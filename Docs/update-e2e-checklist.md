@@ -18,6 +18,8 @@ Nguồn: spec `Docs/superpowers/specs/2026-10-14-version-update-design.md` (§ l
    - Tag `v<version>` (khớp `ApplicationDisplayVersion` — workflow có bước verify, sai là fail sớm).
    - Publish release trên GitHub → workflow chạy: publish App (self-contained win-x64) → publish Core + copy vào output → verify 3 exe → zip → ký `.sig` (ECDSA) → SHA256SUMS → attest → upload assets.
    - Verify assets: `ReTran-v<version>-win-x64.zip` (workflow zip theo `github.ref_name` — tên asset gồm `v`, ví dụ `ReTran-v0.2-win-x64.zip`), `.zip.sig`, `SHA256SUMS.txt`; zip chứa đủ `ReTran.App.exe`, `ReTran.Core.exe`, `ReTran.Updater.exe` + `ReTran.Core.runtimeconfig.json` / `ReTran.Core.deps.json`.
+   - Verify payload OCR/setup trong zip: đủ source sidecar `ReTran.OCR/src/**`, `ReTran.OCR/pyproject.toml`, `ReTran.OCR/uv.lock` và `runtimes/win-x64/uv.exe`. Giải nén ở thư mục sạch phải giữ đúng các đường dẫn tương đối này để first-run setup dùng `uv sync --frozen` được.
+   - **Lần phát hành đầu tiên bắt buộc hai build/release:** build A làm bản cũ để cài đặt, sau đó bump version và build B làm bản mới; chạy happy path cập nhật thật từ A lên B. Chỉ build một zip rồi cài trực tiếp **không** đủ điều kiện đánh dấu E2E update đạt.
 3. **Happy path cập nhật**
    - Cài bản zip cũ hơn (bản trước) → mở app → app check nền sau ~5 s (lần đầu) → lặp mỗi 24 h → toast "Có bản cập nhật mới" → bấm "Cập nhật ngay" → modal progress → app tự tắt → updater cài → app mở lại báo version mới (`AppVersionFormatter`).
 4. **Negative cases (fail-closed)**

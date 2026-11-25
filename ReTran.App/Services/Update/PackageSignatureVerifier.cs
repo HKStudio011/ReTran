@@ -60,9 +60,9 @@ public static class PackageSignatureVerifier
 
             return ecdsa.VerifyHash(hash, signature);
         }
-        catch (Exception ex) when (ex is CryptographicException or FormatException or IOException)
+        catch (Exception ex) when (ex is CryptographicException or FormatException or IOException or UnauthorizedAccessException)
         {
-            // Fail-closed: mọi lỗi parse/đọc file/giải mã đều coi là không hợp lệ.
+            // Fail-closed: mọi lỗi parse/đọc file/giải mã/từ chối quyền đều coi là không hợp lệ.
             // Caller (GitHubAppUpdateService) log chi tiết ở tầng cao hơn.
             return false;
         }
