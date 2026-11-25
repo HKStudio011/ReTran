@@ -22,8 +22,9 @@ public class GitHubAppUpdateServiceTests
     private const string ZipAssetName = "router-balancing-test-payload.zip";
 
     private static GitHubAppUpdateService ServiceWith(HttpMessageHandler handler, string currentVersion = "1.0.0.0",
-        string? publicKeyBase64 = null, string? appDir = null) =>
-        new(new HttpClient(handler, disposeHandler: false), currentVersion, publicKeyBase64, appDir);
+        string? publicKeyBase64 = null, string? appDir = null,
+        Func<string, string, string, bool>? packageVerifier = null) =>
+        new(new HttpClient(handler, disposeHandler: false), currentVersion, publicKeyBase64, appDir, packageVerifier);
 
     private static ReleaseInfo Release(string tag, params ReleaseAsset[] assets) =>
         new(tag, $"https://github.com/HKStudio011/router-balancing/releases/tag/{tag}", null, [.. assets]);
@@ -186,6 +187,55 @@ public class GitHubAppUpdateServiceTests
     }
 
     [Fact]
+    public async Task Download_UncancelledOlderAttemptCannotReplaceNewerAttempt()
+    {
+        var olderPayload = "older zip"u8.ToArray();
+        var newerPayload = "newer zip"u8.ToArray();
+        var handler = new StaleRunHandler(olderPayload, newerPayload);
+        var service = ServiceWith(handler);
+        var release = Release("v1.2.3",
+            new ReleaseAsset(ZipAssetName, "https://example.com/payload.zip"),
+            new ReleaseAsset(ZipAssetName + ".sig", "https://example.com/payload.zip.sig"));
+        var olderDownload = DownloadWithToken(service, release, CancellationToken.None);
+        string? newerPath = null;
+
+        try
+        {
+            await handler.FirstSignatureStarted.Task.WaitAsync(
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            // A remains uncancelled: latest-only publication, not cancellation, must reject its late completion.
+            newerPath = await DownloadWithToken(service, release, CancellationToken.None);
+
+            Assert.NotNull(newerPath);
+            handler.ReleaseOlderSignature();
+            Assert.Null(await olderDownload);
+
+            var updateRoot = Path.Combine(Path.GetTempPath(), "ReTran_Update");
+            var olderPath = Path.Combine(updateRoot, "1", ZipAssetName);
+            Assert.Equal(Path.Combine(updateRoot, "2", ZipAssetName), newerPath);
+            Assert.Equal(newerPath, service.DownloadedZipPath);
+            Assert.Equal(newerPath + ".sig", service.DownloadedSignaturePath);
+            Assert.Equal(newerPayload, await File.ReadAllBytesAsync(
+                newerPath, TestContext.Current.CancellationToken));
+            Assert.Equal("newer signature", await File.ReadAllTextAsync(
+                newerPath + ".sig", TestContext.Current.CancellationToken));
+            Assert.False(File.Exists(olderPath));
+            Assert.False(File.Exists(olderPath + ".sig"));
+        }
+        finally
+        {
+            handler.ReleaseOlderSignature();
+            try { await olderDownload; } catch { }
+            TryDeleteAttemptDirectory("1");
+            if (newerPath is not null)
+            {
+                TryDeleteAttemptDirectory(Path.GetFileName(Path.GetDirectoryName(newerPath)));
+            }
+        }
+    }
+
+    [Fact]
     public async Task DownloadUpdateAsync_ReturnsNull_WhenSignatureAssetMissing()
     {
         // Fail-closed: release không có file .sig → không tin được zip, từ chối ngay lúc tải
@@ -253,6 +303,63 @@ public class GitHubAppUpdateServiceTests
         finally
         {
             TryDeleteAttemptDirectory(Path.GetFileName(Path.GetDirectoryName(downloaded)));
+        }
+    }
+
+    [Fact]
+    public async Task Verify_OlderAttemptFailureCannotDeleteOrClearNewerAttempt()
+    {
+        var payload = "PK-zip"u8.ToArray();
+        using var key = new TestSigningKey();
+        var release = SignedRelease(payload, key, out var signatureBase64);
+        var verifierStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var verifierRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var service = ServiceWith(new SignedZipHandler(payload, signatureBase64),
+            publicKeyBase64: key.PublicKeyBase64,
+            packageVerifier: (_, _, _) =>
+            {
+                verifierStarted.TrySetResult();
+                verifierRelease.Task.GetAwaiter().GetResult();
+                return false;
+            });
+        string? olderPath = null;
+        string? newerPath = null;
+        Task<bool>? olderVerify = null;
+
+        try
+        {
+            olderPath = await service.DownloadUpdateAsync(
+                release, null, TestContext.Current.CancellationToken);
+            Assert.NotNull(olderPath);
+
+            olderVerify = Task.Run(() => service.VerifyDownloadedPackage(), TestContext.Current.CancellationToken);
+            await verifierStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            // B clears A's publication and publishes its own files while A is held inside verification.
+            newerPath = await service.DownloadUpdateAsync(
+                release, null, TestContext.Current.CancellationToken);
+            Assert.NotNull(newerPath);
+            Assert.Equal(newerPath, service.DownloadedZipPath);
+
+            verifierRelease.TrySetResult();
+            Assert.False(await olderVerify);
+
+            Assert.Equal(newerPath, service.DownloadedZipPath);
+            Assert.Equal(newerPath + ".sig", service.DownloadedSignaturePath);
+            Assert.True(File.Exists(newerPath));
+            Assert.True(File.Exists(newerPath + ".sig"));
+            Assert.False(File.Exists(olderPath));
+            Assert.False(File.Exists(olderPath + ".sig"));
+        }
+        finally
+        {
+            verifierRelease.TrySetResult();
+            if (olderVerify is not null)
+            {
+                try { await olderVerify; } catch { }
+            }
+            TryDeleteAttemptDirectory("1");
+            TryDeleteAttemptDirectory("2");
         }
     }
 

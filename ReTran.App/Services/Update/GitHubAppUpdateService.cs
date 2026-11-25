@@ -19,16 +19,20 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
 
     private readonly HttpClient _http;
 
-    // Attempt creation and path publication share this lock so a stale download cannot clear or publish
-    // over a newer attempt. Each attempt writes only below its own numbered temp directory.
+    // Attempt creation, path publication, and verification snapshots share this lock so a stale download
+    // cannot clear, delete, or publish over a newer attempt. Each attempt writes only below its own directory.
     private readonly object _downloadSync = new();
     private long _downloadAttemptId;
+    private long _publishedDownloadAttemptId;
+
+    private readonly record struct DownloadSnapshot(long AttemptId, string? ZipPath, string? SignaturePath);
 
     /// <summary>
     /// Public key (SPKI Base64) verify chữ ký zip update — production dùng
     /// <see cref="PackageSignatureVerifier.ReleasePublicKeyBase64"/>; test inject keypair khác.
     /// </summary>
     private readonly string _signingPublicKeyBase64;
+    private readonly Func<string, string, string, bool> _packageVerifier;
 
     /// <summary>
     /// Install directory the updater is looked up in — <c>AppContext.BaseDirectory</c> in
@@ -67,7 +71,12 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
     // chứ không phải app — không ép được thì mọi assertion về version sẽ phụ thuộc runner.
     // appDir cho test: test bin giờ chứa sẵn ReTran.Updater.exe (Task 6 wiring) nên nhánh
     // "thiếu updater" phải chỉ vào thư mục trống thay vì AppContext.BaseDirectory.
-    internal GitHubAppUpdateService(HttpClient http, string currentVersion, string? signingPublicKeyBase64 = null, string? appDir = null)
+    internal GitHubAppUpdateService(
+        HttpClient http,
+        string currentVersion,
+        string? signingPublicKeyBase64 = null,
+        string? appDir = null,
+        Func<string, string, string, bool>? packageVerifier = null)
     {
         ArgumentNullException.ThrowIfNull(http);
         ArgumentNullException.ThrowIfNull(currentVersion);
@@ -75,6 +84,7 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
         _http = http;
         CurrentVersion = currentVersion;
         _signingPublicKeyBase64 = signingPublicKeyBase64 ?? PackageSignatureVerifier.ReleasePublicKeyBase64;
+        _packageVerifier = packageVerifier ?? PackageSignatureVerifier.Verify;
         _appDir = appDir ?? AppContext.BaseDirectory;
     }
 
@@ -154,6 +164,7 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
             attemptId = ++_downloadAttemptId;
 
             // Invalidate paths when this attempt becomes latest; no partial or superseded zip is installable.
+            _publishedDownloadAttemptId = 0;
             DownloadedZipPath = null;
             DownloadedSignaturePath = null;
         }
@@ -235,6 +246,7 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
             {
                 if (attemptId == _downloadAttemptId && !cancellationToken.IsCancellationRequested)
                 {
+                    _publishedDownloadAttemptId = attemptId;
                     DownloadedSignaturePath = signaturePath;
                     DownloadedZipPath = zipPath;
                     published = true;
@@ -294,18 +306,34 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
         // Verify đọc file + ghi đĩa (xóa rác) — Windows-only theo contract của updater.
         if (!OperatingSystem.IsWindows()) return false;
 
-        if (DownloadedZipPath is not null && DownloadedSignaturePath is not null &&
-            PackageSignatureVerifier.Verify(DownloadedZipPath, DownloadedSignaturePath, _signingPublicKeyBase64))
+        DownloadSnapshot snapshot;
+        lock (_downloadSync)
+        {
+            snapshot = new DownloadSnapshot(
+                _publishedDownloadAttemptId, DownloadedZipPath, DownloadedSignaturePath);
+        }
+
+        if (snapshot.AttemptId > 0 && snapshot.ZipPath is not null && snapshot.SignaturePath is not null &&
+            _packageVerifier(snapshot.ZipPath, snapshot.SignaturePath, _signingPublicKeyBase64))
         {
             return true;
         }
 
-        // Fail-closed: không xác thực được (thiếu path/sai chữ ký) → xóa cả zip lẫn .sig rác
-        // và null cả hai property để không attempt nào dùng nhầm file đã bị từ chối.
-        DeletePartialFile(DownloadedZipPath);
-        DeletePartialFile(DownloadedSignaturePath);
-        DownloadedZipPath = null;
-        DownloadedSignaturePath = null;
+        // Fail-closed cleanup is scoped to the consistent snapshot, never to paths a newer attempt may publish.
+        DeletePartialFile(snapshot.ZipPath);
+        DeletePartialFile(snapshot.SignaturePath);
+        lock (_downloadSync)
+        {
+            if (_publishedDownloadAttemptId == snapshot.AttemptId &&
+                string.Equals(DownloadedZipPath, snapshot.ZipPath, StringComparison.Ordinal) &&
+                string.Equals(DownloadedSignaturePath, snapshot.SignaturePath, StringComparison.Ordinal))
+            {
+                _publishedDownloadAttemptId = 0;
+                DownloadedZipPath = null;
+                DownloadedSignaturePath = null;
+            }
+        }
+
         return false;
     }
 
