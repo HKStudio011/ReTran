@@ -42,11 +42,14 @@ public interface IAppShutdown
 public interface IUpdateStopper
 {
     /// <summary>
-    /// Stops the services; honors <paramref name="cancellationToken"/> for the coordinator's combined timeout.
-    /// Dừng các service; tuân theo <paramref name="cancellationToken"/> (timeout tổng hợp của coordinator).
+    /// Attempts every service cleanup in pipeline/core/overlay order, then propagates any step failure.
+    /// Thử cleanup mọi service theo thứ tự pipeline/core/overlay, rồi ném bất kỳ lỗi nào của các bước.
     /// </summary>
     /// <param name="cancellationToken">Cancellation (user Dispose / ~30s combined timeout). Token huỷ (Dispose người dùng / timeout tổng hợp ~30s).</param>
-    /// <returns>A task that completes when the services are stopped. Task hoàn tất khi các service đã dừng.</returns>
+    /// <returns>A task that completes when all service cleanup steps have been attempted. Task hoàn tất khi đã thử mọi bước cleanup service.</returns>
+    /// <exception cref="TimeoutException">A service stop step exceeded its own timeout. Một bước dừng service vượt timeout riêng của bước đó.</exception>
+    /// <exception cref="OperationCanceledException">The supplied token was cancelled. Token được cung cấp đã bị huỷ.</exception>
+    /// <exception cref="AggregateException">More than one service stop step failed; individual failures are in <see cref="AggregateException.InnerExceptions"/>. Nhiều bước dừng service cùng lỗi; từng lỗi nằm trong <see cref="AggregateException.InnerExceptions"/>.</exception>
     Task StopServicesAsync(CancellationToken cancellationToken);
 }
 
@@ -262,12 +265,8 @@ public sealed class UpdateCoordinator : IDisposable
         }
         catch (Exception ex)
         {
-            // The production UpdateStopper never throws: on this 30s timeout it swallows the OCE
-            // per step, still force-kills the core (step 2) and disposes the feed (step 3), then
-            // returns normally — locks are released, so reaching install+quit after a stop timeout
-            // is safe and intended, NOT a stop failure. This catch exists for the IUpdateStopper
-            // contract: a non-production stopper could fault before releasing anything, and only
-            // then is this a real stop failure.
+            // A service error, per-step timeout, or the combined stop timeout is fail-closed:
+            // UpdateStopper propagates it after best-effort cleanup and the updater is never launched.
             Fail(UpdateError.StopServicesFailed, $"Update aborted: stop services failed: {ex.Message}", runId);
             return;
         }

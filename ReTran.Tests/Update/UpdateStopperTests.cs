@@ -1,6 +1,5 @@
 using System.Text.Json.Nodes;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ReTran_App.Core;
 using ReTran_App.Data;
@@ -10,12 +9,10 @@ using ReTran_App.Services.Update;
 namespace ReTran.Tests.Update;
 
 /// <summary>
+/// Tests UpdateStopper/MauiAppShutdown on real instances: a pipeline driven by FakeCorePeer,
+/// a real core process where process teardown matters, and a controllable overlay feed.
 /// Kiểm thử UpdateStopper/MauiAppShutdown trên instance thật: pipeline chạy bằng FakeCorePeer,
-/// core process thật (cmd.exe sống mãi với --serve + stdin redirect) — xác nhận đủ 2 bước, bỏ qua
-/// StopAsync khi pipeline tắt, mỗi bước throw không chặn bước sau.
-/// Tests for UpdateStopper/MauiAppShutdown on real instances: pipeline driven by FakeCorePeer and a
-/// real core process (cmd.exe stays alive with --serve + redirected stdin) — all 2 steps run,
-/// StopAsync skipped when the pipeline is off, a throwing step never blocks the next.
+/// tiến trình core thật khi cần kiểm chứng teardown, và overlay feed điều khiển được.
 /// </summary>
 public class UpdateStopperTests : IDisposable
 {
@@ -64,82 +61,120 @@ public class UpdateStopperTests : IDisposable
     }
 
     [Fact]
-    public async Task StopServicesAsync_PipelineRunning_StopsPipelineAndDisposesCore()
+    public async Task StopServices_DisposesPipelineCoreAndOverlay_InOrder()
     {
-        var peer = new FakeCorePeer { IsStarted = true };
+        var steps = new List<string>();
+        var peer = new FakeCorePeer { IsStarted = true, StopSteps = steps };
         PipelineController pipeline = CreatePipeline(peer);
         await pipeline.StartAsync(new SourceSelection(false, 0, null), TestContext.Current.CancellationToken);
         Assert.True(pipeline.IsRunning);
-        peer.Calls.Clear();
 
-        var core = new CoreProcessClient();
+        var core = new RecordingCoreProcessClient(steps);
         await core.StartAsync(ComSpec, TestContext.Current.CancellationToken);
         Assert.True(core.IsStarted);
-
-        var stopper = new UpdateStopper(pipeline, core, NullLogger<UpdateStopper>.Instance);
+        var overlay = new RecordingAsyncDisposable(steps);
+        var stopper = new UpdateStopper(pipeline, core, overlay);
 
         await stopper.StopServicesAsync(TestContext.Current.CancellationToken);
 
-        Assert.Equal("core.stop", Assert.Single(peer.Calls).Method);
+        Assert.Equal(["pipeline", "core", "overlay"], steps);
         Assert.False(pipeline.IsRunning);
-        Assert.False(core.IsStarted);   // bước (2) đã dispose core (kill tree)
+        Assert.False(core.IsStarted);
     }
 
     [Fact]
-    public async Task StopServicesAsync_PipelineNotRunning_SkipsStopButStillDisposesCore()
+    public async Task StopServicesAsync_OverlayFailure_Propagates()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        PipelineController pipeline = CreatePipeline(peer);
+        var core = new RecordingCoreProcessClient();
+        var failure = new InvalidOperationException("simulated overlay dispose failure");
+        var overlay = new RecordingAsyncDisposable { ThrowOnDispose = failure };
+        var stopper = new UpdateStopper(pipeline, core, overlay);
+
+        var thrown = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => stopper.StopServicesAsync(TestContext.Current.CancellationToken));
+
+        Assert.Same(failure, thrown);
+        Assert.True(core.DisposeCalled);
+        Assert.True(overlay.DisposeCalled);
+    }
+
+    [Fact]
+    public async Task StopServicesAsync_Timeout_Throws()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        PipelineController pipeline = CreatePipeline(peer);
+        var core = new RecordingCoreProcessClient();
+        var overlay = new RecordingAsyncDisposable { NeverCompletes = true };
+        var stopper = new UpdateStopper(pipeline, core, overlay, TimeSpan.FromMilliseconds(10));
+
+        var stopTask = stopper.StopServicesAsync(TestContext.Current.CancellationToken);
+        var completed = await Task.WhenAny(
+            stopTask,
+            Task.Delay(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+
+        Assert.Same(stopTask, completed);
+        var thrown = await Assert.ThrowsAsync<TimeoutException>(() => stopTask);
+        Assert.Contains("overlay", thrown.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task StopServicesAsync_PipelineNotRunning_SkipsStopButStillDisposesCoreAndOverlay()
     {
         var peer = new FakeCorePeer { IsStarted = true };
         PipelineController pipeline = CreatePipeline(peer); // không StartAsync → IsRunning = false
 
         var core = new CoreProcessClient();
         await core.StartAsync(ComSpec, TestContext.Current.CancellationToken);
-
-        var stopper = new UpdateStopper(pipeline, core, NullLogger<UpdateStopper>.Instance);
+        var overlay = new RecordingAsyncDisposable();
+        var stopper = new UpdateStopper(pipeline, core, overlay);
 
         await stopper.StopServicesAsync(TestContext.Current.CancellationToken);
 
-        Assert.Empty(peer.Calls);       // bỏ qua StopAsync — không gửi core.stop
-        Assert.False(core.IsStarted);   // core vẫn được dispose
+        Assert.Empty(peer.Calls);
+        Assert.False(core.IsStarted);
+        Assert.True(overlay.DisposeCalled);
     }
 
     [Fact]
-    public async Task StopServicesAsync_WhenPipelineStopThrows_WarnsAndStillDisposesCore()
+    public async Task StopServicesAsync_WhenPipelineStopThrows_PropagatesAndStillDisposesCoreAndOverlay()
     {
         var peer = new FakeCorePeer { IsStarted = true };
         PipelineController pipeline = CreatePipeline(peer);
         await pipeline.StartAsync(new SourceSelection(false, 0, null), TestContext.Current.CancellationToken);
         peer.ThrowOnCoreStop = new InvalidOperationException("simulated core.stop failure");
 
-        var core = new CoreProcessClient();
-        await core.StartAsync(ComSpec, TestContext.Current.CancellationToken);
+        var core = new RecordingCoreProcessClient();
+        var overlay = new RecordingAsyncDisposable();
+        var stopper = new UpdateStopper(pipeline, core, overlay);
 
-        var log = new RecordingLogger<UpdateStopper>();
-        var stopper = new UpdateStopper(pipeline, core, log);
+        var thrown = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => stopper.StopServicesAsync(TestContext.Current.CancellationToken));
 
-        await stopper.StopServicesAsync(TestContext.Current.CancellationToken); // không ném
-
-        Assert.Single(log.Warnings);    // nuốt exception + log warn
-        Assert.False(core.IsStarted);   // bước (1) throw nhưng bước (2) vẫn chạy
+        Assert.Contains("core.stop", thrown.Message, StringComparison.Ordinal);
+        Assert.True(core.DisposeCalled);
+        Assert.True(overlay.DisposeCalled);
     }
 
     [Fact]
-    public async Task StopServicesAsync_WhenCoreDisposeThrows_DoesNotThrow()
+    public async Task StopServicesAsync_WhenCoreDisposeThrows_PropagatesAndStillDisposesOverlay()
     {
-        // Bước (2) throw → nuốt + log warn, method không ném (bước cuối — không còn bước sau).
         var peer = new FakeCorePeer { IsStarted = true };
         PipelineController pipeline = CreatePipeline(peer);
-
         var core = new ThrowingCoreProcessClient();
-        var log = new RecordingLogger<UpdateStopper>();
-        var stopper = new UpdateStopper(pipeline, core, log);
+        var overlay = new RecordingAsyncDisposable();
+        var stopper = new UpdateStopper(pipeline, core, overlay);
 
-        await stopper.StopServicesAsync(TestContext.Current.CancellationToken); // không ném
+        var thrown = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => stopper.StopServicesAsync(TestContext.Current.CancellationToken));
 
-        Assert.Single(log.Warnings);    // nuốt exception + log warn
+        Assert.Equal("simulated core dispose failure", thrown.Message);
+        Assert.True(overlay.DisposeCalled);
     }
 
     [Fact]
-    public async Task StopServicesAsync_CalledTwice_SecondCallIsNoOp()
+    public async Task StopServicesAsync_CalledTwice_StopsPipelineOnlyOnce()
     {
         var peer = new FakeCorePeer { IsStarted = true };
         PipelineController pipeline = CreatePipeline(peer);
@@ -148,12 +183,13 @@ public class UpdateStopperTests : IDisposable
 
         var core = new CoreProcessClient();
         await core.StartAsync(ComSpec, TestContext.Current.CancellationToken);
-        var stopper = new UpdateStopper(pipeline, core, NullLogger<UpdateStopper>.Instance);
+        var overlay = new RecordingAsyncDisposable();
+        var stopper = new UpdateStopper(pipeline, core, overlay);
 
         await stopper.StopServicesAsync(TestContext.Current.CancellationToken);
         await stopper.StopServicesAsync(TestContext.Current.CancellationToken);
 
-        Assert.Equal("core.stop", Assert.Single(peer.Calls).Method); // lần 2 IsRunning=false → skip
+        Assert.Equal("core.stop", Assert.Single(peer.Calls).Method);
     }
 
     [Fact]
@@ -162,7 +198,7 @@ public class UpdateStopperTests : IDisposable
         // Test host không có MAUI Application — Quit() phải là no-op an toàn.
         var shutdown = new MauiAppShutdown();
 
-        shutdown.Quit(); // không ném
+        shutdown.Quit();
     }
 
     // ===== Test doubles =====
@@ -173,6 +209,7 @@ public class UpdateStopperTests : IDisposable
         public bool IsStarted { get; set; }
         public List<(string Method, JsonNode? Params)> Calls { get; } = new();
         public Exception? ThrowOnCoreStop { get; set; }
+        public List<string>? StopSteps { get; set; }
 
         public event Action<string, JsonNode?>? NotificationReceived;
         public event Action<Exception>? HandlerError;
@@ -186,7 +223,11 @@ public class UpdateStopperTests : IDisposable
 
         public Task<JsonNode?> CallAsync(string method, JsonNode? @params, CancellationToken ct)
         {
-            if (method == "core.stop" && ThrowOnCoreStop is not null) throw ThrowOnCoreStop;
+            if (method == "core.stop")
+            {
+                if (ThrowOnCoreStop is not null) throw ThrowOnCoreStop;
+                StopSteps?.Add("pipeline");
+            }
             Calls.Add((method, @params));
             return Task.FromResult<JsonNode?>(new JsonObject { ["running"] = method == "core.start" });
         }
@@ -201,33 +242,39 @@ public class UpdateStopperTests : IDisposable
         public void RaiseExited(int exitCode) => Exited?.Invoke(exitCode);
     }
 
-    /// <summary>CoreProcessClient subclass ném đúng lúc DisposeAsync — kiểm chứng bước (2) được nuốt + log warn.</summary>
+    private sealed class RecordingCoreProcessClient(List<string>? steps = null) : CoreProcessClient
+    {
+        public bool DisposeCalled { get; private set; }
+
+        public override async ValueTask DisposeAsync()
+        {
+            DisposeCalled = true;
+            steps?.Add("core");
+            await base.DisposeAsync();
+        }
+    }
+
+    /// <summary>CoreProcessClient subclass ném đúng lúc DisposeAsync để kiểm chứng lỗi không bị nuốt.</summary>
     private sealed class ThrowingCoreProcessClient : CoreProcessClient
     {
         public override ValueTask DisposeAsync()
             => throw new InvalidOperationException("simulated core dispose failure");
     }
 
-    /// <summary>ILogger ghi lại message ≥ Warning để xác nhận bước throw bị nuốt + log warn.</summary>
-    private sealed class RecordingLogger<T> : ILogger<T>
+    private sealed class RecordingAsyncDisposable(List<string>? steps = null) : IAsyncDisposable
     {
-        public List<string> Warnings { get; } = [];
+        public bool DisposeCalled { get; private set; }
+        public Exception? ThrowOnDispose { get; set; }
+        public bool NeverCompletes { get; set; }
 
-        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-
-        public bool IsEnabled(LogLevel logLevel) => true;
-
-        public void Log<TState>(
-            LogLevel logLevel,
-            EventId eventId,
-            TState state,
-            Exception? exception,
-            Func<TState, Exception?, string> formatter)
+        public ValueTask DisposeAsync()
         {
-            if (logLevel >= LogLevel.Warning)
-            {
-                Warnings.Add(formatter(state, exception));
-            }
+            DisposeCalled = true;
+            steps?.Add("overlay");
+            if (ThrowOnDispose is not null) throw ThrowOnDispose;
+            return NeverCompletes
+                ? new ValueTask(Task.Delay(Timeout.InfiniteTimeSpan))
+                : ValueTask.CompletedTask;
         }
     }
 }

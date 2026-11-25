@@ -78,18 +78,19 @@ public class UpdateCoordinatorTests
     }
 
     [Fact]
-    public async Task StartUpdateAsync_WhenStopServicesFails_RaisesFailedStop()
+    public async Task StartUpdateAsync_WhenOverlayFeedDisposalFails_RaisesFailedStopAndDoesNotLaunchUpdater()
     {
         using var fx = CreateFixtures();
         var failed = new List<UpdateError>();
         fx.Coordinator.Failed += failed.Add;
-        fx.Stopper.ThrowOnStop = new InvalidOperationException("simulated stop failure");
+        fx.Stopper.ThrowOnStop = new InvalidOperationException("simulated OverlayFeedServer.DisposeAsync failure");
         fx.Updates.DownloadTcs.SetResult(Path.Combine(Path.GetTempPath(), "retran-9.9.9.zip"));
 
         await fx.Coordinator.StartUpdateAsync(Release());
 
         Assert.Equal(UpdateError.StopServicesFailed, Assert.Single(failed));
         Assert.DoesNotContain("install", fx.Calls);
+        Assert.DoesNotContain("quit", fx.Calls);
         Assert.False(fx.Coordinator.UpdateInProgress);
     }
 

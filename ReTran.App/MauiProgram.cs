@@ -134,7 +134,10 @@ namespace ReTran_App
             builder.Services.AddSingleton(_ => HttpUa.Apply(new HttpClient()));
             builder.Services.AddSingleton<GitHubAppUpdateService>();
             builder.Services.AddSingleton<IAppUpdateService>(sp => sp.GetRequiredService<GitHubAppUpdateService>());
-            builder.Services.AddSingleton<UpdateStopper>();
+            builder.Services.AddSingleton(sp => new UpdateStopper(
+                sp.GetRequiredService<PipelineController>(),
+                sp.GetRequiredService<CoreProcessClient>(),
+                sp.GetRequiredService<OverlayFeedServer>()));
             builder.Services.AddSingleton<IUpdateStopper>(sp => sp.GetRequiredService<UpdateStopper>());
             builder.Services.AddSingleton<UpdateCoordinator>();
             builder.Services.AddSingleton<UpdateCheckService>();
