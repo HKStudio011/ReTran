@@ -27,6 +27,27 @@ public class BrandAssetTests
         Assert.DoesNotContain("#512BD4", foregroundText, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Topbar_UsesSvgBrandMark_AndKeepsRunStatus()
+    {
+        string repositoryRoot = FindRepositoryRoot();
+        string markup = File.ReadAllText(Path.Combine(
+            repositoryRoot, "ReTran.App", "Components", "Layout", "MainLayout.razor"));
+        string css = File.ReadAllText(Path.Combine(
+            repositoryRoot, "ReTran.App", "vite-project", "src", "css", "deck.css"));
+        const string brandSvg = "<svg class=\"rt-brand-mark\" viewBox=\"0 0 128 128\" aria-hidden=\"true\">";
+
+        Assert.Contains(brandSvg, markup, StringComparison.Ordinal);
+        Assert.True(markup.IndexOf(brandSvg, StringComparison.Ordinal) <
+            markup.IndexOf("class=\"rt-brand-name\"", StringComparison.Ordinal));
+        Assert.Matches(@"\.rt-brand-mark\s*\{[^}]*width:\s*22px;", css);
+        Assert.Matches(@"\.rt-brand-mark\s*\{[^}]*height:\s*22px;", css);
+        Assert.DoesNotContain(".rt-brand-mark i", css, StringComparison.Ordinal);
+        Assert.DoesNotContain(".is-live .rt-brand-mark", css, StringComparison.Ordinal);
+        Assert.Contains("deck.chip.live", markup, StringComparison.Ordinal);
+        Assert.Contains("deck.chip.stopped", markup, StringComparison.Ordinal);
+    }
+
     private static string FindRepositoryRoot()
     {
         for (DirectoryInfo? directory = new(AppContext.BaseDirectory);
