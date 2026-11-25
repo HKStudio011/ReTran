@@ -193,7 +193,7 @@ public sealed class UpdateCoordinator : IDisposable
         string? zipPath;
         try
         {
-            zipPath = await _updates.DownloadUpdateAsync(release, new PercentProgress(this));
+            zipPath = await _updates.DownloadUpdateAsync(release, new PercentProgress(this), cts.Token);
         }
         catch (Exception ex)
         {
@@ -210,8 +210,8 @@ public sealed class UpdateCoordinator : IDisposable
         }
 
         // CancelUpdate/Dispose won: the canceller already reset the state (Cancelled fired, flags
-        // cleared) — just return. Checked AFTER the await because the download API has no token;
-        // the null branch below is therefore never reached for a superseded run.
+        // cleared) — just return. The download receives this run's token, and this post-await guard
+        // also covers a non-cooperative implementation that completes after cancellation.
         if (cts.IsCancellationRequested)
         {
             return;

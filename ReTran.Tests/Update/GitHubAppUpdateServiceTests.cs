@@ -102,7 +102,7 @@ public class GitHubAppUpdateServiceTests
             publicKeyBase64: key.PublicKeyBase64);
         var progress = new RecordingProgress();
 
-        var path = await service.DownloadUpdateAsync(release, progress);
+        var path = await service.DownloadUpdateAsync(release, progress, TestContext.Current.CancellationToken);
 
         try
         {
@@ -119,13 +119,68 @@ public class GitHubAppUpdateServiceTests
         }
         finally
         {
-            if (path is not null)
+            TryDeleteAttemptDirectory(Path.GetFileName(Path.GetDirectoryName(path)));
+        }
+    }
+
+    [Fact]
+    public async Task Download_OlderAttemptCannotOverwriteNewerAttempt()
+    {
+        var olderPayload = "older zip"u8.ToArray();
+        var newerPayload = "newer zip"u8.ToArray();
+        var handler = new StaleRunHandler(olderPayload, newerPayload);
+        var service = ServiceWith(handler);
+        var release = Release("v1.2.3",
+            new ReleaseAsset(ZipAssetName, "https://example.com/payload.zip"),
+            new ReleaseAsset(ZipAssetName + ".sig", "https://example.com/payload.zip.sig"));
+        using var olderCts = new CancellationTokenSource();
+        var olderDownload = DownloadWithToken(service, release, olderCts.Token);
+        string? newerPath = null;
+
+        try
+        {
+            await handler.FirstSignatureStarted.Task.WaitAsync(
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            olderCts.Cancel();
+
+            newerPath = await DownloadWithToken(service, release, CancellationToken.None);
+
+            Assert.NotNull(newerPath);
+            var updateRoot = Path.Combine(Path.GetTempPath(), "ReTran_Update");
+            var olderPath = Path.Combine(updateRoot, "1", ZipAssetName);
+            Assert.Equal(Path.Combine(updateRoot, "2", ZipAssetName), newerPath);
+            Assert.NotEqual(olderPath, newerPath);
+            Assert.Equal(newerPath, service.DownloadedZipPath);
+            Assert.Equal(newerPath + ".sig", service.DownloadedSignaturePath);
+            Assert.Equal(newerPayload, await File.ReadAllBytesAsync(
+                newerPath, TestContext.Current.CancellationToken));
+            Assert.Equal("newer signature", await File.ReadAllTextAsync(
+                newerPath + ".sig", TestContext.Current.CancellationToken));
+
+            // The HTTP double deliberately releases A only after B has completed, exposing stale publication.
+            handler.ReleaseOlderSignature();
+            Assert.Null(await olderDownload);
+
+            Assert.True(handler.OlderSignatureToken.IsCancellationRequested);
+            Assert.Equal(newerPath, service.DownloadedZipPath);
+            Assert.Equal(newerPath + ".sig", service.DownloadedSignaturePath);
+            Assert.Equal(newerPayload, await File.ReadAllBytesAsync(
+                newerPath, TestContext.Current.CancellationToken));
+            Assert.Equal("newer signature", await File.ReadAllTextAsync(
+                newerPath + ".sig", TestContext.Current.CancellationToken));
+            Assert.False(File.Exists(olderPath));
+            Assert.False(File.Exists(olderPath + ".sig"));
+            Assert.False(Directory.Exists(Path.GetDirectoryName(olderPath)));
+        }
+        finally
+        {
+            olderCts.Cancel();
+            handler.ReleaseOlderSignature();
+            try { await olderDownload; } catch { }
+            TryDeleteAttemptDirectory("1");
+            if (newerPath is not null)
             {
-                File.Delete(path);
-            }
-            if (service.DownloadedSignaturePath is not null)
-            {
-                File.Delete(service.DownloadedSignaturePath);
+                TryDeleteAttemptDirectory(Path.GetFileName(Path.GetDirectoryName(newerPath)));
             }
         }
     }
@@ -139,7 +194,7 @@ public class GitHubAppUpdateServiceTests
         var release = Release("v1.2.3", new ReleaseAsset(ZipAssetName, "https://example.com/payload.zip"));
         var service = ServiceWith(new SignedZipHandler(payload, signatureBase64: null), publicKeyBase64: key.PublicKeyBase64);
 
-        Assert.Null(await service.DownloadUpdateAsync(release, null));
+        Assert.Null(await service.DownloadUpdateAsync(release, null, TestContext.Current.CancellationToken));
         Assert.Null(service.DownloadedZipPath);
     }
 
@@ -153,7 +208,7 @@ public class GitHubAppUpdateServiceTests
         var release = SignedRelease(payload, key, out var signatureBase64);
         var service = ServiceWith(new SignedZipHandler(payload, signatureBase64),
             publicKeyBase64: otherKey.PublicKeyBase64);
-        var downloaded = await service.DownloadUpdateAsync(release, null);
+        var downloaded = await service.DownloadUpdateAsync(release, null, TestContext.Current.CancellationToken);
 
         try
         {
@@ -165,14 +220,7 @@ public class GitHubAppUpdateServiceTests
         }
         finally
         {
-            if (downloaded is not null)
-            {
-                File.Delete(downloaded);
-            }
-            if (service.DownloadedSignaturePath is not null)
-            {
-                File.Delete(service.DownloadedSignaturePath);
-            }
+            TryDeleteAttemptDirectory(Path.GetFileName(Path.GetDirectoryName(downloaded)));
         }
     }
 
@@ -188,7 +236,7 @@ public class GitHubAppUpdateServiceTests
         var release = SignedRelease(payload, key, out var signatureBase64);
         var service = ServiceWith(new SignedZipHandler(payload, signatureBase64),
             publicKeyBase64: otherKey.PublicKeyBase64);
-        var downloaded = await service.DownloadUpdateAsync(release, null);
+        var downloaded = await service.DownloadUpdateAsync(release, null, TestContext.Current.CancellationToken);
 
         try
         {
@@ -204,14 +252,7 @@ public class GitHubAppUpdateServiceTests
         }
         finally
         {
-            if (downloaded is not null)
-            {
-                File.Delete(downloaded);
-            }
-            if (service.DownloadedSignaturePath is not null)
-            {
-                File.Delete(service.DownloadedSignaturePath);
-            }
+            TryDeleteAttemptDirectory(Path.GetFileName(Path.GetDirectoryName(downloaded)));
         }
     }
 
@@ -227,7 +268,7 @@ public class GitHubAppUpdateServiceTests
         Directory.CreateDirectory(appDir);
         var service = ServiceWith(new SignedZipHandler(payload, signatureBase64),
             publicKeyBase64: key.PublicKeyBase64, appDir: appDir);
-        var downloaded = await service.DownloadUpdateAsync(release, null);
+        var downloaded = await service.DownloadUpdateAsync(release, null, TestContext.Current.CancellationToken);
 
         try
         {
@@ -239,14 +280,7 @@ public class GitHubAppUpdateServiceTests
         }
         finally
         {
-            if (downloaded is not null)
-            {
-                File.Delete(downloaded);
-            }
-            if (service.DownloadedSignaturePath is not null)
-            {
-                File.Delete(service.DownloadedSignaturePath);
-            }
+            TryDeleteAttemptDirectory(Path.GetFileName(Path.GetDirectoryName(downloaded)));
             try { Directory.Delete(appDir, recursive: true); }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
@@ -402,40 +436,42 @@ public class GitHubAppUpdateServiceTests
     }
 
     [Fact]
-    public async Task DownloadUpdateAsync_FailureAfterSuccess_ClearsPathAndDeletesPartialFile()
+    public async Task DownloadUpdateAsync_FailureAfterSuccess_ClearsPathAndPreservesEarlierAttemptFiles()
     {
-        // 30 bytes / chunk 10: attempt 1 tải trọn zip + sig; attempt 2 ghi zip rồi ném IOException giữa chừng
+        // 30 bytes / chunk 10: attempt 1 tải trọn zip + sig; attempt 2 ghi zip rồi ném IOException giữa chừng.
         var payload = "0123456789ABCDEFGHIJ0123456789"u8.ToArray();
         using var key = new TestSigningKey();
         var release = SignedRelease(payload, key, out var signatureBase64);
         var service = ServiceWith(new GoodThenFailMidstreamHandler(payload, signatureBase64, chunkSize: 10, succeedBeforeFail: 2),
             publicKeyBase64: key.PublicKeyBase64);
 
-        var firstPath = await service.DownloadUpdateAsync(release, null);
+        var firstPath = await service.DownloadUpdateAsync(release, null, TestContext.Current.CancellationToken);
 
         Assert.NotNull(firstPath);
         Assert.True(File.Exists(firstPath));
         Assert.Equal(firstPath, service.DownloadedZipPath);
+        var firstSignaturePath = service.DownloadedSignaturePath;
+        Assert.NotNull(firstSignaturePath);
 
-        var secondResult = await service.DownloadUpdateAsync(release, null);
+        var secondResult = await service.DownloadUpdateAsync(release, null, TestContext.Current.CancellationToken);
 
         try
         {
-            // Attempt 2 fail giữa chừng: path không được trỏ tới zip truncated, file rác phải bị xóa
+            // Attempt 2 chỉ dọn file dở của chính nó; file hoàn chỉnh của attempt 1 không bị xóa nhầm.
+            var updateRoot = Path.Combine(Path.GetTempPath(), "ReTran_Update");
+            var secondPath = Path.Combine(updateRoot, "2", ZipAssetName);
             Assert.Null(secondResult);
             Assert.Null(service.DownloadedZipPath);
-            Assert.False(File.Exists(firstPath));
+            Assert.Null(service.DownloadedSignaturePath);
+            Assert.True(File.Exists(firstPath));
+            Assert.True(File.Exists(firstSignaturePath));
+            Assert.False(File.Exists(secondPath));
+            Assert.False(File.Exists(secondPath + ".sig"));
         }
         finally
         {
-            if (firstPath is not null)
-            {
-                File.Delete(firstPath);
-            }
-            if (service.DownloadedSignaturePath is not null)
-            {
-                File.Delete(service.DownloadedSignaturePath);
-            }
+            TryDeleteAttemptDirectory("1");
+            TryDeleteAttemptDirectory("2");
         }
     }
 
@@ -449,6 +485,23 @@ public class GitHubAppUpdateServiceTests
         return Release("v1.2.3",
             new ReleaseAsset(ZipAssetName, "https://example.com/payload.zip"),
             new ReleaseAsset(ZipAssetName + ".sig", "https://example.com/payload.zip.sig"));
+    }
+
+    private static Task<string?> DownloadWithToken(
+        GitHubAppUpdateService service, ReleaseInfo release, CancellationToken cancellationToken) =>
+        service.DownloadUpdateAsync(release, null, cancellationToken);
+
+    private static void TryDeleteAttemptDirectory(string? attemptId)
+    {
+        if (string.IsNullOrEmpty(attemptId)) return;
+
+        var path = Path.Combine(Path.GetTempPath(), "ReTran_Update", attemptId);
+        try
+        {
+            if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
     }
 
     // ===== HTTP doubles (pattern FreeModelSyncServiceTests) =====
@@ -485,6 +538,54 @@ public class GitHubAppUpdateServiceTests
             var content = new StreamContent(new ChunkedStream(payload, chunkSize));
             content.Headers.ContentLength = payload.Length;
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+        }
+    }
+
+    /// <summary>
+    /// Blocks the first signature request until the second attempt has completed. The gate intentionally
+    /// ignores cancellation to model a non-cooperative HTTP double; the request token is captured separately.
+    /// </summary>
+    private sealed class StaleRunHandler(byte[] olderPayload, byte[] newerPayload) : HttpMessageHandler
+    {
+        private readonly TaskCompletionSource _olderSignatureRelease =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _zipCalls;
+        private int _signatureCalls;
+
+        public TaskCompletionSource FirstSignatureStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public CancellationToken OlderSignatureToken { get; private set; }
+
+        public void ReleaseOlderSignature() => _olderSignatureRelease.TrySetResult();
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken ct)
+        {
+            if (IsSignatureRequest(request))
+            {
+                if (Interlocked.Increment(ref _signatureCalls) == 1)
+                {
+                    OlderSignatureToken = ct;
+                    FirstSignatureStarted.TrySetResult();
+                    await _olderSignatureRelease.Task;
+                    return new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StringContent("older signature"),
+                    };
+                }
+
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("newer signature"),
+                };
+            }
+
+            var payload = Interlocked.Increment(ref _zipCalls) == 1 ? olderPayload : newerPayload;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(payload),
+            };
         }
     }
 

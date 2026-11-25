@@ -19,6 +19,11 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
 
     private readonly HttpClient _http;
 
+    // Attempt creation and path publication share this lock so a stale download cannot clear or publish
+    // over a newer attempt. Each attempt writes only below its own numbered temp directory.
+    private readonly object _downloadSync = new();
+    private long _downloadAttemptId;
+
     /// <summary>
     /// Public key (SPKI Base64) verify chữ ký zip update — production dùng
     /// <see cref="PackageSignatureVerifier.ReleasePublicKeyBase64"/>; test inject keypair khác.
@@ -137,21 +142,32 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
     }
 
     /// <inheritdoc />
-    public async Task<string?> DownloadUpdateAsync(ReleaseInfo release, IProgress<int>? progress)
+    public async Task<string?> DownloadUpdateAsync(
+        ReleaseInfo release, IProgress<int>? progress, CancellationToken cancellationToken = default)
     {
         // Tải file + ghi đĩa là thao tác Windows-only theo contract của updater.
         if (!OperatingSystem.IsWindows()) return null;
 
-        // Invalidate NGAY khi bắt đầu attempt mới: FileStream bên dưới dùng FileMode.Create nên sẽ
-        // truncate zip cũ — nếu attempt này fail giữa chừng, path không được trỏ tới file rác
-        // (InstallUpdateAsync chỉ check File.Exists nên sẽ cài bản hỏng).
-        DownloadedZipPath = null;
-        DownloadedSignaturePath = null;
+        long attemptId;
+        lock (_downloadSync)
+        {
+            attemptId = ++_downloadAttemptId;
 
+            // Invalidate paths when this attempt becomes latest; no partial or superseded zip is installable.
+            DownloadedZipPath = null;
+            DownloadedSignaturePath = null;
+        }
+
+        var attemptDir = Path.Combine(
+            Path.GetTempPath(), UpdateFolderName, attemptId.ToString(System.Globalization.CultureInfo.InvariantCulture));
         string? zipPath = null;
         string? signaturePath = null;
+        var published = false;
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            Directory.CreateDirectory(attemptDir);
+
             var asset = release.Assets.FirstOrDefault(a =>
                 a.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) &&
                 !a.Name.Contains("symbols", StringComparison.OrdinalIgnoreCase));
@@ -162,26 +178,22 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
             // (Các release trước khi triển khai ký sẽ không cập nhật được — intended.)
             var signatureAsset = release.Assets.FirstOrDefault(a =>
                 string.Equals(a.Name, asset.Name + ".sig", StringComparison.OrdinalIgnoreCase));
-            if (signatureAsset is null)
-            {
-                DeletePartialFile(zipPath);
-                return null;
-            }
+            if (signatureAsset is null) return null;
 
-            // Ghi đè (FileMode.Create) thay vì reuse — bản tải dở lần trước có thể đã hỏng.
-            var tempDir = Path.Combine(Path.GetTempPath(), UpdateFolderName);
-            Directory.CreateDirectory(tempDir);
-            zipPath = Path.Combine(tempDir, asset.Name);
+            // Every attempt has distinct paths, so an old writer cannot truncate or delete a newer download.
+            zipPath = Path.Combine(attemptDir, asset.Name);
             signaturePath = zipPath + ".sig";
 
-            var request = new HttpRequestMessage(HttpMethod.Get, asset.BrowserDownloadUrl);
+            using var request = new HttpRequestMessage(HttpMethod.Get, asset.BrowserDownloadUrl);
             request.Headers.UserAgent.ParseAdd($"Retran/{CurrentVersion}");
 
-            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+            using var response = await _http.SendAsync(
+                request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             if (!response.IsSuccessStatusCode) return null;
 
             var totalBytes = response.Content.Headers.ContentLength ?? -1;
-            using var contentStream = await response.Content.ReadAsStreamAsync();
+            using var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
             await using (var fileStream = new FileStream(zipPath, FileMode.Create, FileAccess.Write, FileShare.None))
             {
                 var buffer = new byte[81920];
@@ -189,9 +201,9 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
                 var lastReported = 0;
                 int bytesRead;
 
-                while ((bytesRead = await contentStream.ReadAsync(buffer)) > 0)
+                while ((bytesRead = await contentStream.ReadAsync(buffer, cancellationToken)) > 0)
                 {
-                    await fileStream.WriteAsync(buffer, 0, bytesRead);
+                    await fileStream.WriteAsync(buffer, 0, bytesRead, cancellationToken);
                     readBytes += bytesRead;
 
                     // Chỉ báo khi % tăng — tránh spam progress với 81920 byte mỗi lần đọc.
@@ -205,32 +217,45 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
                         }
                     }
                 }
+
+                await fileStream.FlushAsync(cancellationToken);
             }
 
             // Tải chữ ký (file nhỏ, đọc trọn 1 lần — không cần progress)
-            var signatureRequest = new HttpRequestMessage(HttpMethod.Get, signatureAsset.BrowserDownloadUrl);
+            using var signatureRequest = new HttpRequestMessage(HttpMethod.Get, signatureAsset.BrowserDownloadUrl);
             signatureRequest.Headers.UserAgent.ParseAdd($"Retran/{CurrentVersion}");
 
-            using var signatureResponse = await _http.SendAsync(signatureRequest);
-            if (!signatureResponse.IsSuccessStatusCode)
+            using var signatureResponse = await _http.SendAsync(signatureRequest, cancellationToken);
+            if (!signatureResponse.IsSuccessStatusCode) return null;
+
+            var signatureBytes = await signatureResponse.Content.ReadAsByteArrayAsync(cancellationToken);
+            await File.WriteAllBytesAsync(signaturePath, signatureBytes, cancellationToken);
+
+            lock (_downloadSync)
             {
-                DeletePartialFile(zipPath);
-                return null;
+                if (attemptId == _downloadAttemptId && !cancellationToken.IsCancellationRequested)
+                {
+                    DownloadedSignaturePath = signaturePath;
+                    DownloadedZipPath = zipPath;
+                    published = true;
+                }
             }
 
-            var signatureBytes = await signatureResponse.Content.ReadAsByteArrayAsync();
-            await File.WriteAllBytesAsync(signaturePath, signatureBytes);
-
-            DownloadedSignaturePath = signaturePath;
-            DownloadedZipPath = zipPath;
-            return zipPath;
+            return published ? zipPath : null;
         }
         catch (Exception)
         {
-            // Lỗi mạng/đĩa → xóa zip + sig dở dang rồi trả null để UI báo tải thất bại.
-            DeletePartialFile(zipPath);
-            DeletePartialFile(signaturePath);
+            // Network, disk, and cancellation failures all invalidate this attempt; finally cleans only its files.
             return null;
+        }
+        finally
+        {
+            if (!published)
+            {
+                DeletePartialFile(zipPath);
+                DeletePartialFile(signaturePath);
+                DeleteAttemptDirectory(attemptDir);
+            }
         }
     }
 
@@ -247,6 +272,19 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
         catch (Exception)
         {
             // Không xóa được file rác trong temp (đĩa đầy/file khóa) — đã xử lý bằng cách không trỏ path tới nó.
+        }
+    }
+
+    // Non-recursive by design: an attempt may remove only its own empty directory, never a sibling attempt.
+    private static void DeleteAttemptDirectory(string attemptDir)
+    {
+        try
+        {
+            Directory.Delete(attemptDir, recursive: false);
+        }
+        catch (Exception)
+        {
+            // Best-effort temp cleanup; a locked file or unexpected extra file must not affect another attempt.
         }
     }
 

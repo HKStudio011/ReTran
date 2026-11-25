@@ -122,6 +122,7 @@ public class UpdateCoordinatorTests
         var startTask = fx.Coordinator.StartUpdateAsync(Release());
         await WaitUntilAsync(() => fx.Calls.Contains("download"), "download phải bắt đầu");
         fx.Coordinator.CancelUpdate();
+        Assert.True(fx.Updates.DownloadCancellationToken.IsCancellationRequested);
         // Giải phóng download còn treo để pipeline thoát (check IsCancellationRequested sau await)
         fx.Updates.DownloadTcs.SetResult(Path.Combine(Path.GetTempPath(), "retran-9.9.9.zip"));
         await startTask;
@@ -344,12 +345,16 @@ public class UpdateCoordinatorTests
 
         public string? DownloadedZipPath { get; set; }
 
+        public CancellationToken DownloadCancellationToken { get; private set; }
+
         public Task<ReleaseInfo?> CheckForUpdatesAsync() => Task.FromResult<ReleaseInfo?>(null);
 
         public bool IsUpdateAvailable(ReleaseInfo release) => false;
 
-        public Task<string?> DownloadUpdateAsync(ReleaseInfo release, IProgress<int>? progress)
+        public Task<string?> DownloadUpdateAsync(
+            ReleaseInfo release, IProgress<int>? progress, CancellationToken cancellationToken = default)
         {
+            DownloadCancellationToken = cancellationToken;
             calls.Add("download");
             return DownloadTcs.Task;
         }
