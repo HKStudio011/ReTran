@@ -166,6 +166,62 @@ public class UpdateCoordinatorTests
     }
 
     [Fact]
+    public async Task Dispose_BeforePostStopRecovery_AbortsSilentlyWithoutFailedOrRestart()
+    {
+        using var fx = CreateFixtures();
+        var failed = new List<UpdateError>();
+        fx.Coordinator.Failed += error =>
+        {
+            failed.Add(error);
+            fx.Calls.Add("failed");
+        };
+        fx.Stopper.ThrowOnStop = new CallbackException(() =>
+        {
+            fx.Calls.Add("dispose");
+            fx.Coordinator.Dispose();
+            return "simulated stop failure with Dispose before recovery";
+        });
+        fx.Updates.DownloadTcs.SetResult(Path.Combine(Path.GetTempPath(), "retran-9.9.9.zip"));
+
+        await fx.Coordinator.StartUpdateAsync(Release());
+
+        Assert.Empty(failed);
+        Assert.Equal(["download", "verify", "stop", "dispose"], fx.Calls);
+        Assert.DoesNotContain("recover", fx.Calls);
+        Assert.DoesNotContain("quit", fx.Calls);
+        Assert.False(fx.Coordinator.UpdateInProgress);
+        Assert.False(fx.Coordinator.IsFinalizing);
+    }
+
+    [Fact]
+    public async Task Dispose_FromFailedDuringPostStopFailure_AbortsRestartAndDoesNotThrow()
+    {
+        using var fx = CreateFixtures();
+        var failed = new List<UpdateError>();
+        fx.Coordinator.Failed += error =>
+        {
+            failed.Add(error);
+            fx.Calls.Add("failed");
+            fx.Coordinator.Dispose();
+            fx.Calls.Add("dispose");
+            throw new InvalidOperationException("simulated UI failure after Dispose");
+        };
+        fx.Stopper.ThrowOnStop = new InvalidOperationException("simulated stop failure");
+        fx.Updates.DownloadTcs.SetResult(Path.Combine(Path.GetTempPath(), "retran-9.9.9.zip"));
+
+        await fx.Coordinator.StartUpdateAsync(Release());
+
+        Assert.Equal(UpdateError.StopServicesFailed, Assert.Single(failed));
+        Assert.Equal(["download", "verify", "stop", "failed", "dispose"], fx.Calls);
+        Assert.DoesNotContain("recover", fx.Calls);
+        Assert.DoesNotContain("quit", fx.Calls);
+        Assert.Contains(fx.Log.Warnings, warning =>
+            warning.Contains("UI notification failed", StringComparison.OrdinalIgnoreCase));
+        Assert.False(fx.Coordinator.UpdateInProgress);
+        Assert.False(fx.Coordinator.IsFinalizing);
+    }
+
+    [Fact]
     public async Task CancelUpdate_BeforeFinalize_CancelsAndRaisesCancelled()
     {
         using var fx = CreateFixtures();
@@ -435,6 +491,11 @@ public class UpdateCoordinatorTests
 
             return Task.FromResult(InstallResult);
         }
+    }
+
+    private sealed class CallbackException(Func<string> message) : Exception
+    {
+        public override string Message => message();
     }
 
     /// <summary>Fake IUpdateStopper — ghi "stop", ném ThrowOnStop, BlockStop giữ pipeline trong window finalise.</summary>

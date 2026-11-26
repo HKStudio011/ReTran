@@ -86,6 +86,10 @@ public sealed class UpdateCoordinator : IDisposable
     // run) would reset the state of run #2.
     private int _runId;
 
+    // Dispose marks the run separately so both recovery guards can identify teardown explicitly. Run IDs
+    // are monotonic, so the supported Dispose-then-start reuse cannot clear the marker of an older run.
+    private int _disposedRunId;
+
     /// <summary>
     /// Creates the coordinator.
     /// Tạo coordinator mới.
@@ -148,7 +152,7 @@ public sealed class UpdateCoordinator : IDisposable
     /// <summary>Fires when a property changes — the modal UI re-renders. Bắn khi một property đổi — modal UI re-render.</summary>
     public event Action? Changed;
 
-    /// <summary>Fires when the update failed; pre-stop failures reset after the event, while post-stop failures remain finalizing for terminal recovery. Bắn khi update thất bại; lỗi trước stop reset sau event, còn lỗi sau stop giữ trạng thái finalizing để recovery kết thúc.</summary>
+    /// <summary>Fires when the update failed; pre-stop failures reset after the event, while post-stop failures remain finalizing for recovery unless Dispose aborts it. Bắn khi update thất bại; lỗi trước stop reset sau event, còn lỗi sau stop giữ trạng thái finalizing cho recovery trừ khi Dispose huỷ recovery.</summary>
     public event Action<UpdateError>? Failed;
 
     /// <summary>Fires when the user cancels before finalize — the UI toasts "Update cancelled". Bắn khi người dùng Hủy trước khi finalise — UI toast "Đã hủy cập nhật".</summary>
@@ -355,13 +359,14 @@ public sealed class UpdateCoordinator : IDisposable
     /// before finalize (download/verify) the pipeline exits at its next cancellation check and the
     /// state resets silently; during the stop-services step the run aborts silently (Warn + reset,
     /// no <see cref="Failed"/>); during install the pipeline still proceeds to launch the updater
-    /// and Quit — the app is tearing down, events may still fire after Dispose.
+    /// and Quit. During post-stop recovery, Dispose before the notification commit suppresses
+    /// <see cref="Failed"/>, and Dispose before or inside that event prevents the current-app restart.
     /// Teardown: huỷ CTS và giải phóng update đang chờ (nếu có). Không bắn <see cref="Cancelled"/> —
     /// đây không phải hành động người dùng. Hành vi thực tế theo window: trước finalise
     /// (download/verify) pipeline thoát ở check huỷ kế tiếp và reset im lặng; trong bước dừng
     /// service, run hủy im lặng (Warn + reset, KHÔNG <see cref="Failed"/>); trong lúc install,
-    /// pipeline vẫn chạy tiếp khởi chạy updater và Quit — app đang teardown; event có thể vẫn
-    /// fire sau Dispose.
+    /// pipeline vẫn chạy tiếp khởi chạy updater và Quit. Trong recovery sau stop, Dispose trước
+    /// notification commit chặn <see cref="Failed"/>; Dispose trước hoặc bên trong event chặn restart app.
     /// </summary>
     public void Dispose()
     {
@@ -369,6 +374,7 @@ public sealed class UpdateCoordinator : IDisposable
         bool release;
         lock (_sync)
         {
+            _disposedRunId = _runId;
             _cts?.Cancel();
             runId = _runId;
             release = _updateInProgress && !_isFinalizing;
@@ -381,25 +387,27 @@ public sealed class UpdateCoordinator : IDisposable
     }
 
     // Post-stop failures cannot return to a usable UI: Core and OverlayFeed may already be disposed.
-    // Keep the run finalizing, report the error, restart the current executable, and always try to quit.
+    // Notification and process launch are separate commit phases so Dispose between them aborts restart.
     private void RecoverAfterPostStopFailure(UpdateError error, string message, int runId)
     {
+        _log.LogWarning("{Message}", message);
+
         bool active;
         lock (_sync)
         {
-            active = _updateInProgress && _runId == runId;
-            if (active)
-            {
-                _cts?.Cancel();
-            }
+            // This is the notification commit. Recovery does not self-cancel, so the CTS remains an
+            // external-cancellation signal for both this guard and the later launch commit.
+            active = _updateInProgress && _runId == runId && _disposedRunId != runId &&
+                _cts is { IsCancellationRequested: false };
         }
 
-        _log.LogWarning("{Message}", message);
         if (!active)
         {
+            Reset(runId);
             return;
         }
 
+        // Arbitrary UI handlers stay outside _sync. A handler may Dispose; the launch guard below then loses.
         try
         {
             Failed?.Invoke(error);
@@ -409,13 +417,38 @@ public sealed class UpdateCoordinator : IDisposable
             _log.LogError(ex, "Update failure UI notification failed during terminal recovery.");
         }
 
-        try
+        var launchCommitted = false;
+        Exception? restartFailure = null;
+        lock (_sync)
         {
-            _recovery.RestartCurrentApp();
+            // Dispose and this launch commit use the same lock: Dispose either wins first and fails this
+            // guard, or launch completes before Dispose can cancel/mark the run. Production
+            // ProcessAppRecovery only constructs ProcessStartInfo and calls Process.Start; it has no
+            // coordinator callback, event handler, logging, or asynchronous wait.
+            if (_updateInProgress && _runId == runId && _disposedRunId != runId &&
+                _cts is { IsCancellationRequested: false })
+            {
+                launchCommitted = true;
+                try
+                {
+                    _recovery.RestartCurrentApp();
+                }
+                catch (Exception ex)
+                {
+                    restartFailure = ex;
+                }
+            }
         }
-        catch (Exception ex)
+
+        if (!launchCommitted)
         {
-            _log.LogError(ex,
+            Reset(runId);
+            return;
+        }
+
+        if (restartFailure is not null)
+        {
+            _log.LogError(restartFailure,
                 "Application restart failed after post-stop update failure; quitting the torn-down process.");
         }
 

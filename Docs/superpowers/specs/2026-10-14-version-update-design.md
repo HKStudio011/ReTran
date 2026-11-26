@@ -124,8 +124,9 @@ builder.Services.AddSingleton<UpdateCheckService>();
 
 - **Không** DrainGate, **không** queue snapshot: translation cache đã bền trong SQLite; request đang bay bị drop là chấp nhận được.
 - Nhánh cancel/fail trước stop-services gọi `_runId`-guarded cleanup (giữ pattern chống stale-run);
-  `IsFinalizing = true` trước bước 3 (ẩn Cancel). Dispose trong stop-services vẫn teardown im lặng,
-  không restart; download/verify fail chưa dừng service nên cũng không restart.
+  `IsFinalizing = true` trước bước 3 (ẩn Cancel). Dispose trong stop-services hoặc trước notification
+  commit của recovery vẫn teardown im lặng, không `Failed`/restart; Dispose bên trong `Failed` chặn
+  restart. Download/verify fail chưa dừng service nên cũng không restart.
 - **Terminal recovery sau post-stop failure:** nếu bước 3 throw/timeout hoặc bước 4 trả false/throw, bắn
   `Failed` để UI báo lỗi rồi khởi chạy **ReTran.App hiện tại** bằng `Environment.ProcessPath`,
   `ProcessStartInfo` (`WorkingDirectory = AppContext.BaseDirectory`, không shell command string), sau đó
@@ -133,6 +134,11 @@ builder.Services.AddSingleton<UpdateCheckService>();
   sinh DI singleton đã dispose. Nếu restart fail, log Error và vẫn Quit process đã teardown; nếu Quit cũ
   fail, giữ trạng thái finalizing thay vì trả UI về trạng thái healthy giả. Happy path updater→Quit và
   Quit-after-updater không bao giờ đi qua current-app recovery.
+- Recovery có hai commit phase: notification guard kiểm tra runId + external cancellation trước `Failed`,
+  rồi launch guard kiểm tra lại runId + CTS + Dispose marker. Guard cuối và `Process.Start` dùng cùng
+  `_sync` với `Dispose`: Dispose thắng lock trước thì launch bị hủy; launch thắng lock thì hoàn tất trước
+  khi Dispose có thể chen vào. Event handlers không chạy dưới `_sync`; chỉ `ProcessStartInfo` +
+  `Process.Start` (không callback coordinator, không async wait) nằm trong launch commit.
 
 ### 6.3 UpdateError
 
@@ -150,7 +156,8 @@ public enum UpdateError { DownloadFailed, VerifyFailed, StopServicesFailed, Inst
 argv phải đúng ["--zip", _, "--pid", _, "--app-dir", _]   — sai → stderr + exit 1
 WaitForExit(parent, 60_000)                                 — MAUI Hybrid thoát chậm
 1. ExtractToStaging(zip)      → %TEMP%\ReTran_Update\staging-<guid> (directory riêng cho từng extraction;
-                                 không xóa staging của updater khác)
+                                 không xóa staging của updater khác; extract throw thì best-effort xóa
+                                 đúng partial staging-<guid> của lần gọi và rethrow exception gốc)
 2. VerifySelfContained()      → runtimeconfig includedFrameworks ≠ rỗng + hostfxr.dll có mặt
                                 (reject FDD zip — chống bug #5/#9: extract trộn file → app chết)
 3. WaitUntilWritable(staging, appDir, 60s)  — probe File.Open(FileShare.None) từng file

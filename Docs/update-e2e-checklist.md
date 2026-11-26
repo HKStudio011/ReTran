@@ -25,7 +25,7 @@ Nguồn: spec `Docs/superpowers/specs/2026-10-14-version-update-design.md` (§ l
 4. **Negative cases (fail-closed)**
    - Xóa file `.sig` trên release → client **từ chối** update (không có chữ ký = không cài).
    - Zip bị tampered (đổi 1 byte) → client báo `VerifyFailed` (sai chữ ký ECDSA), không cài.
-   - Download/verify fail → services chưa bị dừng, app không restart. Dispose trong stop-services → teardown im lặng, không restart.
+   - Download/verify fail → services chưa bị dừng, app không restart. Dispose trong stop-services hoặc trước notification commit của recovery → teardown im lặng, không `Failed`/restart; Dispose bên trong `Failed` → không restart/Quit từ recovery.
    - Stop-services fail/timeout hoặc updater launch trả false/throw **sau khi services đã dừng** → app bắn lỗi UI tương ứng, khởi chạy lại **ReTran.App hiện tại** (không phải updater), rồi Quit process cũ. Nếu restart fail, log Error và vẫn Quit; nếu Quit fail, process cũ giữ trạng thái terminal thay vì quay lại UI healthy với services đã dispose.
    - Happy path vẫn updater → Quit; Quit-after-updater không khởi chạy thêm ReTran.App từ recovery (chỉ updater mở app sau khi cài).
 

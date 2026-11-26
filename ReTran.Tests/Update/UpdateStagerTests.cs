@@ -113,6 +113,54 @@ public class UpdateStagerTests : IDisposable
     }
 
     [Fact]
+    public void ExtractToStaging_WhenZipBroken_RemovesOnlyOwnedPartialStaging()
+    {
+        var extractionRoot = Path.Combine(Path.GetTempPath(), "ReTran_Update");
+        Directory.CreateDirectory(extractionRoot);
+        Directory.CreateDirectory(_root);
+        var brokenZip = Path.Combine(_root, "broken-cleanup.zip");
+        File.WriteAllText(brokenZip, "not a zip");
+        var survivorZip = MakeZip(Path.Combine(_root, "survivor"), ("app.exe", "keep"));
+        string? survivorStaging = null;
+        string[] before = [];
+
+        try
+        {
+            survivorStaging = UpdateStager.ExtractToStaging(survivorZip);
+            before = Directory.GetDirectories(extractionRoot, "staging-*")
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            Assert.ThrowsAny<InvalidDataException>(() => UpdateStager.ExtractToStaging(brokenZip));
+
+            var after = Directory.GetDirectories(extractionRoot, "staging-*")
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            Assert.Equal(before, after);
+            Assert.True(Directory.Exists(survivorStaging));
+            Assert.Equal("keep", File.ReadAllText(Path.Combine(survivorStaging, "app.exe")));
+        }
+        finally
+        {
+            // Remove only directories introduced by this test, never a baseline extraction.
+            var introduced = Directory.GetDirectories(extractionRoot, "staging-*")
+                .Except(before, StringComparer.OrdinalIgnoreCase);
+            foreach (var staging in introduced)
+            {
+                if (Directory.Exists(staging))
+                {
+                    Directory.Delete(staging, recursive: true);
+                }
+            }
+
+            if (survivorStaging is not null && Directory.Exists(survivorStaging))
+            {
+                Directory.Delete(survivorStaging, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public void WaitUntilWritable_WhenAllUnlocked_ReturnsTrue()
     {
         CreateDirs();
