@@ -139,6 +139,7 @@ namespace ReTran_App
                 sp.GetRequiredService<CoreProcessClient>(),
                 sp.GetRequiredService<OverlayFeedServer>()));
             builder.Services.AddSingleton<IUpdateStopper>(sp => sp.GetRequiredService<UpdateStopper>());
+            builder.Services.AddSingleton<IAppRecovery, ProcessAppRecovery>();
             builder.Services.AddSingleton<UpdateCoordinator>();
             builder.Services.AddSingleton<UpdateCheckService>();
             builder.Services.AddSingleton<IAppShutdown, MauiAppShutdown>();

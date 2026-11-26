@@ -18,14 +18,15 @@ namespace ReTran.Updater;
 internal static class UpdateStager
 {
     /// <summary>
-    /// Shared staging folder under %TEMP% — previous contents are wiped before extraction.
-    /// Thư mục staging chung dưới %TEMP% — dọn sạch bản cũ trước khi trích.
+    /// Creates an extraction-owned staging folder under %TEMP% so concurrent updaters cannot wipe or
+    /// overwrite each other's files. The caller removes only the returned directory after the update.
+    /// Tạo thư mục staging riêng cho từng lần trích dưới %TEMP% để các updater đồng thời không xóa hoặc
+    /// ghi đè file của nhau. Caller chỉ xóa đúng thư mục được trả về sau khi cập nhật.
     /// </summary>
     internal static string ExtractToStaging(string zipPath)
     {
-        var staging = Path.Combine(Path.GetTempPath(), "ReTran_Update", "staging");
-        if (Directory.Exists(staging))
-            Directory.Delete(staging, recursive: true);
+        var staging = Path.Combine(
+            Path.GetTempPath(), "ReTran_Update", $"staging-{Guid.NewGuid():N}");
         Directory.CreateDirectory(staging);
 
         ZipFile.ExtractToDirectory(zipPath, staging, overwriteFiles: true);

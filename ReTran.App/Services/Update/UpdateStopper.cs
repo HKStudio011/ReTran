@@ -5,10 +5,12 @@ namespace ReTran_App.Services.Update;
 
 /// <summary>
 /// Stops the pipeline, core process, and overlay feed in order during install or app teardown.
-/// Every step has its own timeout; cleanup remains best-effort, but every failure is propagated
-/// after all three steps have been attempted so an update cannot continue with a hidden stop error.
+/// Every step has its own timeout covering both synchronous invocation and asynchronous completion;
+/// cleanup remains best-effort, but every failure is propagated after all three steps have been
+/// attempted so an update cannot continue with a hidden stop error.
 /// Dừng pipeline, tiến trình core và overlay feed theo thứ tự khi cài đặt hoặc thoát app.
-/// Mỗi bước có timeout riêng; cleanup vẫn best-effort, nhưng mọi lỗi đều được ném sau khi đã thử
+/// Mỗi bước có timeout riêng cho cả lời gọi đồng bộ lẫn phần hoàn tất bất đồng bộ; cleanup vẫn
+/// best-effort, nhưng mọi lỗi đều được ném sau khi đã thử
 /// cả ba bước để update không thể tiếp tục khi có lỗi dừng service bị che giấu.
 /// </summary>
 public sealed class UpdateStopper : IUpdateStopper
@@ -104,8 +106,10 @@ public sealed class UpdateStopper : IUpdateStopper
         stepCts.CancelAfter(_stepTimeout);
         try
         {
-            // WaitAsync also bounds disposals that cannot observe a cancellation token themselves.
-            await step(stepCts.Token).WaitAsync(stepCts.Token).ConfigureAwait(false);
+            // Invoke on the thread pool so a synchronous block before Task/ValueTask creation is bounded too.
+            // WaitAsync also bounds asynchronous disposals that cannot observe a cancellation token themselves.
+            var stepTask = Task.Run(() => step(stepCts.Token), CancellationToken.None);
+            await stepTask.WaitAsync(stepCts.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException ex) when (
             stepCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)

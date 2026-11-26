@@ -106,11 +106,13 @@ builder.Services.AddSingleton<UpdateCheckService>();
 ### 6.2 Sequence
 
 ```
-1. Download    %TEMP%\ReTran_Update\<asset-name>.zip — ghi đè, không tái dùng;
-               buffer 80 KB; progress % chỉ báo khi số nguyên % tăng;
-               DownloadedZipPath = null ngay khi bắt đầu attempt (zip dở dang không bao giờ được cài)
+1. Download    %TEMP%\ReTran_Update\<owner-guid>\<attempt-id>\<asset-name>.zip — owner GUID tạo một lần
+               cho mỗi service/process, attempt-id tăng đơn điệu trong service; zip/signature/cleanup của
+               hai instance không bao giờ dùng chung path; buffer 80 KB; progress % chỉ báo khi số nguyên %
+               tăng; DownloadedZipPath = null ngay khi bắt đầu attempt (zip dở dang không bao giờ được cài)
 2. Verify      ECDSA P-256/SHA-256 qua PackageSignatureVerifier — fail → xóa zip, UpdateError.VerifyFailed
-3. Stop services (best-effort, mỗi bước timeout ~10s, lỗi → UpdateError.StopServicesFailed):
+3. Stop services (best-effort, timeout ~10s/bước bao phủ cả invocation đồng bộ trên thread pool và
+   asynchronous wait, lỗi → UpdateError.StopServicesFailed):
    a. PipelineController.StopAsync()    — core.stop nếu pipeline đang chạy (idempotent)
    b. CoreProcessClient.DisposeAsync()  — Kill(entireProcessTree: true) → Core + Python sidecar con đều chết
    c. OverlayFeedServer.DisposeAsync()  — giải phóng 127.0.0.1:17863
@@ -121,7 +123,16 @@ builder.Services.AddSingleton<UpdateCheckService>();
 ```
 
 - **Không** DrainGate, **không** queue snapshot: translation cache đã bền trong SQLite; request đang bay bị drop là chấp nhận được.
-- Mọi nhánh cancel/fail gọi `_runId`-guarded cleanup (giữ pattern `_runId` chống stale-run); `IsFinalizing = true` trước bước 4 (ẩn Cancel).
+- Nhánh cancel/fail trước stop-services gọi `_runId`-guarded cleanup (giữ pattern chống stale-run);
+  `IsFinalizing = true` trước bước 3 (ẩn Cancel). Dispose trong stop-services vẫn teardown im lặng,
+  không restart; download/verify fail chưa dừng service nên cũng không restart.
+- **Terminal recovery sau post-stop failure:** nếu bước 3 throw/timeout hoặc bước 4 trả false/throw, bắn
+  `Failed` để UI báo lỗi rồi khởi chạy **ReTran.App hiện tại** bằng `Environment.ProcessPath`,
+  `ProcessStartInfo` (`WorkingDirectory = AppContext.BaseDirectory`, không shell command string), sau đó
+  `Application.Current.Quit()` cho process cũ. Không khởi chạy updater ở nhánh recovery và không cố hồi
+  sinh DI singleton đã dispose. Nếu restart fail, log Error và vẫn Quit process đã teardown; nếu Quit cũ
+  fail, giữ trạng thái finalizing thay vì trả UI về trạng thái healthy giả. Happy path updater→Quit và
+  Quit-after-updater không bao giờ đi qua current-app recovery.
 
 ### 6.3 UpdateError
 
@@ -138,14 +149,15 @@ public enum UpdateError { DownloadFailed, VerifyFailed, StopServicesFailed, Inst
 ```
 argv phải đúng ["--zip", _, "--pid", _, "--app-dir", _]   — sai → stderr + exit 1
 WaitForExit(parent, 60_000)                                 — MAUI Hybrid thoát chậm
-1. ExtractToStaging(zip)      → %TEMP%\ReTran_Update\staging (dọn sạch trước)
+1. ExtractToStaging(zip)      → %TEMP%\ReTran_Update\staging-<guid> (directory riêng cho từng extraction;
+                                 không xóa staging của updater khác)
 2. VerifySelfContained()      → runtimeconfig includedFrameworks ≠ rỗng + hostfxr.dll có mặt
                                 (reject FDD zip — chống bug #5/#9: extract trộn file → app chết)
 3. WaitUntilWritable(staging, appDir, 60s)  — probe File.Open(FileShare.None) từng file
 4. best-effort backup ReTran.App.exe → .bak
 5. CopyDirectory(staging, appDir, overwrite)
 6. Process.Start(ReTran.App.exe, UseShellExecute, WorkingDirectory=appDir)
-7. cleanup: .bak, zip, staging; CleanupSelfTempDir() → chuyển chính mình sang .old
+7. cleanup: .bak, zip, đúng staging-<guid> của extraction; CleanupSelfTempDir() → chuyển chính mình sang .old
 error → stderr + "Press Enter" + exit 1
 ```
 
@@ -159,6 +171,11 @@ error → stderr + "Press Enter" + exit 1
 | `Components/Shared/UpdateModal.razor` (mới) | progress bar %, state "Đang chuẩn bị cài đặt…" ẩn Cancel, re-render qua `Coordinator.Changed` + `InvokeAsync`; không click-outside close |
 | `MainLayout.razor` — toast minimal (ReTran chưa có toast system — port pattern local-state + fixed-position div) | `UpdateFound` → "Có bản cập nhật mới: {tag}"; `Failed(err)` → message theo nguyên nhân; `Cancelled` → "Đã hủy cập nhật." |
 | `NavMenu.razor` footer | version qua `AppVersionFormatter` + badge nhỏ khi `StateChanged` có update |
+
+Với post-stop failure, `Failed` được bắn trước current-app restart để toast nhận đúng `UpdateError`.
+Modal của process cũ giữ `UpdateInProgress/IsFinalizing` cho tới khi Quit (không hiện lại nút Update/Cancel
+như thể app vẫn healthy); instance mới khởi tạo lại DI services bình thường. Nếu restart/Quit fail, log
+Error và trạng thái terminal vẫn được giữ thay vì cho phép tiếp tục dùng services đã dispose.
 
 i18n: thêm key `update.*` (`update.title/version/badge/check/now/latest/available/downloading/preparing/cancel/cancelled/failed/error.*`) vào `I18nStrings.cs` — VI + EN, theo pattern dictionary key dạng chấm hiện có. Component subscribe `L.Changed` + `@implements IDisposable`.
 

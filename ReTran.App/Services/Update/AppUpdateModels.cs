@@ -51,10 +51,12 @@ public interface IAppUpdateService
     bool IsUpdateAvailable(ReleaseInfo release);
 
     /// <summary>
-    /// Downloads the zip of <paramref name="release"/> to the temp directory, reporting progress via <paramref name="progress"/>;
+    /// Downloads the zip of <paramref name="release"/> beneath a service-owned temp directory and
+    /// monotonically numbered attempt directory, reporting progress via <paramref name="progress"/>;
     /// returns the file path or <see langword="null"/> on error.
-    /// Tải zip của <paramref name="release"/> về thư mục tạm, báo tiến độ qua <paramref name="progress"/>;
-    /// trả về đường dẫn file hoặc <see langword="null"/> khi lỗi.
+    /// Tải zip của <paramref name="release"/> vào thư mục attempt đánh số tăng đơn điệu bên dưới thư mục
+    /// tạm riêng của service, báo tiến độ qua <paramref name="progress"/>; trả về đường dẫn file hoặc
+    /// <see langword="null"/> khi lỗi.
     /// </summary>
     /// <param name="release">The release whose zip should be downloaded. Release cần tải zip.</param>
     /// <param name="progress">Progress reporter, may be null. Trình báo tiến độ, có thể null.</param>

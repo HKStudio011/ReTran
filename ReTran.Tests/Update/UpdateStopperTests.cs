@@ -120,6 +120,50 @@ public class UpdateStopperTests : IDisposable
     }
 
     [Fact]
+    public async Task StopServicesAsync_SynchronouslyBlockingDispose_TimesOut()
+    {
+        var peer = new FakeCorePeer { IsStarted = true };
+        PipelineController pipeline = CreatePipeline(peer);
+        var core = new RecordingCoreProcessClient();
+        var overlay = new SynchronouslyBlockingAsyncDisposable();
+        var stopper = new UpdateStopper(pipeline, core, overlay, TimeSpan.FromMilliseconds(10));
+        Task? stopTask = null;
+
+        try
+        {
+            // The outer task keeps the old broken implementation from blocking the test's cleanup thread.
+            stopTask = Task.Run(
+                () => stopper.StopServicesAsync(TestContext.Current.CancellationToken),
+                TestContext.Current.CancellationToken);
+            await overlay.DisposeStarted.Task.WaitAsync(
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            var completed = await Task.WhenAny(
+                stopTask,
+                Task.Delay(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+
+            Assert.Same(stopTask, completed);
+            var thrown = await Assert.ThrowsAsync<TimeoutException>(() => stopTask);
+            Assert.Contains("overlay", thrown.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            overlay.ReleaseDispose();
+            if (stopTask is not null)
+            {
+                try
+                {
+                    await stopTask.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+                }
+                catch { }
+            }
+
+            await overlay.DisposeReturned.Task.WaitAsync(
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        }
+    }
+
+    [Fact]
     public async Task StopServicesAsync_PipelineNotRunning_SkipsStopButStillDisposesCoreAndOverlay()
     {
         var peer = new FakeCorePeer { IsStarted = true };
@@ -259,6 +303,27 @@ public class UpdateStopperTests : IDisposable
     {
         public override ValueTask DisposeAsync()
             => throw new InvalidOperationException("simulated core dispose failure");
+    }
+
+    private sealed class SynchronouslyBlockingAsyncDisposable : IAsyncDisposable
+    {
+        private readonly ManualResetEventSlim _release = new(false);
+
+        public TaskCompletionSource DisposeStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource DisposeReturned { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public ValueTask DisposeAsync()
+        {
+            DisposeStarted.TrySetResult();
+            _release.Wait();
+            DisposeReturned.TrySetResult();
+            return ValueTask.CompletedTask;
+        }
+
+        public void ReleaseDispose() => _release.Set();
     }
 
     private sealed class RecordingAsyncDisposable(List<string>? steps = null) : IAsyncDisposable

@@ -19,9 +19,11 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
     private const string UpdateFolderName = "ReTran_Update";
 
     private readonly HttpClient _http;
+    private readonly string _downloadOwnerId = Guid.NewGuid().ToString("N");
 
     // Attempt creation, path publication, and verification snapshots share this lock so a stale download
-    // cannot clear, delete, or publish over a newer attempt. Each attempt writes only below its own directory.
+    // cannot clear, delete, or publish over a newer attempt. The per-service GUID keeps attempt directories
+    // isolated across service instances and processes; each attempt writes only below its own directory.
     private readonly object _downloadSync = new();
     private long _downloadAttemptId;
     private long _publishedDownloadAttemptId;
@@ -171,7 +173,10 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
         }
 
         var attemptDir = Path.Combine(
-            Path.GetTempPath(), UpdateFolderName, attemptId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            Path.GetTempPath(),
+            UpdateFolderName,
+            _downloadOwnerId,
+            attemptId.ToString(System.Globalization.CultureInfo.InvariantCulture));
         string? zipPath = null;
         string? signaturePath = null;
         var published = false;

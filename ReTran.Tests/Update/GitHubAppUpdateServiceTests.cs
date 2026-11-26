@@ -122,7 +122,7 @@ public class GitHubAppUpdateServiceTests
         }
         finally
         {
-            TryDeleteAttemptDirectory(Path.GetFileName(Path.GetDirectoryName(path)));
+            TryDeleteAttemptDirectory(Path.GetDirectoryName(path));
         }
     }
 
@@ -149,9 +149,9 @@ public class GitHubAppUpdateServiceTests
             newerPath = await DownloadWithToken(service, release, CancellationToken.None);
 
             Assert.NotNull(newerPath);
-            var updateRoot = Path.Combine(Path.GetTempPath(), "ReTran_Update");
-            var olderPath = Path.Combine(updateRoot, "1", ZipAssetName);
-            Assert.Equal(Path.Combine(updateRoot, "2", ZipAssetName), newerPath);
+            var ownerDir = Path.GetDirectoryName(Path.GetDirectoryName(newerPath));
+            var olderPath = Path.Combine(ownerDir!, "1", ZipAssetName);
+            Assert.Equal(Path.Combine(ownerDir!, "2", ZipAssetName), newerPath);
             Assert.NotEqual(olderPath, newerPath);
             Assert.Equal(newerPath, service.DownloadedZipPath);
             Assert.Equal(newerPath + ".sig", service.DownloadedSignaturePath);
@@ -180,10 +180,11 @@ public class GitHubAppUpdateServiceTests
             olderCts.Cancel();
             handler.ReleaseOlderSignature();
             try { await olderDownload; } catch { }
-            TryDeleteAttemptDirectory("1");
             if (newerPath is not null)
             {
-                TryDeleteAttemptDirectory(Path.GetFileName(Path.GetDirectoryName(newerPath)));
+                var ownerDir = Path.GetDirectoryName(Path.GetDirectoryName(newerPath));
+                TryDeleteAttemptDirectory(Path.Combine(ownerDir!, "1"));
+                TryDeleteAttemptDirectory(Path.GetDirectoryName(newerPath));
             }
         }
     }
@@ -213,9 +214,9 @@ public class GitHubAppUpdateServiceTests
             handler.ReleaseOlderSignature();
             Assert.Null(await olderDownload);
 
-            var updateRoot = Path.Combine(Path.GetTempPath(), "ReTran_Update");
-            var olderPath = Path.Combine(updateRoot, "1", ZipAssetName);
-            Assert.Equal(Path.Combine(updateRoot, "2", ZipAssetName), newerPath);
+            var ownerDir = Path.GetDirectoryName(Path.GetDirectoryName(newerPath));
+            var olderPath = Path.Combine(ownerDir!, "1", ZipAssetName);
+            Assert.Equal(Path.Combine(ownerDir!, "2", ZipAssetName), newerPath);
             Assert.Equal(newerPath, service.DownloadedZipPath);
             Assert.Equal(newerPath + ".sig", service.DownloadedSignaturePath);
             Assert.Equal(newerPayload, await File.ReadAllBytesAsync(
@@ -229,10 +230,78 @@ public class GitHubAppUpdateServiceTests
         {
             handler.ReleaseOlderSignature();
             try { await olderDownload; } catch { }
-            TryDeleteAttemptDirectory("1");
             if (newerPath is not null)
             {
-                TryDeleteAttemptDirectory(Path.GetFileName(Path.GetDirectoryName(newerPath)));
+                var ownerDir = Path.GetDirectoryName(Path.GetDirectoryName(newerPath));
+                TryDeleteAttemptDirectory(Path.Combine(ownerDir!, "1"));
+                TryDeleteAttemptDirectory(Path.GetDirectoryName(newerPath));
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Download_TwoServiceInstances_OverlappingAttemptsRemainIsolated()
+    {
+        var olderPayload = "older zip"u8.ToArray();
+        var newerPayload = "newer zip"u8.ToArray();
+        var handler = new StaleRunHandler(olderPayload, newerPayload);
+        var firstService = ServiceWith(handler, packageVerifier: (_, _, _) => false);
+        var secondService = ServiceWith(handler);
+        var release = Release("v1.2.3",
+            new ReleaseAsset(ZipAssetName, "https://example.com/payload.zip"),
+            new ReleaseAsset(ZipAssetName + ".sig", "https://example.com/payload.zip.sig"));
+        var firstDownload = DownloadWithToken(firstService, release, CancellationToken.None);
+        string? firstPath = null;
+        string? secondPath = null;
+
+        try
+        {
+            await handler.FirstSignatureStarted.Task.WaitAsync(
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            secondPath = await DownloadWithToken(secondService, release, CancellationToken.None);
+            Assert.NotNull(secondPath);
+
+            handler.ReleaseOlderSignature();
+            firstPath = await firstDownload;
+            Assert.NotNull(firstPath);
+
+            Assert.NotEqual(firstPath, secondPath);
+            Assert.Equal(firstPath, firstService.DownloadedZipPath);
+            Assert.Equal(firstPath + ".sig", firstService.DownloadedSignaturePath);
+            Assert.Equal(secondPath, secondService.DownloadedZipPath);
+            Assert.Equal(secondPath + ".sig", secondService.DownloadedSignaturePath);
+            Assert.Equal(olderPayload, await File.ReadAllBytesAsync(
+                firstPath, TestContext.Current.CancellationToken));
+            Assert.Equal(newerPayload, await File.ReadAllBytesAsync(
+                secondPath, TestContext.Current.CancellationToken));
+            Assert.Equal("older signature", await File.ReadAllTextAsync(
+                firstPath + ".sig", TestContext.Current.CancellationToken));
+            Assert.Equal("newer signature", await File.ReadAllTextAsync(
+                secondPath + ".sig", TestContext.Current.CancellationToken));
+
+            // Failure cleanup owned by the first service must not delete or clear the second service's attempt.
+            Assert.False(firstService.VerifyDownloadedPackage());
+            Assert.Null(firstService.DownloadedZipPath);
+            Assert.Null(firstService.DownloadedSignaturePath);
+            Assert.False(File.Exists(firstPath));
+            Assert.False(File.Exists(firstPath + ".sig"));
+            Assert.Equal(secondPath, secondService.DownloadedZipPath);
+            Assert.Equal(secondPath + ".sig", secondService.DownloadedSignaturePath);
+            Assert.True(File.Exists(secondPath));
+            Assert.True(File.Exists(secondPath + ".sig"));
+        }
+        finally
+        {
+            handler.ReleaseOlderSignature();
+            try { await firstDownload; } catch { }
+            foreach (var path in new[] { firstPath, secondPath })
+            {
+                var attemptDir = Path.GetDirectoryName(path);
+                if (attemptDir is not null && Directory.Exists(attemptDir))
+                {
+                    Directory.Delete(attemptDir, recursive: true);
+                }
             }
         }
     }
@@ -272,7 +341,7 @@ public class GitHubAppUpdateServiceTests
         }
         finally
         {
-            TryDeleteAttemptDirectory(Path.GetFileName(Path.GetDirectoryName(downloaded)));
+            TryDeleteAttemptDirectory(Path.GetDirectoryName(downloaded));
         }
     }
 
@@ -304,7 +373,7 @@ public class GitHubAppUpdateServiceTests
         }
         finally
         {
-            TryDeleteAttemptDirectory(Path.GetFileName(Path.GetDirectoryName(downloaded)));
+            TryDeleteAttemptDirectory(Path.GetDirectoryName(downloaded));
         }
     }
 
@@ -331,7 +400,7 @@ public class GitHubAppUpdateServiceTests
         }
         finally
         {
-            TryDeleteAttemptDirectory(Path.GetFileName(Path.GetDirectoryName(downloaded)));
+            TryDeleteAttemptDirectory(Path.GetDirectoryName(downloaded));
         }
     }
 
@@ -350,8 +419,9 @@ public class GitHubAppUpdateServiceTests
         var updates = new TrackingUpdateService(service);
         var stopper = new TrackingStopper();
         var shutdown = new TrackingShutdown();
+        var recovery = new TrackingRecovery();
         using var coordinator = new UpdateCoordinator(
-            updates, stopper, shutdown, NullLogger<UpdateCoordinator>.Instance);
+            updates, stopper, shutdown, NullLogger<UpdateCoordinator>.Instance, recovery);
         var failures = new List<UpdateError>();
         coordinator.Failed += failures.Add;
 
@@ -363,6 +433,7 @@ public class GitHubAppUpdateServiceTests
             Assert.Equal(0, updates.InstallCallCount);
             Assert.False(stopper.StopCalled);
             Assert.False(shutdown.QuitCalled);
+            Assert.Equal(0, recovery.RestartCallCount);
             Assert.Null(service.DownloadedZipPath);
             Assert.Null(service.DownloadedSignaturePath);
             Assert.NotNull(updates.LastDownloadedPath);
@@ -371,7 +442,7 @@ public class GitHubAppUpdateServiceTests
         }
         finally
         {
-            TryDeleteAttemptDirectory(Path.GetFileName(Path.GetDirectoryName(updates.LastDownloadedPath)));
+            TryDeleteAttemptDirectory(Path.GetDirectoryName(updates.LastDownloadedPath));
         }
     }
 
@@ -427,8 +498,8 @@ public class GitHubAppUpdateServiceTests
             {
                 try { await olderVerify; } catch { }
             }
-            TryDeleteAttemptDirectory("1");
-            TryDeleteAttemptDirectory("2");
+            TryDeleteAttemptDirectory(Path.GetDirectoryName(olderPath));
+            TryDeleteAttemptDirectory(Path.GetDirectoryName(newerPath));
         }
     }
 
@@ -456,7 +527,7 @@ public class GitHubAppUpdateServiceTests
         }
         finally
         {
-            TryDeleteAttemptDirectory(Path.GetFileName(Path.GetDirectoryName(downloaded)));
+            TryDeleteAttemptDirectory(Path.GetDirectoryName(downloaded));
             try { Directory.Delete(appDir, recursive: true); }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
@@ -634,8 +705,8 @@ public class GitHubAppUpdateServiceTests
         try
         {
             // Attempt 2 chỉ dọn file dở của chính nó; file hoàn chỉnh của attempt 1 không bị xóa nhầm.
-            var updateRoot = Path.Combine(Path.GetTempPath(), "ReTran_Update");
-            var secondPath = Path.Combine(updateRoot, "2", ZipAssetName);
+            var ownerDir = Path.GetDirectoryName(Path.GetDirectoryName(firstPath));
+            var secondPath = Path.Combine(ownerDir!, "2", ZipAssetName);
             Assert.Null(secondResult);
             Assert.Null(service.DownloadedZipPath);
             Assert.Null(service.DownloadedSignaturePath);
@@ -646,8 +717,9 @@ public class GitHubAppUpdateServiceTests
         }
         finally
         {
-            TryDeleteAttemptDirectory("1");
-            TryDeleteAttemptDirectory("2");
+            var ownerDir = Path.GetDirectoryName(Path.GetDirectoryName(firstPath));
+            TryDeleteAttemptDirectory(Path.GetDirectoryName(firstPath));
+            TryDeleteAttemptDirectory(Path.Combine(ownerDir!, "2"));
         }
     }
 
@@ -675,11 +747,17 @@ public class GitHubAppUpdateServiceTests
         GitHubAppUpdateService service, ReleaseInfo release, CancellationToken cancellationToken) =>
         service.DownloadUpdateAsync(release, null, cancellationToken);
 
-    private static void TryDeleteAttemptDirectory(string? attemptId)
+    private static void TryDeleteAttemptDirectory(string? attemptDir)
     {
-        if (string.IsNullOrEmpty(attemptId)) return;
+        if (string.IsNullOrEmpty(attemptDir)) return;
 
-        var path = Path.Combine(Path.GetTempPath(), "ReTran_Update", attemptId);
+        var updateRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "ReTran_Update"));
+        var path = Path.GetFullPath(attemptDir);
+        if (!path.StartsWith(updateRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
         try
         {
             if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
@@ -727,6 +805,13 @@ public class GitHubAppUpdateServiceTests
             StopCalled = true;
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class TrackingRecovery : IAppRecovery
+    {
+        public int RestartCallCount { get; private set; }
+
+        public void RestartCurrentApp() => RestartCallCount++;
     }
 
     private sealed class TrackingShutdown : IAppShutdown

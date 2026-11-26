@@ -25,6 +25,9 @@ Nguồn: spec `Docs/superpowers/specs/2026-10-14-version-update-design.md` (§ l
 4. **Negative cases (fail-closed)**
    - Xóa file `.sig` trên release → client **từ chối** update (không có chữ ký = không cài).
    - Zip bị tampered (đổi 1 byte) → client báo `VerifyFailed` (sai chữ ký ECDSA), không cài.
+   - Download/verify fail → services chưa bị dừng, app không restart. Dispose trong stop-services → teardown im lặng, không restart.
+   - Stop-services fail/timeout hoặc updater launch trả false/throw **sau khi services đã dừng** → app bắn lỗi UI tương ứng, khởi chạy lại **ReTran.App hiện tại** (không phải updater), rồi Quit process cũ. Nếu restart fail, log Error và vẫn Quit; nếu Quit fail, process cũ giữ trạng thái terminal thay vì quay lại UI healthy với services đã dispose.
+   - Happy path vẫn updater → Quit; Quit-after-updater không khởi chạy thêm ReTran.App từ recovery (chỉ updater mở app sau khi cài).
 
 ## 2. Kết quả chạy (điền khi chạy)
 
@@ -44,7 +47,7 @@ Nguồn: spec `Docs/superpowers/specs/2026-10-14-version-update-design.md` (§ l
 ### 2.2 Phần chưa verify / blocker trước release thật
 
 - Chưa tạo/xác minh GitHub environment `release` và `UPDATE_SIGNING_KEY`; không ký bằng secret thật, không chạy GitHub Actions release, upload hoặc attestation.
-- Chưa chạy hai build/release A→B cho happy path, cũng chưa xoá `.sig`/tamper zip trên release thật cho negative E2E. Các mục này vẫn **chưa chạy**, không được suy ra PASS từ local package smoke hoặc unit tests.
+- Chưa chạy hai build/release A→B cho happy path, cũng chưa xoá `.sig`/tamper zip trên release thật cho negative E2E. Các kịch bản terminal recovery ở mục 1 cũng mới chỉ có automated regression, chưa chạy live E2E. Các mục này vẫn **chưa chạy**, không được suy ra PASS từ local package smoke hoặc unit tests.
 - `npm ci` báo 2 high severity audit warnings trong dependency tree hiện có; nhánh không thay frontend dependency và verification không chạy `npm audit fix`.
 
 ## 3. Ghi chú
