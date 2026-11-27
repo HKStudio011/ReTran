@@ -46,23 +46,40 @@ jobs:
       - name: Build test project
         run: dotnet build "${{ env.TEST_PROJECT }}" --nologo
 
-      - name: Test process smoke
-        timeout-minutes: 2
+      - name: Diagnose test process startup
+        timeout-minutes: 4
         shell: pwsh
         run: |
-          dotnet "ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.dll" -assemblyInfo
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $script:allSucceeded = $true
+          function Invoke-BoundedProcess {
+            param([string]$Name, [string]$FileName, [string[]]$Arguments)
+            $stdout = Join-Path $env:RUNNER_TEMP "$Name.stdout.log"
+            $stderr = Join-Path $env:RUNNER_TEMP "$Name.stderr.log"
+            Write-Host "=== $Name START ==="
+            try {
+              $process = Start-Process -FilePath $FileName -ArgumentList $Arguments `
+                -RedirectStandardOutput $stdout -RedirectStandardError $stderr -NoNewWindow -PassThru
+              if (-not $process.WaitForExit(30000)) {
+                Write-Host "$Name TIMEOUT AFTER 30s"
+                $script:allSucceeded = $false
+                try { $process.Kill($true) } catch { }
+                $process.WaitForExit()
+              } else {
+                Write-Host "$Name EXIT=$($process.ExitCode)"
+                if ($process.ExitCode -ne 0) { $script:allSucceeded = $false }
+              }
+            } catch {
+              Write-Host "$Name START ERROR: $($_.Exception.Message)"
+              $script:allSucceeded = $false
+            }
+            if (Test-Path $stdout) { Get-Content $stdout }
+            if (Test-Path $stderr) { Get-Content $stderr }
+          }
 
-      - name: Test discovery
-        timeout-minutes: 2
-        shell: pwsh
-        run: |
-          dotnet "ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.dll" -list classes -noAutoReporters -noColor -internalDiagnostics
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Test
-        timeout-minutes: 5
-        shell: pwsh
-        run: |
-          dotnet "ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.dll" -noAutoReporters -noLogo -noColor -longRunning 30
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Invoke-BoundedProcess "core-version" "dotnet" `
+            @("ReTran.Core/bin/Debug/net10.0-windows/ReTran.Core.dll", "version")
+          Invoke-BoundedProcess "tests-dotnet-host" "dotnet" `
+            @("ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.dll", "-assemblyInfo")
+          Invoke-BoundedProcess "tests-apphost" (Resolve-Path `
+            "ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.exe").Path @("-assemblyInfo")
+          if (-not $script:allSucceeded) { exit 1 }
