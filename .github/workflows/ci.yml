@@ -46,9 +46,23 @@ jobs:
       - name: Build test project
         run: dotnet build "${{ env.TEST_PROJECT }}" --nologo
 
+      - name: Test process smoke
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          & "ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.exe" -assemblyInfo
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test discovery
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          & "ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.exe" -list classes -noAutoReporters -noColor -internalDiagnostics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Test
         timeout-minutes: 5
         shell: pwsh
         run: |
-          & "ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.exe" -noLogo -noColor
+          & "ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.exe" -noAutoReporters -noLogo -noColor -longRunning 30
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
