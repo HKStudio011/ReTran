@@ -27,9 +27,10 @@ public class UpdateCoordinatorTests
         var updates = new FakeUpdateService(calls);
         var stopper = new FakeStopper(calls);
         var shutdown = new FakeShutdown(calls);
+        var recovery = new FakeRecovery(calls);
         var log = new RecordingLogger<UpdateCoordinator>();
-        var coordinator = new UpdateCoordinator(updates, stopper, shutdown, log);
-        return new Fixtures(coordinator, updates, stopper, shutdown, log, calls);
+        var coordinator = new UpdateCoordinator(updates, stopper, shutdown, log, recovery);
+        return new Fixtures(coordinator, updates, stopper, shutdown, recovery, log, calls);
     }
 
     [Fact]
@@ -56,6 +57,7 @@ public class UpdateCoordinatorTests
 
         Assert.Equal(UpdateError.DownloadFailed, Assert.Single(failed));
         Assert.False(fx.Stopper.StopCalled);
+        Assert.DoesNotContain("recover", fx.Calls);
         Assert.False(fx.Coordinator.UpdateInProgress);
     }
 
@@ -74,39 +76,149 @@ public class UpdateCoordinatorTests
         Assert.Equal(UpdateError.VerifyFailed, Assert.Single(failed));
         Assert.False(fx.Stopper.StopCalled);
         Assert.DoesNotContain("install", fx.Calls);
+        Assert.DoesNotContain("recover", fx.Calls);
         Assert.False(fx.Coordinator.UpdateInProgress);
     }
 
     [Fact]
-    public async Task StartUpdateAsync_WhenStopServicesFails_RaisesFailedStop()
+    public async Task StartUpdateAsync_WhenStopServicesFails_RestartsCurrentAppThenQuitsWithoutUpdater()
     {
         using var fx = CreateFixtures();
         var failed = new List<UpdateError>();
-        fx.Coordinator.Failed += failed.Add;
-        fx.Stopper.ThrowOnStop = new InvalidOperationException("simulated stop failure");
+        fx.Coordinator.Failed += error =>
+        {
+            failed.Add(error);
+            fx.Calls.Add("failed");
+        };
+        fx.Stopper.ThrowOnStop = new InvalidOperationException("simulated OverlayFeedServer.DisposeAsync failure");
         fx.Updates.DownloadTcs.SetResult(Path.Combine(Path.GetTempPath(), "retran-9.9.9.zip"));
 
         await fx.Coordinator.StartUpdateAsync(Release());
 
         Assert.Equal(UpdateError.StopServicesFailed, Assert.Single(failed));
-        Assert.DoesNotContain("install", fx.Calls);
-        Assert.False(fx.Coordinator.UpdateInProgress);
+        Assert.Equal(["download", "verify", "stop", "failed", "recover", "quit"], fx.Calls);
+        Assert.True(fx.Coordinator.UpdateInProgress);
+        Assert.True(fx.Coordinator.IsFinalizing);
     }
 
     [Fact]
-    public async Task StartUpdateAsync_WhenInstallFails_RaisesFailedInstall()
+    public async Task StartUpdateAsync_WhenInstallReturnsFalse_RestartsCurrentAppThenQuits()
     {
         using var fx = CreateFixtures();
         var failed = new List<UpdateError>();
-        fx.Coordinator.Failed += failed.Add;
+        fx.Coordinator.Failed += error =>
+        {
+            failed.Add(error);
+            fx.Calls.Add("failed");
+        };
         fx.Updates.InstallResult = false;
         fx.Updates.DownloadTcs.SetResult(Path.Combine(Path.GetTempPath(), "retran-9.9.9.zip"));
 
         await fx.Coordinator.StartUpdateAsync(Release());
 
         Assert.Equal(UpdateError.InstallFailed, Assert.Single(failed));
+        Assert.Equal(["download", "verify", "stop", "install", "failed", "recover", "quit"], fx.Calls);
+        Assert.True(fx.Coordinator.UpdateInProgress);
+        Assert.True(fx.Coordinator.IsFinalizing);
+    }
+
+    [Fact]
+    public async Task StartUpdateAsync_WhenInstallThrows_RestartsCurrentAppThenQuits()
+    {
+        using var fx = CreateFixtures();
+        var failed = new List<UpdateError>();
+        fx.Coordinator.Failed += error =>
+        {
+            failed.Add(error);
+            fx.Calls.Add("failed");
+        };
+        fx.Updates.ThrowOnInstall = new InvalidOperationException("simulated updater launch failure");
+        fx.Updates.DownloadTcs.SetResult(Path.Combine(Path.GetTempPath(), "retran-9.9.9.zip"));
+
+        await fx.Coordinator.StartUpdateAsync(Release());
+
+        Assert.Equal(UpdateError.InstallFailed, Assert.Single(failed));
+        Assert.Equal(["download", "verify", "stop", "install", "failed", "recover", "quit"], fx.Calls);
+        Assert.True(fx.Coordinator.UpdateInProgress);
+        Assert.True(fx.Coordinator.IsFinalizing);
+    }
+
+    [Fact]
+    public async Task StartUpdateAsync_WhenRecoveryRestartFails_LogsAndStillQuitsWithoutThrowing()
+    {
+        using var fx = CreateFixtures();
+        var failed = new List<UpdateError>();
+        fx.Coordinator.Failed += failed.Add;
+        fx.Stopper.ThrowOnStop = new TimeoutException("simulated stop timeout");
+        fx.Recovery.ThrowOnRestart = true;
+        fx.Updates.DownloadTcs.SetResult(Path.Combine(Path.GetTempPath(), "retran-9.9.9.zip"));
+
+        await fx.Coordinator.StartUpdateAsync(Release());
+
+        Assert.Equal(UpdateError.StopServicesFailed, Assert.Single(failed));
+        Assert.Equal(["download", "verify", "stop", "recover", "quit"], fx.Calls);
+        Assert.Contains(fx.Log.Warnings, warning =>
+            warning.Contains("stop services failed", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(fx.Log.Warnings, warning =>
+            warning.Contains("restart failed", StringComparison.OrdinalIgnoreCase));
+        Assert.True(fx.Coordinator.UpdateInProgress);
+        Assert.True(fx.Coordinator.IsFinalizing);
+    }
+
+    [Fact]
+    public async Task Dispose_BeforePostStopRecovery_AbortsSilentlyWithoutFailedOrRestart()
+    {
+        using var fx = CreateFixtures();
+        var failed = new List<UpdateError>();
+        fx.Coordinator.Failed += error =>
+        {
+            failed.Add(error);
+            fx.Calls.Add("failed");
+        };
+        fx.Stopper.ThrowOnStop = new CallbackException(() =>
+        {
+            fx.Calls.Add("dispose");
+            fx.Coordinator.Dispose();
+            return "simulated stop failure with Dispose before recovery";
+        });
+        fx.Updates.DownloadTcs.SetResult(Path.Combine(Path.GetTempPath(), "retran-9.9.9.zip"));
+
+        await fx.Coordinator.StartUpdateAsync(Release());
+
+        Assert.Empty(failed);
+        Assert.Equal(["download", "verify", "stop", "dispose"], fx.Calls);
+        Assert.DoesNotContain("recover", fx.Calls);
         Assert.DoesNotContain("quit", fx.Calls);
         Assert.False(fx.Coordinator.UpdateInProgress);
+        Assert.False(fx.Coordinator.IsFinalizing);
+    }
+
+    [Fact]
+    public async Task Dispose_FromFailedDuringPostStopFailure_AbortsRestartAndDoesNotThrow()
+    {
+        using var fx = CreateFixtures();
+        var failed = new List<UpdateError>();
+        fx.Coordinator.Failed += error =>
+        {
+            failed.Add(error);
+            fx.Calls.Add("failed");
+            fx.Coordinator.Dispose();
+            fx.Calls.Add("dispose");
+            throw new InvalidOperationException("simulated UI failure after Dispose");
+        };
+        fx.Stopper.ThrowOnStop = new InvalidOperationException("simulated stop failure");
+        fx.Updates.DownloadTcs.SetResult(Path.Combine(Path.GetTempPath(), "retran-9.9.9.zip"));
+
+        await fx.Coordinator.StartUpdateAsync(Release());
+
+        Assert.Equal(UpdateError.StopServicesFailed, Assert.Single(failed));
+        Assert.Equal(["download", "verify", "stop", "failed", "dispose"], fx.Calls);
+        Assert.DoesNotContain("recover", fx.Calls);
+        Assert.DoesNotContain("quit", fx.Calls);
+        Assert.Contains(fx.Log.Warnings, warning =>
+            warning.Contains("UI notification failed", StringComparison.OrdinalIgnoreCase));
+        Assert.False(fx.Coordinator.UpdateInProgress);
+        Assert.False(fx.Coordinator.IsFinalizing);
     }
 
     [Fact]
@@ -121,6 +233,7 @@ public class UpdateCoordinatorTests
         var startTask = fx.Coordinator.StartUpdateAsync(Release());
         await WaitUntilAsync(() => fx.Calls.Contains("download"), "download phải bắt đầu");
         fx.Coordinator.CancelUpdate();
+        Assert.True(fx.Updates.DownloadCancellationToken.IsCancellationRequested);
         // Giải phóng download còn treo để pipeline thoát (check IsCancellationRequested sau await)
         fx.Updates.DownloadTcs.SetResult(Path.Combine(Path.GetTempPath(), "retran-9.9.9.zip"));
         await startTask;
@@ -211,6 +324,7 @@ public class UpdateCoordinatorTests
         Assert.False(fx.Coordinator.IsFinalizing);
         Assert.Contains(fx.Log.Warnings, w => w.Contains("quit failed"));
         Assert.Equal(1, fx.Shutdown.QuitCalled);
+        Assert.DoesNotContain("recover", fx.Calls);
     }
 
     [Fact]
@@ -277,6 +391,7 @@ public class UpdateCoordinatorTests
         Assert.False(fx.Coordinator.UpdateInProgress);
         Assert.False(fx.Coordinator.IsFinalizing);
         Assert.DoesNotContain("install", fx.Calls);
+        Assert.DoesNotContain("recover", fx.Calls);
         Assert.DoesNotContain("quit", fx.Calls);
         Assert.Contains(fx.Log.Warnings, w =>
             w.Contains("stopping services", StringComparison.OrdinalIgnoreCase));
@@ -323,6 +438,7 @@ public class UpdateCoordinatorTests
         FakeUpdateService Updates,
         FakeStopper Stopper,
         FakeShutdown Shutdown,
+        FakeRecovery Recovery,
         RecordingLogger<UpdateCoordinator> Log,
         List<string> Calls) : IDisposable
     {
@@ -339,16 +455,22 @@ public class UpdateCoordinatorTests
 
         public bool InstallResult { get; set; } = true;
 
+        public Exception? ThrowOnInstall { get; set; }
+
         public string CurrentVersion => "9.9.8.0";
 
         public string? DownloadedZipPath { get; set; }
+
+        public CancellationToken DownloadCancellationToken { get; private set; }
 
         public Task<ReleaseInfo?> CheckForUpdatesAsync() => Task.FromResult<ReleaseInfo?>(null);
 
         public bool IsUpdateAvailable(ReleaseInfo release) => false;
 
-        public Task<string?> DownloadUpdateAsync(ReleaseInfo release, IProgress<int>? progress)
+        public Task<string?> DownloadUpdateAsync(
+            ReleaseInfo release, IProgress<int>? progress, CancellationToken cancellationToken = default)
         {
+            DownloadCancellationToken = cancellationToken;
             calls.Add("download");
             return DownloadTcs.Task;
         }
@@ -362,8 +484,18 @@ public class UpdateCoordinatorTests
         public Task<bool> InstallUpdateAsync()
         {
             calls.Add("install");
+            if (ThrowOnInstall is not null)
+            {
+                throw ThrowOnInstall;
+            }
+
             return Task.FromResult(InstallResult);
         }
+    }
+
+    private sealed class CallbackException(Func<string> message) : Exception
+    {
+        public override string Message => message();
     }
 
     /// <summary>Fake IUpdateStopper — ghi "stop", ném ThrowOnStop, BlockStop giữ pipeline trong window finalise.</summary>
@@ -401,6 +533,20 @@ public class UpdateCoordinatorTests
             }
 
             ct.ThrowIfCancellationRequested();
+        }
+    }
+
+    private sealed class FakeRecovery(List<string> calls) : IAppRecovery
+    {
+        public bool ThrowOnRestart { get; set; }
+
+        public void RestartCurrentApp()
+        {
+            calls.Add("recover");
+            if (ThrowOnRestart)
+            {
+                throw new InvalidOperationException("simulated current-app restart failure");
+            }
         }
     }
 

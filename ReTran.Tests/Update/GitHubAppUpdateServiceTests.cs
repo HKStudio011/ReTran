@@ -1,4 +1,6 @@
 using System.Net;
+using System.Security.Cryptography;
+using Microsoft.Extensions.Logging.Abstractions;
 using ReTran_App.Services.Update;
 
 namespace ReTran.Tests.Update;
@@ -22,8 +24,9 @@ public class GitHubAppUpdateServiceTests
     private const string ZipAssetName = "router-balancing-test-payload.zip";
 
     private static GitHubAppUpdateService ServiceWith(HttpMessageHandler handler, string currentVersion = "1.0.0.0",
-        string? publicKeyBase64 = null, string? appDir = null) =>
-        new(new HttpClient(handler, disposeHandler: false), currentVersion, publicKeyBase64, appDir);
+        string? publicKeyBase64 = null, string? appDir = null,
+        Func<string, string, string, bool>? packageVerifier = null) =>
+        new(new HttpClient(handler, disposeHandler: false), currentVersion, publicKeyBase64, appDir, packageVerifier);
 
     private static ReleaseInfo Release(string tag, params ReleaseAsset[] assets) =>
         new(tag, $"https://github.com/HKStudio011/router-balancing/releases/tag/{tag}", null, [.. assets]);
@@ -102,7 +105,7 @@ public class GitHubAppUpdateServiceTests
             publicKeyBase64: key.PublicKeyBase64);
         var progress = new RecordingProgress();
 
-        var path = await service.DownloadUpdateAsync(release, progress);
+        var path = await service.DownloadUpdateAsync(release, progress, TestContext.Current.CancellationToken);
 
         try
         {
@@ -119,13 +122,186 @@ public class GitHubAppUpdateServiceTests
         }
         finally
         {
-            if (path is not null)
+            TryDeleteAttemptDirectory(Path.GetDirectoryName(path));
+        }
+    }
+
+    [Fact]
+    public async Task Download_OlderAttemptCannotOverwriteNewerAttempt()
+    {
+        var olderPayload = "older zip"u8.ToArray();
+        var newerPayload = "newer zip"u8.ToArray();
+        var handler = new StaleRunHandler(olderPayload, newerPayload);
+        var service = ServiceWith(handler);
+        var release = Release("v1.2.3",
+            new ReleaseAsset(ZipAssetName, "https://example.com/payload.zip"),
+            new ReleaseAsset(ZipAssetName + ".sig", "https://example.com/payload.zip.sig"));
+        using var olderCts = new CancellationTokenSource();
+        var olderDownload = DownloadWithToken(service, release, olderCts.Token);
+        string? newerPath = null;
+
+        try
+        {
+            await handler.FirstSignatureStarted.Task.WaitAsync(
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            olderCts.Cancel();
+
+            newerPath = await DownloadWithToken(service, release, CancellationToken.None);
+
+            Assert.NotNull(newerPath);
+            var ownerDir = Path.GetDirectoryName(Path.GetDirectoryName(newerPath));
+            var olderPath = Path.Combine(ownerDir!, "1", ZipAssetName);
+            Assert.Equal(Path.Combine(ownerDir!, "2", ZipAssetName), newerPath);
+            Assert.NotEqual(olderPath, newerPath);
+            Assert.Equal(newerPath, service.DownloadedZipPath);
+            Assert.Equal(newerPath + ".sig", service.DownloadedSignaturePath);
+            Assert.Equal(newerPayload, await File.ReadAllBytesAsync(
+                newerPath, TestContext.Current.CancellationToken));
+            Assert.Equal("newer signature", await File.ReadAllTextAsync(
+                newerPath + ".sig", TestContext.Current.CancellationToken));
+
+            // The HTTP double deliberately releases A only after B has completed, exposing stale publication.
+            handler.ReleaseOlderSignature();
+            Assert.Null(await olderDownload);
+
+            Assert.True(handler.OlderSignatureToken.IsCancellationRequested);
+            Assert.Equal(newerPath, service.DownloadedZipPath);
+            Assert.Equal(newerPath + ".sig", service.DownloadedSignaturePath);
+            Assert.Equal(newerPayload, await File.ReadAllBytesAsync(
+                newerPath, TestContext.Current.CancellationToken));
+            Assert.Equal("newer signature", await File.ReadAllTextAsync(
+                newerPath + ".sig", TestContext.Current.CancellationToken));
+            Assert.False(File.Exists(olderPath));
+            Assert.False(File.Exists(olderPath + ".sig"));
+            Assert.False(Directory.Exists(Path.GetDirectoryName(olderPath)));
+        }
+        finally
+        {
+            olderCts.Cancel();
+            handler.ReleaseOlderSignature();
+            try { await olderDownload; } catch { }
+            if (newerPath is not null)
             {
-                File.Delete(path);
+                var ownerDir = Path.GetDirectoryName(Path.GetDirectoryName(newerPath));
+                TryDeleteAttemptDirectory(Path.Combine(ownerDir!, "1"));
+                TryDeleteAttemptDirectory(Path.GetDirectoryName(newerPath));
             }
-            if (service.DownloadedSignaturePath is not null)
+        }
+    }
+
+    [Fact]
+    public async Task Download_UncancelledOlderAttemptCannotReplaceNewerAttempt()
+    {
+        var olderPayload = "older zip"u8.ToArray();
+        var newerPayload = "newer zip"u8.ToArray();
+        var handler = new StaleRunHandler(olderPayload, newerPayload);
+        var service = ServiceWith(handler);
+        var release = Release("v1.2.3",
+            new ReleaseAsset(ZipAssetName, "https://example.com/payload.zip"),
+            new ReleaseAsset(ZipAssetName + ".sig", "https://example.com/payload.zip.sig"));
+        var olderDownload = DownloadWithToken(service, release, CancellationToken.None);
+        string? newerPath = null;
+
+        try
+        {
+            await handler.FirstSignatureStarted.Task.WaitAsync(
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            // A remains uncancelled: latest-only publication, not cancellation, must reject its late completion.
+            newerPath = await DownloadWithToken(service, release, CancellationToken.None);
+
+            Assert.NotNull(newerPath);
+            handler.ReleaseOlderSignature();
+            Assert.Null(await olderDownload);
+
+            var ownerDir = Path.GetDirectoryName(Path.GetDirectoryName(newerPath));
+            var olderPath = Path.Combine(ownerDir!, "1", ZipAssetName);
+            Assert.Equal(Path.Combine(ownerDir!, "2", ZipAssetName), newerPath);
+            Assert.Equal(newerPath, service.DownloadedZipPath);
+            Assert.Equal(newerPath + ".sig", service.DownloadedSignaturePath);
+            Assert.Equal(newerPayload, await File.ReadAllBytesAsync(
+                newerPath, TestContext.Current.CancellationToken));
+            Assert.Equal("newer signature", await File.ReadAllTextAsync(
+                newerPath + ".sig", TestContext.Current.CancellationToken));
+            Assert.False(File.Exists(olderPath));
+            Assert.False(File.Exists(olderPath + ".sig"));
+        }
+        finally
+        {
+            handler.ReleaseOlderSignature();
+            try { await olderDownload; } catch { }
+            if (newerPath is not null)
             {
-                File.Delete(service.DownloadedSignaturePath);
+                var ownerDir = Path.GetDirectoryName(Path.GetDirectoryName(newerPath));
+                TryDeleteAttemptDirectory(Path.Combine(ownerDir!, "1"));
+                TryDeleteAttemptDirectory(Path.GetDirectoryName(newerPath));
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Download_TwoServiceInstances_OverlappingAttemptsRemainIsolated()
+    {
+        var olderPayload = "older zip"u8.ToArray();
+        var newerPayload = "newer zip"u8.ToArray();
+        var handler = new StaleRunHandler(olderPayload, newerPayload);
+        var firstService = ServiceWith(handler, packageVerifier: (_, _, _) => false);
+        var secondService = ServiceWith(handler);
+        var release = Release("v1.2.3",
+            new ReleaseAsset(ZipAssetName, "https://example.com/payload.zip"),
+            new ReleaseAsset(ZipAssetName + ".sig", "https://example.com/payload.zip.sig"));
+        var firstDownload = DownloadWithToken(firstService, release, CancellationToken.None);
+        string? firstPath = null;
+        string? secondPath = null;
+
+        try
+        {
+            await handler.FirstSignatureStarted.Task.WaitAsync(
+                TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            secondPath = await DownloadWithToken(secondService, release, CancellationToken.None);
+            Assert.NotNull(secondPath);
+
+            handler.ReleaseOlderSignature();
+            firstPath = await firstDownload;
+            Assert.NotNull(firstPath);
+
+            Assert.NotEqual(firstPath, secondPath);
+            Assert.Equal(firstPath, firstService.DownloadedZipPath);
+            Assert.Equal(firstPath + ".sig", firstService.DownloadedSignaturePath);
+            Assert.Equal(secondPath, secondService.DownloadedZipPath);
+            Assert.Equal(secondPath + ".sig", secondService.DownloadedSignaturePath);
+            Assert.Equal(olderPayload, await File.ReadAllBytesAsync(
+                firstPath, TestContext.Current.CancellationToken));
+            Assert.Equal(newerPayload, await File.ReadAllBytesAsync(
+                secondPath, TestContext.Current.CancellationToken));
+            Assert.Equal("older signature", await File.ReadAllTextAsync(
+                firstPath + ".sig", TestContext.Current.CancellationToken));
+            Assert.Equal("newer signature", await File.ReadAllTextAsync(
+                secondPath + ".sig", TestContext.Current.CancellationToken));
+
+            // Failure cleanup owned by the first service must not delete or clear the second service's attempt.
+            Assert.False(firstService.VerifyDownloadedPackage());
+            Assert.Null(firstService.DownloadedZipPath);
+            Assert.Null(firstService.DownloadedSignaturePath);
+            Assert.False(File.Exists(firstPath));
+            Assert.False(File.Exists(firstPath + ".sig"));
+            Assert.Equal(secondPath, secondService.DownloadedZipPath);
+            Assert.Equal(secondPath + ".sig", secondService.DownloadedSignaturePath);
+            Assert.True(File.Exists(secondPath));
+            Assert.True(File.Exists(secondPath + ".sig"));
+        }
+        finally
+        {
+            handler.ReleaseOlderSignature();
+            try { await firstDownload; } catch { }
+            foreach (var path in new[] { firstPath, secondPath })
+            {
+                var attemptDir = Path.GetDirectoryName(path);
+                if (attemptDir is not null && Directory.Exists(attemptDir))
+                {
+                    Directory.Delete(attemptDir, recursive: true);
+                }
             }
         }
     }
@@ -139,7 +315,7 @@ public class GitHubAppUpdateServiceTests
         var release = Release("v1.2.3", new ReleaseAsset(ZipAssetName, "https://example.com/payload.zip"));
         var service = ServiceWith(new SignedZipHandler(payload, signatureBase64: null), publicKeyBase64: key.PublicKeyBase64);
 
-        Assert.Null(await service.DownloadUpdateAsync(release, null));
+        Assert.Null(await service.DownloadUpdateAsync(release, null, TestContext.Current.CancellationToken));
         Assert.Null(service.DownloadedZipPath);
     }
 
@@ -153,7 +329,7 @@ public class GitHubAppUpdateServiceTests
         var release = SignedRelease(payload, key, out var signatureBase64);
         var service = ServiceWith(new SignedZipHandler(payload, signatureBase64),
             publicKeyBase64: otherKey.PublicKeyBase64);
-        var downloaded = await service.DownloadUpdateAsync(release, null);
+        var downloaded = await service.DownloadUpdateAsync(release, null, TestContext.Current.CancellationToken);
 
         try
         {
@@ -165,14 +341,7 @@ public class GitHubAppUpdateServiceTests
         }
         finally
         {
-            if (downloaded is not null)
-            {
-                File.Delete(downloaded);
-            }
-            if (service.DownloadedSignaturePath is not null)
-            {
-                File.Delete(service.DownloadedSignaturePath);
-            }
+            TryDeleteAttemptDirectory(Path.GetDirectoryName(downloaded));
         }
     }
 
@@ -188,7 +357,7 @@ public class GitHubAppUpdateServiceTests
         var release = SignedRelease(payload, key, out var signatureBase64);
         var service = ServiceWith(new SignedZipHandler(payload, signatureBase64),
             publicKeyBase64: otherKey.PublicKeyBase64);
-        var downloaded = await service.DownloadUpdateAsync(release, null);
+        var downloaded = await service.DownloadUpdateAsync(release, null, TestContext.Current.CancellationToken);
 
         try
         {
@@ -204,14 +373,133 @@ public class GitHubAppUpdateServiceTests
         }
         finally
         {
-            if (downloaded is not null)
+            TryDeleteAttemptDirectory(Path.GetDirectoryName(downloaded));
+        }
+    }
+
+    [Fact]
+    public async Task Verify_LockedPackage_ReturnsFalse()
+    {
+        var payload = "PK-zip"u8.ToArray();
+        using var key = new TestSigningKey();
+        var release = SignedRelease(payload, key, out var signatureBase64);
+        var service = ServiceWith(new SignedZipHandler(payload, signatureBase64),
+            publicKeyBase64: key.PublicKeyBase64);
+        var downloaded = await service.DownloadUpdateAsync(release, null, TestContext.Current.CancellationToken);
+
+        try
+        {
+            Assert.NotNull(downloaded);
+            await using var lockedPackage = new FileStream(
+                downloaded, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+
+            Assert.False(service.VerifyDownloadedPackage());
+            Assert.Null(service.DownloadedZipPath);
+            Assert.Null(service.DownloadedSignaturePath);
+            Assert.False(await service.InstallUpdateAsync());
+        }
+        finally
+        {
+            TryDeleteAttemptDirectory(Path.GetDirectoryName(downloaded));
+        }
+    }
+
+    [Theory]
+    [InlineData("unauthorized")]
+    [InlineData("io")]
+    [InlineData("crypto")]
+    public async Task Verify_ReadFailure_MapsToVerifyFailedWithoutLaunchingUpdater(string failureKind)
+    {
+        var payload = "PK-zip"u8.ToArray();
+        using var key = new TestSigningKey();
+        var release = SignedRelease(payload, key, out var signatureBase64);
+        var service = ServiceWith(new SignedZipHandler(payload, signatureBase64),
+            publicKeyBase64: key.PublicKeyBase64,
+            packageVerifier: (_, _, _) => throw CreateVerifierFailure(failureKind));
+        var updates = new TrackingUpdateService(service);
+        var stopper = new TrackingStopper();
+        var shutdown = new TrackingShutdown();
+        var recovery = new TrackingRecovery();
+        using var coordinator = new UpdateCoordinator(
+            updates, stopper, shutdown, NullLogger<UpdateCoordinator>.Instance, recovery);
+        var failures = new List<UpdateError>();
+        coordinator.Failed += failures.Add;
+
+        try
+        {
+            await coordinator.StartUpdateAsync(release);
+
+            Assert.Equal(UpdateError.VerifyFailed, Assert.Single(failures));
+            Assert.Equal(0, updates.InstallCallCount);
+            Assert.False(stopper.StopCalled);
+            Assert.False(shutdown.QuitCalled);
+            Assert.Equal(0, recovery.RestartCallCount);
+            Assert.Null(service.DownloadedZipPath);
+            Assert.Null(service.DownloadedSignaturePath);
+            Assert.NotNull(updates.LastDownloadedPath);
+            Assert.False(File.Exists(updates.LastDownloadedPath));
+            Assert.False(File.Exists(updates.LastDownloadedPath + ".sig"));
+        }
+        finally
+        {
+            TryDeleteAttemptDirectory(Path.GetDirectoryName(updates.LastDownloadedPath));
+        }
+    }
+
+    [Fact]
+    public async Task Verify_OlderAttemptFailureCannotDeleteOrClearNewerAttempt()
+    {
+        var payload = "PK-zip"u8.ToArray();
+        using var key = new TestSigningKey();
+        var release = SignedRelease(payload, key, out var signatureBase64);
+        var verifierStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var verifierRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var service = ServiceWith(new SignedZipHandler(payload, signatureBase64),
+            publicKeyBase64: key.PublicKeyBase64,
+            packageVerifier: (_, _, _) =>
             {
-                File.Delete(downloaded);
-            }
-            if (service.DownloadedSignaturePath is not null)
+                verifierStarted.TrySetResult();
+                verifierRelease.Task.GetAwaiter().GetResult();
+                return false;
+            });
+        string? olderPath = null;
+        string? newerPath = null;
+        Task<bool>? olderVerify = null;
+
+        try
+        {
+            olderPath = await service.DownloadUpdateAsync(
+                release, null, TestContext.Current.CancellationToken);
+            Assert.NotNull(olderPath);
+
+            olderVerify = Task.Run(() => service.VerifyDownloadedPackage(), TestContext.Current.CancellationToken);
+            await verifierStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+            // B clears A's publication and publishes its own files while A is held inside verification.
+            newerPath = await service.DownloadUpdateAsync(
+                release, null, TestContext.Current.CancellationToken);
+            Assert.NotNull(newerPath);
+            Assert.Equal(newerPath, service.DownloadedZipPath);
+
+            verifierRelease.TrySetResult();
+            Assert.False(await olderVerify);
+
+            Assert.Equal(newerPath, service.DownloadedZipPath);
+            Assert.Equal(newerPath + ".sig", service.DownloadedSignaturePath);
+            Assert.True(File.Exists(newerPath));
+            Assert.True(File.Exists(newerPath + ".sig"));
+            Assert.False(File.Exists(olderPath));
+            Assert.False(File.Exists(olderPath + ".sig"));
+        }
+        finally
+        {
+            verifierRelease.TrySetResult();
+            if (olderVerify is not null)
             {
-                File.Delete(service.DownloadedSignaturePath);
+                try { await olderVerify; } catch { }
             }
+            TryDeleteAttemptDirectory(Path.GetDirectoryName(olderPath));
+            TryDeleteAttemptDirectory(Path.GetDirectoryName(newerPath));
         }
     }
 
@@ -227,7 +515,7 @@ public class GitHubAppUpdateServiceTests
         Directory.CreateDirectory(appDir);
         var service = ServiceWith(new SignedZipHandler(payload, signatureBase64),
             publicKeyBase64: key.PublicKeyBase64, appDir: appDir);
-        var downloaded = await service.DownloadUpdateAsync(release, null);
+        var downloaded = await service.DownloadUpdateAsync(release, null, TestContext.Current.CancellationToken);
 
         try
         {
@@ -239,14 +527,7 @@ public class GitHubAppUpdateServiceTests
         }
         finally
         {
-            if (downloaded is not null)
-            {
-                File.Delete(downloaded);
-            }
-            if (service.DownloadedSignaturePath is not null)
-            {
-                File.Delete(service.DownloadedSignaturePath);
-            }
+            TryDeleteAttemptDirectory(Path.GetDirectoryName(downloaded));
             try { Directory.Delete(appDir, recursive: true); }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
@@ -402,42 +683,53 @@ public class GitHubAppUpdateServiceTests
     }
 
     [Fact]
-    public async Task DownloadUpdateAsync_FailureAfterSuccess_ClearsPathAndDeletesPartialFile()
+    public async Task DownloadUpdateAsync_FailureAfterSuccess_ClearsPathAndPreservesEarlierAttemptFiles()
     {
-        // 30 bytes / chunk 10: attempt 1 tải trọn zip + sig; attempt 2 ghi zip rồi ném IOException giữa chừng
+        // 30 bytes / chunk 10: attempt 1 tải trọn zip + sig; attempt 2 ghi zip rồi ném IOException giữa chừng.
         var payload = "0123456789ABCDEFGHIJ0123456789"u8.ToArray();
         using var key = new TestSigningKey();
         var release = SignedRelease(payload, key, out var signatureBase64);
         var service = ServiceWith(new GoodThenFailMidstreamHandler(payload, signatureBase64, chunkSize: 10, succeedBeforeFail: 2),
             publicKeyBase64: key.PublicKeyBase64);
 
-        var firstPath = await service.DownloadUpdateAsync(release, null);
+        var firstPath = await service.DownloadUpdateAsync(release, null, TestContext.Current.CancellationToken);
 
         Assert.NotNull(firstPath);
         Assert.True(File.Exists(firstPath));
         Assert.Equal(firstPath, service.DownloadedZipPath);
+        var firstSignaturePath = service.DownloadedSignaturePath;
+        Assert.NotNull(firstSignaturePath);
 
-        var secondResult = await service.DownloadUpdateAsync(release, null);
+        var secondResult = await service.DownloadUpdateAsync(release, null, TestContext.Current.CancellationToken);
 
         try
         {
-            // Attempt 2 fail giữa chừng: path không được trỏ tới zip truncated, file rác phải bị xóa
+            // Attempt 2 chỉ dọn file dở của chính nó; file hoàn chỉnh của attempt 1 không bị xóa nhầm.
+            var ownerDir = Path.GetDirectoryName(Path.GetDirectoryName(firstPath));
+            var secondPath = Path.Combine(ownerDir!, "2", ZipAssetName);
             Assert.Null(secondResult);
             Assert.Null(service.DownloadedZipPath);
-            Assert.False(File.Exists(firstPath));
+            Assert.Null(service.DownloadedSignaturePath);
+            Assert.True(File.Exists(firstPath));
+            Assert.True(File.Exists(firstSignaturePath));
+            Assert.False(File.Exists(secondPath));
+            Assert.False(File.Exists(secondPath + ".sig"));
         }
         finally
         {
-            if (firstPath is not null)
-            {
-                File.Delete(firstPath);
-            }
-            if (service.DownloadedSignaturePath is not null)
-            {
-                File.Delete(service.DownloadedSignaturePath);
-            }
+            var ownerDir = Path.GetDirectoryName(Path.GetDirectoryName(firstPath));
+            TryDeleteAttemptDirectory(Path.GetDirectoryName(firstPath));
+            TryDeleteAttemptDirectory(Path.Combine(ownerDir!, "2"));
         }
     }
+
+    private static Exception CreateVerifierFailure(string failureKind) => failureKind switch
+    {
+        "unauthorized" => new UnauthorizedAccessException("Simulated read access denied."),
+        "io" => new IOException("Simulated locked package."),
+        "crypto" => new CryptographicException("Simulated cryptographic failure."),
+        _ => throw new ArgumentOutOfRangeException(nameof(failureKind)),
+    };
 
     /// <summary>
     /// Release có cả zip lẫn file .sig cạnh nhau (đúng cấu trúc release thật);
@@ -449,6 +741,84 @@ public class GitHubAppUpdateServiceTests
         return Release("v1.2.3",
             new ReleaseAsset(ZipAssetName, "https://example.com/payload.zip"),
             new ReleaseAsset(ZipAssetName + ".sig", "https://example.com/payload.zip.sig"));
+    }
+
+    private static Task<string?> DownloadWithToken(
+        GitHubAppUpdateService service, ReleaseInfo release, CancellationToken cancellationToken) =>
+        service.DownloadUpdateAsync(release, null, cancellationToken);
+
+    private static void TryDeleteAttemptDirectory(string? attemptDir)
+    {
+        if (string.IsNullOrEmpty(attemptDir)) return;
+
+        var updateRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "ReTran_Update"));
+        var path = Path.GetFullPath(attemptDir);
+        if (!path.StartsWith(updateRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        try
+        {
+            if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    private sealed class TrackingUpdateService(IAppUpdateService inner) : IAppUpdateService
+    {
+        public string? LastDownloadedPath { get; private set; }
+
+        public int InstallCallCount { get; private set; }
+
+        public string CurrentVersion => inner.CurrentVersion;
+
+        public string? DownloadedZipPath => inner.DownloadedZipPath;
+
+        public Task<ReleaseInfo?> CheckForUpdatesAsync() => inner.CheckForUpdatesAsync();
+
+        public bool IsUpdateAvailable(ReleaseInfo release) => inner.IsUpdateAvailable(release);
+
+        public async Task<string?> DownloadUpdateAsync(
+            ReleaseInfo release, IProgress<int>? progress, CancellationToken cancellationToken = default)
+        {
+            LastDownloadedPath = await inner.DownloadUpdateAsync(release, progress, cancellationToken);
+            return LastDownloadedPath;
+        }
+
+        public bool VerifyDownloadedPackage() => inner.VerifyDownloadedPackage();
+
+        public Task<bool> InstallUpdateAsync()
+        {
+            InstallCallCount++;
+            return inner.InstallUpdateAsync();
+        }
+    }
+
+    private sealed class TrackingStopper : IUpdateStopper
+    {
+        public bool StopCalled { get; private set; }
+
+        public Task StopServicesAsync(CancellationToken cancellationToken)
+        {
+            StopCalled = true;
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class TrackingRecovery : IAppRecovery
+    {
+        public int RestartCallCount { get; private set; }
+
+        public void RestartCurrentApp() => RestartCallCount++;
+    }
+
+    private sealed class TrackingShutdown : IAppShutdown
+    {
+        public bool QuitCalled { get; private set; }
+
+        public void Quit() => QuitCalled = true;
     }
 
     // ===== HTTP doubles (pattern FreeModelSyncServiceTests) =====
@@ -485,6 +855,54 @@ public class GitHubAppUpdateServiceTests
             var content = new StreamContent(new ChunkedStream(payload, chunkSize));
             content.Headers.ContentLength = payload.Length;
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+        }
+    }
+
+    /// <summary>
+    /// Blocks the first signature request until the second attempt has completed. The gate intentionally
+    /// ignores cancellation to model a non-cooperative HTTP double; the request token is captured separately.
+    /// </summary>
+    private sealed class StaleRunHandler(byte[] olderPayload, byte[] newerPayload) : HttpMessageHandler
+    {
+        private readonly TaskCompletionSource _olderSignatureRelease =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _zipCalls;
+        private int _signatureCalls;
+
+        public TaskCompletionSource FirstSignatureStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public CancellationToken OlderSignatureToken { get; private set; }
+
+        public void ReleaseOlderSignature() => _olderSignatureRelease.TrySetResult();
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken ct)
+        {
+            if (IsSignatureRequest(request))
+            {
+                if (Interlocked.Increment(ref _signatureCalls) == 1)
+                {
+                    OlderSignatureToken = ct;
+                    FirstSignatureStarted.TrySetResult();
+                    await _olderSignatureRelease.Task;
+                    return new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StringContent("older signature"),
+                    };
+                }
+
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("newer signature"),
+                };
+            }
+
+            var payload = Interlocked.Increment(ref _zipCalls) == 1 ? olderPayload : newerPayload;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(payload),
+            };
         }
     }
 

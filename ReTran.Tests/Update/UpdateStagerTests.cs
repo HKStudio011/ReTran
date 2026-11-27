@@ -18,11 +18,6 @@ public class UpdateStagerTests : IDisposable
     {
         if (Directory.Exists(_root))
             Directory.Delete(_root, recursive: true);
-
-        // ExtractToStaging dùng thư mục staging %TEMP% cố định — dọn sau mỗi test
-        var sharedStaging = Path.Combine(Path.GetTempPath(), "ReTran_Update", "staging");
-        if (Directory.Exists(sharedStaging))
-            Directory.Delete(sharedStaging, recursive: true);
     }
 
     private void CreateDirs()
@@ -52,8 +47,53 @@ public class UpdateStagerTests : IDisposable
 
         var staging = UpdateStager.ExtractToStaging(zip);
 
-        Assert.Equal("exe", File.ReadAllText(Path.Combine(staging, "app.exe")));
-        Assert.Equal("<html/>", File.ReadAllText(Path.Combine(staging, "wwwroot", "index.html")));
+        try
+        {
+            Assert.Equal("exe", File.ReadAllText(Path.Combine(staging, "app.exe")));
+            Assert.Equal("<html/>", File.ReadAllText(Path.Combine(staging, "wwwroot", "index.html")));
+        }
+        finally
+        {
+            Directory.Delete(staging, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ExtractToStaging_TwoExtractions_DoNotDeleteOrOverwriteEachOther()
+    {
+        var firstZip = MakeZip(Path.Combine(_root, "first"),
+            ("app.exe", "first"), ("first-only.txt", "keep"));
+        var secondZip = MakeZip(Path.Combine(_root, "second"),
+            ("app.exe", "second"), ("second-only.txt", "new"));
+        string? firstStaging = null;
+        string? secondStaging = null;
+
+        try
+        {
+            firstStaging = UpdateStager.ExtractToStaging(firstZip);
+            var sentinel = Path.Combine(firstStaging, "sentinel.txt");
+            File.WriteAllText(sentinel, "still owned by first extraction");
+
+            secondStaging = UpdateStager.ExtractToStaging(secondZip);
+
+            Assert.NotEqual(firstStaging, secondStaging);
+            Assert.Equal("first", File.ReadAllText(Path.Combine(firstStaging, "app.exe")));
+            Assert.Equal("keep", File.ReadAllText(Path.Combine(firstStaging, "first-only.txt")));
+            Assert.Equal("still owned by first extraction", File.ReadAllText(sentinel));
+            Assert.Equal("second", File.ReadAllText(Path.Combine(secondStaging, "app.exe")));
+            Assert.Equal("new", File.ReadAllText(Path.Combine(secondStaging, "second-only.txt")));
+            Assert.False(File.Exists(Path.Combine(secondStaging, "first-only.txt")));
+        }
+        finally
+        {
+            foreach (var staging in new[] { firstStaging, secondStaging })
+            {
+                if (staging is not null && Directory.Exists(staging))
+                {
+                    Directory.Delete(staging, recursive: true);
+                }
+            }
+        }
     }
 
     [Fact]
@@ -70,6 +110,54 @@ public class UpdateStagerTests : IDisposable
 
         // Trích fail ở staging — appDir không được đụng tới
         Assert.Equal("x", File.ReadAllText(sentinel));
+    }
+
+    [Fact]
+    public void ExtractToStaging_WhenZipBroken_RemovesOnlyOwnedPartialStaging()
+    {
+        var extractionRoot = Path.Combine(Path.GetTempPath(), "ReTran_Update");
+        Directory.CreateDirectory(extractionRoot);
+        Directory.CreateDirectory(_root);
+        var brokenZip = Path.Combine(_root, "broken-cleanup.zip");
+        File.WriteAllText(brokenZip, "not a zip");
+        var survivorZip = MakeZip(Path.Combine(_root, "survivor"), ("app.exe", "keep"));
+        string? survivorStaging = null;
+        string[] before = [];
+
+        try
+        {
+            survivorStaging = UpdateStager.ExtractToStaging(survivorZip);
+            before = Directory.GetDirectories(extractionRoot, "staging-*")
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            Assert.ThrowsAny<InvalidDataException>(() => UpdateStager.ExtractToStaging(brokenZip));
+
+            var after = Directory.GetDirectories(extractionRoot, "staging-*")
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            Assert.Equal(before, after);
+            Assert.True(Directory.Exists(survivorStaging));
+            Assert.Equal("keep", File.ReadAllText(Path.Combine(survivorStaging, "app.exe")));
+        }
+        finally
+        {
+            // Remove only directories introduced by this test, never a baseline extraction.
+            var introduced = Directory.GetDirectories(extractionRoot, "staging-*")
+                .Except(before, StringComparer.OrdinalIgnoreCase);
+            foreach (var staging in introduced)
+            {
+                if (Directory.Exists(staging))
+                {
+                    Directory.Delete(staging, recursive: true);
+                }
+            }
+
+            if (survivorStaging is not null && Directory.Exists(survivorStaging))
+            {
+                Directory.Delete(survivorStaging, recursive: true);
+            }
+        }
     }
 
     [Fact]

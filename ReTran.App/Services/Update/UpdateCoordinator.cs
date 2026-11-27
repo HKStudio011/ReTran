@@ -22,10 +22,10 @@ public enum UpdateError
 }
 
 /// <summary>
-/// Quits the app after the updater has been launched — separated so the coordinator can be unit-tested
+/// Quits the app after updater launch or terminal recovery — separated so the coordinator can be unit-tested
 /// (the MAUI implementation calls <c>Application.Current.Quit()</c>, spec §7 step 5).
-/// Thoát ứng dụng sau khi updater đã được khởi chạy — tách interface để test được coordinator
-/// (impl MAUI gọi <c>Application.Current.Quit()</c>, spec §7 bước 5).
+/// Thoát ứng dụng sau khi khởi chạy updater hoặc khi recovery kết thúc — tách interface để test được
+/// coordinator (impl MAUI gọi <c>Application.Current.Quit()</c>, spec §7 bước 5).
 /// </summary>
 public interface IAppShutdown
 {
@@ -35,30 +35,33 @@ public interface IAppShutdown
 
 /// <summary>
 /// Stops the app services that would hold file locks or the overlay port during install
-/// (pipeline, core process, overlay feed server — spec §6.2 step 3).
+/// (pipeline, core process, <c>OverlayFeedServer</c> — spec §6.2 step 3).
 /// Dừng các service của app đang giữ khóa file hoặc cổng overlay trong lúc cài
-/// (pipeline, core process, overlay feed server — spec §6.2 bước 3).
+/// (pipeline, core process, <c>OverlayFeedServer</c> — spec §6.2 bước 3).
 /// </summary>
 public interface IUpdateStopper
 {
     /// <summary>
-    /// Stops the services; honors <paramref name="cancellationToken"/> for the coordinator's combined timeout.
-    /// Dừng các service; tuân theo <paramref name="cancellationToken"/> (timeout tổng hợp của coordinator).
+    /// Attempts every service cleanup in pipeline/core/overlay order, then propagates any step failure.
+    /// Thử cleanup mọi service theo thứ tự pipeline/core/overlay, rồi ném bất kỳ lỗi nào của các bước.
     /// </summary>
     /// <param name="cancellationToken">Cancellation (user Dispose / ~30s combined timeout). Token huỷ (Dispose người dùng / timeout tổng hợp ~30s).</param>
-    /// <returns>A task that completes when the services are stopped. Task hoàn tất khi các service đã dừng.</returns>
+    /// <returns>A task that completes when all service cleanup steps have been attempted. Task hoàn tất khi đã thử mọi bước cleanup service.</returns>
+    /// <exception cref="TimeoutException">A service stop step exceeded its own timeout. Một bước dừng service vượt timeout riêng của bước đó.</exception>
+    /// <exception cref="OperationCanceledException">The supplied token was cancelled. Token được cung cấp đã bị huỷ.</exception>
+    /// <exception cref="AggregateException">More than one service stop step failed; individual failures are in <see cref="AggregateException.InnerExceptions"/>. Nhiều bước dừng service cùng lỗi; từng lỗi nằm trong <see cref="AggregateException.InnerExceptions"/>.</exception>
     Task StopServicesAsync(CancellationToken cancellationToken);
 }
 
 /// <summary>
 /// Update pipeline orchestrator (spec §6.2/§7): download zip → verify signature → stop services
-/// (~30s combined timeout) → launch updater → quit the app. Every fail branch cancels the run's CTS,
-/// fires <see cref="Failed"/> and resets state via the <c>runId</c>-guarded reset so a stale run can
-/// never clobber a newer one started from an event handler.
+/// (~30s combined timeout) → launch updater → quit the app. Pre-stop failures reset state via the
+/// <c>runId</c>-guarded reset; post-stop failures report the error and restart the current app before
+/// quitting the torn-down process without attempting to reuse disposed services.
 /// Orchestrator luồng cập nhật (spec §6.2/§7): tải zip → xác thực chữ ký → dừng service (timeout tổng
-/// hợp ~30s) → khởi chạy updater → thoát app. Mọi nhánh fail đều huỷ CTS của run, bắn
-/// <see cref="Failed"/> và reset trạng thái qua reset guard theo <c>runId</c> để run cũ không bao giờ
-/// phá trạng thái run mới được khởi động từ handler event.
+/// hợp ~30s) → khởi chạy updater → thoát app. Lỗi trước bước dừng service reset trạng thái qua guard
+/// <c>runId</c>; lỗi sau bước này báo <see cref="Failed"/>, khởi chạy lại app hiện tại rồi thoát process
+/// đã dừng service, không cố tái sử dụng các singleton đã dispose.
 /// </summary>
 public sealed class UpdateCoordinator : IDisposable
 {
@@ -66,6 +69,7 @@ public sealed class UpdateCoordinator : IDisposable
     private readonly IUpdateStopper _stopper;
     private readonly IAppShutdown _shutdown;
     private readonly ILogger<UpdateCoordinator> _log;
+    private readonly IAppRecovery _recovery;
 
     // Thread-safety: the pipeline runs on a background continuation while the UI reads the properties —
     // every state transition happens under _sync; Changed/Cancelled/Failed fire OUTSIDE the lock so a
@@ -82,24 +86,31 @@ public sealed class UpdateCoordinator : IDisposable
     // run) would reset the state of run #2.
     private int _runId;
 
+    // Dispose marks the run separately so both recovery guards can identify teardown explicitly. Run IDs
+    // are monotonic, so the supported Dispose-then-start reuse cannot clear the marker of an older run.
+    private int _disposedRunId;
+
     /// <summary>
     /// Creates the coordinator.
     /// Tạo coordinator mới.
     /// </summary>
     /// <param name="updates">Download/verify/install service. Dịch vụ tải/xác thực/cài zip update.</param>
     /// <param name="stopper">Stops app services before install. Dừng các service của app trước khi cài.</param>
-    /// <param name="shutdown">Quits the app after the updater is launched. Thoát app sau khi updater được khởi chạy.</param>
+    /// <param name="shutdown">Quits the app after updater launch or terminal recovery. Thoát app sau khi khởi chạy updater hoặc khi recovery kết thúc.</param>
     /// <param name="log">Warns when a pipeline branch fails. Ghi Warn khi một nhánh của pipeline fail.</param>
+    /// <param name="recovery">Restarts the current app after a post-stop failure. Khởi chạy lại app hiện tại sau lỗi xảy ra sau bước dừng service.</param>
     public UpdateCoordinator(
         IAppUpdateService updates,
         IUpdateStopper stopper,
         IAppShutdown shutdown,
-        ILogger<UpdateCoordinator> log)
+        ILogger<UpdateCoordinator> log,
+        IAppRecovery recovery)
     {
         _updates = updates;
         _stopper = stopper;
         _shutdown = shutdown;
         _log = log;
+        _recovery = recovery;
     }
 
     /// <summary>Whether an update is running — the UI disables the "Update now" button. Có update đang chạy không — UI khoá nút "Cập nhật ngay".</summary>
@@ -141,7 +152,7 @@ public sealed class UpdateCoordinator : IDisposable
     /// <summary>Fires when a property changes — the modal UI re-renders. Bắn khi một property đổi — modal UI re-render.</summary>
     public event Action? Changed;
 
-    /// <summary>Fires when the update failed (state already reset) — the UI toasts the error. Bắn khi update thất bại (trạng thái đã reset) — UI toast lỗi.</summary>
+    /// <summary>Fires when the update failed; pre-stop failures reset after the event, while post-stop failures remain finalizing for recovery unless Dispose aborts it. Bắn khi update thất bại; lỗi trước stop reset sau event, còn lỗi sau stop giữ trạng thái finalizing cho recovery trừ khi Dispose huỷ recovery.</summary>
     public event Action<UpdateError>? Failed;
 
     /// <summary>Fires when the user cancels before finalize — the UI toasts "Update cancelled". Bắn khi người dùng Hủy trước khi finalise — UI toast "Đã hủy cập nhật".</summary>
@@ -149,11 +160,12 @@ public sealed class UpdateCoordinator : IDisposable
 
     /// <summary>
     /// Runs the update pipeline: download (progress reported through <see cref="DownloadPercent"/>),
-    /// verify the signature, stop services, launch the updater, then quit the app. Completes when the
-    /// pipeline ends (success, failure or cancel).
+    /// verify the signature, stop services, launch the updater, then quit the app. A post-stop failure
+    /// restarts the current app before quitting the old process. Completes when the pipeline ends
+    /// (success, failure or cancel).
     /// Chạy pipeline cập nhật: tải (báo tiến độ qua <see cref="DownloadPercent"/>), xác thực chữ ký,
-    /// dừng service, khởi chạy updater rồi thoát app. Hoàn tất khi pipeline kết thúc (thành công,
-    /// thất bại hoặc huỷ).
+    /// dừng service, khởi chạy updater rồi thoát app. Lỗi sau bước dừng service khởi chạy lại app hiện
+    /// tại trước khi thoát process cũ. Hoàn tất khi pipeline kết thúc (thành công, thất bại hoặc huỷ).
     /// </summary>
     /// <param name="release">The release to download. Release cần tải.</param>
     /// <returns>A task completing when the pipeline ends. Task hoàn tất khi pipeline kết thúc.</returns>
@@ -190,7 +202,7 @@ public sealed class UpdateCoordinator : IDisposable
         string? zipPath;
         try
         {
-            zipPath = await _updates.DownloadUpdateAsync(release, new PercentProgress(this));
+            zipPath = await _updates.DownloadUpdateAsync(release, new PercentProgress(this), cts.Token);
         }
         catch (Exception ex)
         {
@@ -207,8 +219,8 @@ public sealed class UpdateCoordinator : IDisposable
         }
 
         // CancelUpdate/Dispose won: the canceller already reset the state (Cancelled fired, flags
-        // cleared) — just return. Checked AFTER the await because the download API has no token;
-        // the null branch below is therefore never reached for a superseded run.
+        // cleared) — just return. The download receives this run's token, and this post-await guard
+        // also covers a non-cooperative implementation that completes after cancellation.
         if (cts.IsCancellationRequested)
         {
             return;
@@ -262,13 +274,10 @@ public sealed class UpdateCoordinator : IDisposable
         }
         catch (Exception ex)
         {
-            // The production UpdateStopper never throws: on this 30s timeout it swallows the OCE
-            // per step, still force-kills the core (step 2) and disposes the feed (step 3), then
-            // returns normally — locks are released, so reaching install+quit after a stop timeout
-            // is safe and intended, NOT a stop failure. This catch exists for the IUpdateStopper
-            // contract: a non-production stopper could fault before releasing anything, and only
-            // then is this a real stop failure.
-            Fail(UpdateError.StopServicesFailed, $"Update aborted: stop services failed: {ex.Message}", runId);
+            // A service error, per-step timeout, or the combined stop timeout is fail-closed:
+            // UpdateStopper propagates it after best-effort cleanup and the updater is never launched.
+            RecoverAfterPostStopFailure(
+                UpdateError.StopServicesFailed, $"Update aborted: stop services failed: {ex.Message}", runId);
             return;
         }
 
@@ -288,13 +297,15 @@ public sealed class UpdateCoordinator : IDisposable
         }
         catch (Exception ex)
         {
-            Fail(UpdateError.InstallFailed, $"Update aborted: installer launch failed: {ex.Message}", runId);
+            RecoverAfterPostStopFailure(
+                UpdateError.InstallFailed, $"Update aborted: installer launch failed: {ex.Message}", runId);
             return;
         }
 
         if (!installed)
         {
-            Fail(UpdateError.InstallFailed, "Update aborted: installer launch failed.", runId);
+            RecoverAfterPostStopFailure(
+                UpdateError.InstallFailed, "Update aborted: installer launch failed.", runId);
             return;
         }
 
@@ -348,13 +359,14 @@ public sealed class UpdateCoordinator : IDisposable
     /// before finalize (download/verify) the pipeline exits at its next cancellation check and the
     /// state resets silently; during the stop-services step the run aborts silently (Warn + reset,
     /// no <see cref="Failed"/>); during install the pipeline still proceeds to launch the updater
-    /// and Quit — the app is tearing down, events may still fire after Dispose.
+    /// and Quit. During post-stop recovery, Dispose before the notification commit suppresses
+    /// <see cref="Failed"/>, and Dispose before or inside that event prevents the current-app restart.
     /// Teardown: huỷ CTS và giải phóng update đang chờ (nếu có). Không bắn <see cref="Cancelled"/> —
     /// đây không phải hành động người dùng. Hành vi thực tế theo window: trước finalise
     /// (download/verify) pipeline thoát ở check huỷ kế tiếp và reset im lặng; trong bước dừng
     /// service, run hủy im lặng (Warn + reset, KHÔNG <see cref="Failed"/>); trong lúc install,
-    /// pipeline vẫn chạy tiếp khởi chạy updater và Quit — app đang teardown; event có thể vẫn
-    /// fire sau Dispose.
+    /// pipeline vẫn chạy tiếp khởi chạy updater và Quit. Trong recovery sau stop, Dispose trước
+    /// notification commit chặn <see cref="Failed"/>; Dispose trước hoặc bên trong event chặn restart app.
     /// </summary>
     public void Dispose()
     {
@@ -362,6 +374,7 @@ public sealed class UpdateCoordinator : IDisposable
         bool release;
         lock (_sync)
         {
+            _disposedRunId = _runId;
             _cts?.Cancel();
             runId = _runId;
             release = _updateInProgress && !_isFinalizing;
@@ -370,6 +383,84 @@ public sealed class UpdateCoordinator : IDisposable
         if (release)
         {
             Reset(runId);
+        }
+    }
+
+    // Post-stop failures cannot return to a usable UI: Core and OverlayFeed may already be disposed.
+    // Notification and process launch are separate commit phases so Dispose between them aborts restart.
+    private void RecoverAfterPostStopFailure(UpdateError error, string message, int runId)
+    {
+        _log.LogWarning("{Message}", message);
+
+        bool active;
+        lock (_sync)
+        {
+            // This is the notification commit. Recovery does not self-cancel, so the CTS remains an
+            // external-cancellation signal for both this guard and the later launch commit.
+            active = _updateInProgress && _runId == runId && _disposedRunId != runId &&
+                _cts is { IsCancellationRequested: false };
+        }
+
+        if (!active)
+        {
+            Reset(runId);
+            return;
+        }
+
+        // Arbitrary UI handlers stay outside _sync. A handler may Dispose; the launch guard below then loses.
+        try
+        {
+            Failed?.Invoke(error);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Update failure UI notification failed during terminal recovery.");
+        }
+
+        var launchCommitted = false;
+        Exception? restartFailure = null;
+        lock (_sync)
+        {
+            // Dispose and this launch commit use the same lock: Dispose either wins first and fails this
+            // guard, or launch completes before Dispose can cancel/mark the run. Production
+            // ProcessAppRecovery only constructs ProcessStartInfo and calls Process.Start; it has no
+            // coordinator callback, event handler, logging, or asynchronous wait.
+            if (_updateInProgress && _runId == runId && _disposedRunId != runId &&
+                _cts is { IsCancellationRequested: false })
+            {
+                launchCommitted = true;
+                try
+                {
+                    _recovery.RestartCurrentApp();
+                }
+                catch (Exception ex)
+                {
+                    restartFailure = ex;
+                }
+            }
+        }
+
+        if (!launchCommitted)
+        {
+            Reset(runId);
+            return;
+        }
+
+        if (restartFailure is not null)
+        {
+            _log.LogError(restartFailure,
+                "Application restart failed after post-stop update failure; quitting the torn-down process.");
+        }
+
+        try
+        {
+            _shutdown.Quit();
+        }
+        catch (Exception ex)
+        {
+            // Do not reset: if Quit also fails, the modal stays terminal instead of exposing a false healthy UI.
+            _log.LogError(ex,
+                "Application quit failed after post-stop update failure; the process remains in its terminal state.");
         }
     }
 

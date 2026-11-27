@@ -1,3 +1,5 @@
+using System.Security.AccessControl;
+using System.Security.Principal;
 using ReTran_App.Services.Update;
 
 namespace ReTran.Tests.Update;
@@ -74,6 +76,61 @@ public class PackageSignatureVerifierTests
         }
         finally
         {
+            File.Delete(package);
+            File.Delete(signature);
+        }
+    }
+
+    [Fact]
+    public void Verify_LockedPackage_ReturnsFalse()
+    {
+        using var pair = new TestSigningKey();
+        var package = WriteTempFile("PK-package");
+        var signature = SignToFile(pair, package);
+
+        try
+        {
+            using var lockedPackage = new FileStream(package, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+
+            Assert.False(PackageSignatureVerifier.Verify(package, signature, pair.PublicKeyBase64));
+        }
+        finally
+        {
+            File.Delete(package);
+            File.Delete(signature);
+        }
+    }
+
+    [Fact]
+    public void Verify_UnreadablePackage_ReturnsFalse()
+    {
+        using var pair = new TestSigningKey();
+        var package = WriteTempFile("PK-package");
+        var signature = SignToFile(pair, package);
+        var packageInfo = new FileInfo(package);
+        var denyRead = new FileSystemAccessRule(
+            WindowsIdentity.GetCurrent().User!,
+            FileSystemRights.ReadData,
+            AccessControlType.Deny);
+        var accessControl = packageInfo.GetAccessControl();
+        var accessDenied = false;
+
+        try
+        {
+            accessControl.AddAccessRule(denyRead);
+            packageInfo.SetAccessControl(accessControl);
+            accessDenied = true;
+
+            Assert.False(PackageSignatureVerifier.Verify(package, signature, pair.PublicKeyBase64));
+        }
+        finally
+        {
+            if (accessDenied)
+            {
+                accessControl.RemoveAccessRule(denyRead);
+                packageInfo.SetAccessControl(accessControl);
+            }
+
             File.Delete(package);
             File.Delete(signature);
         }
