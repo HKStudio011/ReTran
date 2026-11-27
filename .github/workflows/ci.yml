@@ -41,93 +41,13 @@ jobs:
       - name: Build app (Windows)
         run: dotnet build "${{ env.PROJECT_PATH }}" -f net10.0-windows10.0.19041.0 --nologo
 
-      # xUnit v3 là executable self-hosted. Chạy qua dotnet host để tránh lỗi
-      # startup/handshake của apphost đã làm CI treo trước discovery.
+      # Test assembly tham chiếu ReTran.App MAUI nhưng các test đều chạy headless.
+      # Không cho WinAppSDK bootstrap mở error UI ẩn khi runner thiếu Framework package
+      # (WindowsAppSDK issue #5851); lỗi này xảy ra trước cả test discovery.
       - name: Build test project
-        # Test headless không dùng WinAppSDK API; tránh bootstrap mở error UI ẩn
-        # khi runner thiếu Framework package (WindowsAppSDK issue #5851).
         run: dotnet build "${{ env.TEST_PROJECT }}" --nologo -p:WindowsAppSdkBootstrapInitialize=false
 
-      - name: Build xUnit dependency probes
-        timeout-minutes: 10
-        shell: pwsh
-        run: |
-          function New-XunitProbe {
-            param([string]$Name, [string]$ExtraItems)
-            $probeDir = Join-Path $env:RUNNER_TEMP $Name
-            New-Item -ItemType Directory -Path $probeDir -Force | Out-Null
-            $csproj = @"
-            <Project Sdk="Microsoft.NET.Sdk">
-              <PropertyGroup>
-                <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
-                <OutputType>Exe</OutputType>
-                <ImplicitUsings>enable</ImplicitUsings>
-                <Nullable>enable</Nullable>
-                <UseMaui>false</UseMaui>
-                <EnableMauiImageProcessing>false</EnableMauiImageProcessing>
-                <WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>
-              </PropertyGroup>
-              <ItemGroup><PackageReference Include="xunit.v3" Version="4.0.2" /></ItemGroup>
-              $ExtraItems
-            </Project>
-          "@
-            $csproj | Set-Content -Encoding utf8 (Join-Path $probeDir "$Name.csproj")
-            'using Xunit; public class ProbeTests { [Fact] public void Pass() { } }' |
-              Set-Content -Encoding utf8 (Join-Path $probeDir "ProbeTests.cs")
-            dotnet build (Join-Path $probeDir "$Name.csproj") --nologo
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-
-          $repoRoot = (Get-Location).Path
-          New-XunitProbe "probe-tfm" ""
-          New-XunitProbe "probe-core" "<ItemGroup><ProjectReference Include='$repoRoot/ReTran.Core/ReTran.Core.csproj' /></ItemGroup>"
-          New-XunitProbe "probe-app" "<ItemGroup><ProjectReference Include='$repoRoot/ReTran.App/ReTran.App.csproj' /></ItemGroup>"
-          New-XunitProbe "probe-vstest" "<ItemGroup><PackageReference Include='Microsoft.NET.Test.Sdk' Version='17.14.1' /><PackageReference Include='xunit.runner.visualstudio' Version='2.8.2' /></ItemGroup>"
-
-      - name: Diagnose test process startup
-        timeout-minutes: 4
-        shell: pwsh
-        run: |
-          $script:allSucceeded = $true
-          function Invoke-BoundedProcess {
-            param([string]$Name, [string]$FileName, [string[]]$Arguments)
-            $stdout = Join-Path $env:RUNNER_TEMP "$Name.stdout.log"
-            $stderr = Join-Path $env:RUNNER_TEMP "$Name.stderr.log"
-            Write-Host "=== $Name START ==="
-            try {
-              $process = Start-Process -FilePath $FileName -ArgumentList $Arguments `
-                -RedirectStandardOutput $stdout -RedirectStandardError $stderr -NoNewWindow -PassThru
-              if (-not $process.WaitForExit(30000)) {
-                Write-Host "$Name TIMEOUT AFTER 30s"
-                $script:allSucceeded = $false
-                try { $process.Kill($true) } catch { }
-                $process.WaitForExit()
-              } else {
-                Write-Host "$Name EXIT=$($process.ExitCode)"
-                if ($process.ExitCode -ne 0) { $script:allSucceeded = $false }
-              }
-            } catch {
-              Write-Host "$Name START ERROR: $($_.Exception.Message)"
-              $script:allSucceeded = $false
-            }
-            if (Test-Path $stdout) { Get-Content $stdout }
-            if (Test-Path $stderr) { Get-Content $stderr }
-          }
-
-          Invoke-BoundedProcess "core-version" "dotnet" `
-            @("ReTran.Core/bin/Debug/net10.0-windows/ReTran.Core.dll", "version")
-          Invoke-BoundedProcess "probe-tfm" "dotnet" `
-            @((Join-Path $env:RUNNER_TEMP "probe-tfm/bin/Debug/net10.0-windows10.0.19041.0/probe-tfm.dll"), "-assemblyInfo")
-          Invoke-BoundedProcess "probe-core" "dotnet" `
-            @((Join-Path $env:RUNNER_TEMP "probe-core/bin/Debug/net10.0-windows10.0.19041.0/probe-core.dll"), "-assemblyInfo")
-          Invoke-BoundedProcess "probe-app" "dotnet" `
-            @((Join-Path $env:RUNNER_TEMP "probe-app/bin/Debug/net10.0-windows10.0.19041.0/probe-app.dll"), "-assemblyInfo")
-          Invoke-BoundedProcess "probe-vstest" "dotnet" `
-            @((Join-Path $env:RUNNER_TEMP "probe-vstest/bin/Debug/net10.0-windows10.0.19041.0/probe-vstest.dll"), "-assemblyInfo")
-          Invoke-BoundedProcess "tests-dotnet-host" "dotnet" `
-            @("ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.dll", "-assemblyInfo")
-          if (-not $script:allSucceeded) { exit 1 }
-
+      # Chạy full xUnit v3 assembly trực tiếp, không filter, và giữ native exit code.
       - name: Test
         timeout-minutes: 5
         shell: pwsh
