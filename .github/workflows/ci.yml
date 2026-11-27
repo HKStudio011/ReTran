@@ -44,7 +44,9 @@ jobs:
       # xUnit v3 là executable self-hosted. Chạy qua dotnet host để tránh lỗi
       # startup/handshake của apphost đã làm CI treo trước discovery.
       - name: Build test project
-        run: dotnet build "${{ env.TEST_PROJECT }}" --nologo
+        # Test headless không dùng WinAppSDK API; tránh bootstrap mở error UI ẩn
+        # khi runner thiếu Framework package (WindowsAppSDK issue #5851).
+        run: dotnet build "${{ env.TEST_PROJECT }}" --nologo -p:WindowsAppSdkBootstrapInitialize=false
 
       - name: Build xUnit dependency probes
         timeout-minutes: 10
@@ -63,6 +65,7 @@ jobs:
                 <Nullable>enable</Nullable>
                 <UseMaui>false</UseMaui>
                 <EnableMauiImageProcessing>false</EnableMauiImageProcessing>
+                <WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>
               </PropertyGroup>
               <ItemGroup><PackageReference Include="xunit.v3" Version="4.0.2" /></ItemGroup>
               $ExtraItems
@@ -124,3 +127,10 @@ jobs:
           Invoke-BoundedProcess "tests-dotnet-host" "dotnet" `
             @("ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.dll", "-assemblyInfo")
           if (-not $script:allSucceeded) { exit 1 }
+
+      - name: Test
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          dotnet "ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.dll" -noAutoReporters -noLogo -noColor -longRunning 30
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
