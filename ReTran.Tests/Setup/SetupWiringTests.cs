@@ -33,6 +33,20 @@ public class SetupWiringTests
     }
 
     [Fact]
+    public async Task EnsureStartedAsync_StartsOnlyColdPeer()
+    {
+        var peer = new FakeCorePeer();
+        var bridge = new SetupCoreBridge(peer);
+
+        await bridge.EnsureStartedAsync(TestContext.Current.CancellationToken);
+        await bridge.EnsureStartedAsync(TestContext.Current.CancellationToken);
+        await bridge.CallAsync("ocr.models.list", null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(["start"], peer.Actions);
+        Assert.Single(peer.Calls);
+    }
+
+    [Fact]
     public async Task CallAsync_ForwardsMethodAndParamsVerbatim()
     {
         var peer = new FakeCorePeer();

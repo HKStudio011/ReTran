@@ -35,6 +35,24 @@ public class LlmRuntimePollTests
     }
 
     [Fact]
+    public void RuntimePoll_UncommittedAttempt_NeverCompletes()
+    {
+        LlmRuntimeStatusInfo Status(LlmRuntimeAttemptState attemptState) =>
+            new("b190", true, @"C:\llm\b190\llama-server.exe")
+            {
+                Attempt = 7,
+                AttemptState = attemptState,
+            };
+
+        Assert.Equal(LlmRuntimePollOutcome.Failed,
+            LlmRuntimePoll.Evaluate(Status(LlmRuntimeAttemptState.Failed), attempt: 7));
+        Assert.Equal(LlmRuntimePollOutcome.Cancelled,
+            LlmRuntimePoll.Evaluate(Status(LlmRuntimeAttemptState.Cancelled), attempt: 7));
+        Assert.Equal(LlmRuntimePollOutcome.Waiting,
+            LlmRuntimePoll.Evaluate(Status(LlmRuntimeAttemptState.Running), attempt: 7));
+    }
+
+    [Fact]
     public void Evaluate_NewerAttemptSupersedesPolledAttempt()
     {
         var status = new LlmRuntimeStatusInfo("b190", true, @"C:\llm\b190\llama-server.exe")

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -108,8 +109,7 @@ public sealed record AppSettings(
 /// <c>%LOCALAPPDATA%\ReTran\settings.json</c>). File thiếu hoặc hỏng trả về
 /// <see cref="AppSettings.Default"/>; việc ghi là nguyên tử (ghi file tạm rồi move).
 /// </summary>
-/// <param name="path">File path, or <see langword="null"/> to use <see cref="DefaultPath"/>. Đường dẫn file, hoặc <see langword="null"/> để dùng <see cref="DefaultPath"/>.</param>
-public sealed class AppSettingsService(string? path = null)
+public sealed class AppSettingsService
 {
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
@@ -118,13 +118,35 @@ public sealed class AppSettingsService(string? path = null)
         WriteIndented = true,
     };
 
-    private readonly string _path = path ?? DefaultPath;
+    private static readonly ConcurrentDictionary<string, object> PathLocks = new(StringComparer.OrdinalIgnoreCase);
+    private readonly string _path;
+    private readonly Func<string, bool> _fileExists;
+    private readonly Func<string, string> _readText;
+    private object PathLock => PathLocks.GetOrAdd(_path, static _ => new object());
 
     /// <summary>
-    /// Raised after a successful <see cref="Save"/> so open screens can refresh their copy of the
-    /// settings (language pair, provider, overlay options).
-    /// Được phát sau khi <see cref="Save"/> thành công để các màn hình đang mở đọc lại cài đặt
-    /// (cặp ngôn ngữ, provider, tùy chọn overlay).
+    /// Creates a settings store at the supplied path or <see cref="DefaultPath"/>.
+    /// Tạo kho settings tại đường dẫn được cung cấp hoặc <see cref="DefaultPath"/>.
+    /// </summary>
+    /// <param name="path">File path, or <see langword="null"/> for the default. Đường dẫn file, hoặc <see langword="null"/> để dùng mặc định.</param>
+    public AppSettingsService(string? path = null)
+        : this(path, File.Exists, File.ReadAllText)
+    {
+    }
+
+    internal AppSettingsService(
+        string? path, Func<string, bool> fileExists, Func<string, string> readText)
+    {
+        _path = Path.GetFullPath(path ?? DefaultPath);
+        _fileExists = fileExists ?? throw new ArgumentNullException(nameof(fileExists));
+        _readText = readText ?? throw new ArgumentNullException(nameof(readText));
+    }
+
+    /// <summary>
+    /// Raised after a successful <see cref="Save"/> or <see cref="Update"/> so open screens can
+    /// refresh their copy of the settings (language pair, provider, overlay options).
+    /// Được phát sau khi <see cref="Save"/> hoặc <see cref="Update"/> thành công để các màn hình
+    /// đang mở đọc lại cài đặt (cặp ngôn ngữ, provider, tùy chọn overlay).
     /// </summary>
     public event Action? Changed;
 
@@ -138,37 +160,25 @@ public sealed class AppSettingsService(string? path = null)
             "ReTran", "settings.json");
 
     /// <summary>
-    /// Reads the settings file; a missing, malformed or incomplete file returns
-    /// <see cref="AppSettings.Default"/> instead of throwing.
-    /// Đọc file cài đặt; file thiếu, hỏng hoặc thiếu trường trả về <see cref="AppSettings.Default"/>
-    /// thay vì ném exception.
+    /// Reads the settings file under the per-path lock; a missing, malformed or incomplete file
+    /// returns <see cref="AppSettings.Default"/> instead of throwing.
+    /// Đọc file cài đặt dưới lock theo đường dẫn; file thiếu, hỏng hoặc thiếu trường trả về
+    /// <see cref="AppSettings.Default"/> thay vì ném exception.
     /// </summary>
     /// <returns>The persisted settings, or the defaults when the file cannot be used. Cài đặt đã lưu, hoặc mặc định khi không dùng được file.</returns>
     public AppSettings Load()
     {
-        try
+        lock (PathLock)
         {
-            if (!File.Exists(_path)) return AppSettings.Default;
-            AppSettings? settings =
-                JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(_path), SerializerOptions);
-            if (settings is null
-                || string.IsNullOrEmpty(settings.Provider)
-                || string.IsNullOrEmpty(settings.Src)
-                || string.IsNullOrEmpty(settings.Dst))
-            {
-                return AppSettings.Default;
-            }
-            return settings;
-        }
-        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
-        {
-            return AppSettings.Default;
+            return LoadCore();
         }
     }
 
     /// <summary>
-    /// Writes the settings file atomically, creating the parent directory when missing.
-    /// Ghi file cài đặt theo kiểu nguyên tử, tạo thư mục cha nếu chưa có.
+    /// Writes the settings file atomically under the per-path lock, creating the parent directory
+    /// when missing and cleaning up its unique temporary file after a failure.
+    /// Ghi file cài đặt nguyên tử dưới lock theo đường dẫn, tạo thư mục cha nếu chưa có và dọn file
+    /// tạm duy nhất sau khi ghi lỗi.
     /// </summary>
     /// <param name="s">Settings to persist. Cài đặt cần lưu.</param>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="s"/> is null. Ném khi <paramref name="s"/> là null.</exception>
@@ -177,11 +187,104 @@ public sealed class AppSettingsService(string? path = null)
     public void Save(AppSettings s)
     {
         ArgumentNullException.ThrowIfNull(s);
+        lock (PathLock)
+        {
+            SaveCore(s);
+        }
+        Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// Atomically reads, transforms and saves settings under one per-full-path lock shared by all
+    /// service instances in this process, then returns the persisted value.
+    /// Đọc, biến đổi và ghi settings nguyên tử dưới cùng một lock theo full path được mọi service
+    /// instance trong process chia sẻ, rồi trả về giá trị đã lưu.
+    /// </summary>
+    /// <param name="update">Transformation applied to the latest settings. Phép biến đổi áp dụng trên settings mới nhất.</param>
+    /// <returns>The transformed settings persisted to disk. Settings đã biến đổi và lưu xuống đĩa.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="update"/> or its result is null. Ném khi <paramref name="update"/> hoặc kết quả của nó là null.</exception>
+    /// <exception cref="JsonException">Thrown when an existing settings file contains malformed JSON. Ném khi file settings hiện có chứa JSON hỏng.</exception>
+    /// <exception cref="InvalidOperationException">Thrown when an existing settings file lacks required provider/language fields. Ném khi file settings hiện có thiếu trường provider/ngôn ngữ bắt buộc.</exception>
+    /// <exception cref="IOException">Thrown when an existing file cannot be read or the temporary/destination file cannot be written or replaced. Ném khi không đọc được file hiện có hoặc không ghi/thay thế được file tạm/đích.</exception>
+    /// <exception cref="UnauthorizedAccessException">Thrown when the settings directory or file denies access. Ném khi thư mục hoặc file settings từ chối quyền truy cập.</exception>
+    public AppSettings Update(Func<AppSettings, AppSettings> update)
+    {
+        ArgumentNullException.ThrowIfNull(update);
+        AppSettings updated;
+        lock (PathLock)
+        {
+            updated = update(LoadForUpdateCore());
+            ArgumentNullException.ThrowIfNull(updated);
+            SaveCore(updated);
+        }
+        Changed?.Invoke();
+        return updated;
+    }
+
+    private AppSettings LoadCore()
+    {
+        try
+        {
+            if (!_fileExists(_path)) return AppSettings.Default;
+            return DeserializeRequired(_readText(_path));
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException
+            or InvalidOperationException)
+        {
+            return AppSettings.Default;
+        }
+    }
+
+    private AppSettings LoadForUpdateCore()
+    {
+        // Unlike the public compatibility fallback, an update must never turn an existing but
+        // unreadable/invalid file into defaults and then overwrite the user's other settings.
+        // Read directly: File.Exists can also return false for an inaccessible existing file.
+        try
+        {
+            return DeserializeRequired(_readText(_path));
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return AppSettings.Default;
+        }
+    }
+
+    private static AppSettings DeserializeRequired(string json)
+    {
+        AppSettings? settings = JsonSerializer.Deserialize<AppSettings>(json, SerializerOptions);
+        if (settings is null
+            || string.IsNullOrEmpty(settings.Provider)
+            || string.IsNullOrEmpty(settings.Src)
+            || string.IsNullOrEmpty(settings.Dst))
+        {
+            throw new InvalidOperationException(
+                "The existing settings file is incomplete; update aborted without writing defaults.");
+        }
+        return settings;
+    }
+
+    private void SaveCore(AppSettings s)
+    {
         string? dir = Path.GetDirectoryName(_path);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-        string tmp = _path + ".tmp";
-        File.WriteAllText(tmp, JsonSerializer.Serialize(s, SerializerOptions));
-        File.Move(tmp, _path, overwrite: true);
-        Changed?.Invoke();
+        string tmp = $"{_path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(tmp, JsonSerializer.Serialize(s, SerializerOptions));
+            File.Move(tmp, _path, overwrite: true);
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(tmp)) File.Delete(tmp);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Preserve the original write/replace failure; a later save uses a fresh temp path.
+                // Giữ lỗi ghi/thay thế ban đầu; lần lưu sau dùng một đường dẫn temp mới.
+            }
+        }
     }
 }

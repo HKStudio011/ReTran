@@ -1,10 +1,10 @@
 namespace ReTran_App.Services.Update;
 
 /// <summary>
-/// MAUI implementation of <see cref="IAppShutdown"/> — quits the current application so the
-/// already-launched updater can replace the install files (spec §7 step 5).
-/// Hiện thực MAUI của <see cref="IAppShutdown"/> — đóng ứng dụng hiện tại để updater đã được
-/// khởi chạy có thể thay các file cài (spec §7 bước 5).
+/// MAUI implementation of <see cref="IAppShutdown"/> — quits the current application after updater
+/// launch or terminal recovery (spec §7 step 5).
+/// Hiện thực MAUI của <see cref="IAppShutdown"/> — đóng ứng dụng hiện tại sau khi khởi chạy updater
+/// hoặc khi recovery kết thúc (spec §7 bước 5).
 /// </summary>
 public sealed class MauiAppShutdown : IAppShutdown
 {

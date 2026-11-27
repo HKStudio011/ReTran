@@ -79,6 +79,10 @@ public sealed class SetupCoreBridge : ISetupCoreBridge
     public Task<JsonNode?> CallAsync(string method, JsonNode? @params, CancellationToken ct) =>
         _core.CallAsync(method, @params, ct);
 
+    /// <inheritdoc />
+    public Task EnsureStartedAsync(CancellationToken ct) =>
+        _core.IsStarted ? Task.CompletedTask : _core.StartCoreAsync(ct);
+
     /// <summary>
     /// Restarts the whole core process: dispose first (kill + release stdio), then start again. The
     /// production peer implements <see cref="IAsyncDisposable"/>; a peer without it (a minimal test

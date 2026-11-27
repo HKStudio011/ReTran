@@ -196,7 +196,8 @@ public class UpdateCheckServiceTests
 
         public bool IsUpdateAvailable(ReleaseInfo release) => NewerAvailable;
 
-        public Task<string?> DownloadUpdateAsync(ReleaseInfo release, IProgress<int>? progress) =>
+        public Task<string?> DownloadUpdateAsync(
+            ReleaseInfo release, IProgress<int>? progress, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
         public bool VerifyDownloadedPackage() => throw new NotSupportedException();

@@ -6,6 +6,7 @@ internal enum LlmRuntimePollOutcome
     Waiting,
     Completed,
     Failed,
+    Cancelled,
     Superseded,
 }
 
@@ -22,8 +23,17 @@ internal static class LlmRuntimePoll
     internal static LlmRuntimePollOutcome Evaluate(LlmRuntimeStatusInfo status, long attempt = 0)
     {
         if (attempt > 0 && status.Attempt != attempt) return LlmRuntimePollOutcome.Superseded;
-        if (status.DownloadFailed) return LlmRuntimePollOutcome.Failed;
-        if (status.Downloading) return LlmRuntimePollOutcome.Waiting;
+        if (status.DownloadFailed || status.AttemptState == LlmRuntimeAttemptState.Failed)
+            return LlmRuntimePollOutcome.Failed;
+        if (status.AttemptState == LlmRuntimeAttemptState.Cancelled) return LlmRuntimePollOutcome.Cancelled;
+        if (status.Downloading || status.AttemptState == LlmRuntimeAttemptState.Running)
+            return LlmRuntimePollOutcome.Waiting;
+        if (attempt > 0)
+        {
+            return status.AttemptState == LlmRuntimeAttemptState.Succeeded && status.Installed
+                ? LlmRuntimePollOutcome.Completed
+                : LlmRuntimePollOutcome.Waiting;
+        }
         return status.Installed ? LlmRuntimePollOutcome.Completed : LlmRuntimePollOutcome.Waiting;
     }
 }

@@ -421,10 +421,12 @@ public static class SystemCheck
     }
 
     /// <summary>
-    /// Counts entries of the official-models directory (0 when missing or unreadable) — the same
-    /// existence notion <see cref="SetupState.NeedsSetup"/> uses.
-    /// Đếm entry của thư mục official_models (0 khi thiếu hoặc không đọc được) — cùng định nghĩa tồn
-    /// tại mà <see cref="SetupState.NeedsSetup"/> dùng.
+    /// Counts entries of the official-models directory (0 when missing or unreadable) for the coarse
+    /// system-check cache row. Setup completion and repair do not use this count: they validate every
+    /// selected model directory and reject incomplete <c>.partial</c> artifacts instead.
+    /// Đếm entry của thư mục official_models (0 khi thiếu hoặc không đọc được) cho dòng kiểm tra cache
+    /// tổng quát. Điều kiện hoàn tất và repair của Setup không dùng số này: chúng kiểm tra từng thư mục
+    /// model đã chọn và loại artifact <c>.partial</c> chưa hoàn chỉnh.
     /// </summary>
     private static int DefaultCountModelEntries(string dir)
     {

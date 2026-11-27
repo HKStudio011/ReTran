@@ -3,12 +3,9 @@ import '../css/style.css';
 export {
   applyTheme,
   applyColor,
-  applyAccent,
   setTheme,
   setColor,
-  setAccent,
   getThemeSetting,
-  getAccent,
   toggleTheme,
   initTheme,
 } from './theme-manager'

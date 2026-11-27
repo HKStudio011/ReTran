@@ -11,6 +11,12 @@ public interface ILlamaServerHost : IDisposable
     string BaseUrl { get; }
 
     /// <summary>
+    /// Current model-loading phase and nullable IO measurements.
+    /// Giai đoạn nạp model hiện tại và các số liệu IO có thể null.
+    /// </summary>
+    LlmLoadProgressSnapshot LoadProgress { get; }
+
+    /// <summary>
     /// Ensures the process is running and healthy before translation.
     /// Đảm bảo tiến trình đang chạy và khỏe trước khi dịch.
     /// </summary>

@@ -536,3 +536,49 @@ Before completing a task, verify that:
 ## Agent Infrastructure
 
 - **CodeGraph** (`codegraph_explore`): structural queries — call what, define where, blast radius
+
+## Agent Tooling & Skill Usage
+
+Các công cụ/skill dưới đây đã được cài sẵn trong môi trường OpenCode. Chọn đúng công cụ cho loại công việc; không chạy chồng nhiều quy trình chính cho cùng một deliverable.
+
+### Superpowers (OpenCode plugin)
+
+- Dùng process skill trước khi hành động: `brainstorming` cho tính năng/thiết kế mới, `systematic-debugging` cho bug, `test-driven-development` khi triển khai/sửa behavior, `writing-plans` cho implementation plan nhiều bước và `verification-before-completion` trước khi tuyên bố hoàn tất.
+- Với thay đổi lớn gồm nhiều task, dùng `subagent-driven-development`: mỗi task có implementer và reviewer riêng, cuối cùng có whole-branch review.
+- Đọc và làm theo skill hiện hành thay vì dựa vào trí nhớ. Nếu user chọn một workflow cụ thể, ưu tiên workflow đó; các skill khác chỉ bổ trợ khi không tạo trùng lặp.
+
+### SpecKit (OpenCode commands)
+
+- Dùng SpecKit khi cần quy trình spec-driven từ đầu: `constitution → specify → clarify → plan → tasks → analyze → implement`.
+- Không chạy song song một SpecKit plan và một Superpowers implementation plan cho cùng deliverable. Nếu một plan đã được duyệt, giữ plan đó và chỉ dùng công cụ còn lại cho phần bổ trợ phù hợp (ví dụ review hoặc phân tích độc lập).
+
+### CodeGraph (đã cài sẵn)
+
+- Khi repo có `.codegraph/`, dùng `codegraph_explore` trước grep/read để tìm symbol, đọc source theo ngữ cảnh, truy call path và đánh giá blast radius trước khi sửa.
+- Nếu không có index, bỏ qua CodeGraph và dùng công cụ tìm kiếm thông thường; không tự `codegraph init` khi user chưa yêu cầu.
+- Có thể dùng shell `codegraph explore "<symbol hoặc câu hỏi>"` khi không gọi được MCP tool.
+
+### OpenCodeReview / OCR delegate (đã cài sẵn)
+
+- Khi user yêu cầu **OCR delegate**, dùng đúng chuỗi host-agent delegation, không cần LLM endpoint:
+  1. `ocr delegate preview --from <base-ref> --to <target-ref> --background-file <requirements.md> --format json` để lấy metadata/phạm vi.
+  2. `ocr delegate rule --from <base-ref> --to <target-ref> --background-file <requirements.md> --format json <paths...>` để lấy review spec theo nhóm nội dung.
+  3. Host agent (session chính hoặc subagent được dispatch) đọc rule JSON và review theo spec đó; không phải review tự do.
+- Chỉ dùng `ocr_review` hoặc `ocr scan` khi workflow cần LLM trực tiếp. Dùng `ocr_health` để kiểm tra cấu hình và `preview=true` để xem phạm vi trước khi review commit/range.
+- Nếu thiếu endpoint, báo đúng blocker cho các workflow cần LLM; không cấu hình credential khi chưa được phép và không tuyên bố OCR đã chạy thành công.
+- Review thủ công không theo `ocr delegate rule` không được gắn nhãn là OCR delegate.
+
+### `security-audit` skill
+
+- Dùng cho security review, vulnerability research, audit hoặc penetration test rõ ràng; không dùng thay cho debugging thông thường.
+- Chỉ chạy full security-audit workflow khi user yêu cầu audit/pen-test/full review hoặc yêu cầu report artifact. Không tự mở rộng sang quét hệ thống hoặc cài công cụ.
+
+### `frontend-design` skill
+
+- Dùng khi tạo UI mới hoặc thay đổi đáng kể visual direction: typography, spacing, color, component identity và tính nhất quán của giao diện.
+- Dùng sau process skill phù hợp (brainstorming/debugging/plan). Không biến giao diện thành template mới nếu task chỉ sửa behavior hoặc giữ style hiện có.
+
+### Visual Companion (Superpowers `brainstorming`)
+
+- Dùng khi mockup/diagram giúp user quyết định nhanh hơn text: layout, flow, side-by-side designs hoặc prototype.
+- Đề xuất đúng lúc cần trực quan, không bắt buộc cho mọi UI task. Requirements, scope và tradeoffs vẫn chốt bằng text; user từ chối thì tiếp tục bằng text sketch và không đề xuất lại trừ khi user chủ động nêu.

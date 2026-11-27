@@ -1,9 +1,33 @@
 using System.IO.Compression;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 using ReTran.Core.JsonRpc;
 
 namespace ReTran.Core.Llm;
+
+/// <summary>
+/// Terminal or active state of the latest registered runtime download attempt.
+/// Trạng thái đang chạy hoặc kết thúc của lượt tải runtime mới nhất đã đăng ký.
+/// </summary>
+[JsonConverter(typeof(JsonStringEnumConverter<LlmRuntimeAttemptState>))]
+public enum LlmRuntimeAttemptState
+{
+    /// <summary>No download attempt has been registered. Chưa có lượt tải nào được đăng ký.</summary>
+    None,
+
+    /// <summary>The attempt is queued, downloading, extracting, or committing. Lượt tải đang xếp hàng, tải, giải nén hoặc commit.</summary>
+    Running,
+
+    /// <summary>The attempt committed a verified server binary. Lượt tải đã commit một server binary được xác minh.</summary>
+    Succeeded,
+
+    /// <summary>The attempt ended with an error. Lượt tải kết thúc với lỗi.</summary>
+    Failed,
+
+    /// <summary>The caller cancelled the attempt. Caller đã hủy lượt tải.</summary>
+    Cancelled,
+}
 
 /// <summary>
 /// Installed state of the llama.cpp runtime: the tag of the extracted build, whether the server
@@ -23,9 +47,10 @@ public sealed record LlmRuntimeStatus(string? Tag, bool Installed, string? Serve
     public LlmDownloadProgress? Progress { get; init; }
 
     /// <summary>
-    /// The last download attempt failed permanently (no matching release / dead network) — the wizard
-    /// fails the attempt fast instead of polling its full window. Lượt tải gần nhất fail vĩnh viễn
-    /// (không có release khớp / mạng chết) — wizard fail nhanh thay vì poll đủ cửa sổ.
+    /// The latest download attempt failed (no matching release, network error, HTTP timeout, or invalid
+    /// artifact) — the wizard fails the attempt fast instead of polling its full window. Lượt tải mới
+    /// nhất đã fail (không có release khớp, lỗi mạng, HTTP timeout hoặc artifact không hợp lệ) — wizard
+    /// fail nhanh thay vì poll đủ cửa sổ.
     /// </summary>
     public bool DownloadFailed { get; init; }
 
@@ -47,6 +72,9 @@ public sealed record LlmRuntimeStatus(string? Tag, bool Installed, string? Serve
 
     /// <summary>Latest registered download attempt ID; 0 before the first download. ID lượt tải gần nhất được đăng ký; 0 trước lượt đầu.</summary>
     public long Attempt { get; init; }
+
+    /// <summary>State of <see cref="Attempt"/>, serialized by name over JSON-RPC. Trạng thái của <see cref="Attempt"/>, được serialize theo tên qua JSON-RPC.</summary>
+    public LlmRuntimeAttemptState AttemptState { get; init; }
 }
 
 /// <summary>
@@ -69,10 +97,12 @@ public sealed record LlmRuntimeDownload(long Attempt, Task Task);
 /// <param name="rootDir">Directory holding <c>&lt;tag&gt;/</c> build folders and <c>runtime.json</c>. Thư mục chứa các bản build theo tag và <c>runtime.json</c>.</param>
 /// <param name="github">HTTP client for the GitHub API and asset downloads. HTTP client cho GitHub API và tải asset.</param>
 /// <param name="downloader">Optional (uri, targetPath) downloader; tests inject a fake. Hàm tải tuỳ chọn (uri, đường dẫn đích); test inject bản giả.</param>
+/// <param name="errorWriter">Optional failure sink supplied by the host; null discards diagnostics. Sink lỗi tùy chọn do host cung cấp; null bỏ qua diagnostic.</param>
 public sealed class LlamaRuntimeManager(
     string rootDir,
     HttpClient github,
-    Func<Uri, string, CancellationToken, Task>? downloader = null)
+    Func<Uri, string, CancellationToken, Task>? downloader = null,
+    TextWriter? errorWriter = null)
 {
     /// <summary>GitHub releases endpoint scanned for Windows build assets. Endpoint releases GitHub quét để tìm asset bản Windows.</summary>
     public static readonly string ReleasesUrl =
@@ -80,6 +110,7 @@ public sealed class LlamaRuntimeManager(
 
     private readonly string _rootDir = rootDir ?? throw new ArgumentNullException(nameof(rootDir));
     private readonly HttpClient _github = github ?? throw new ArgumentNullException(nameof(github));
+    private readonly TextWriter _errorWriter = errorWriter ?? TextWriter.Null;
 
     // Resolved at use: the default downloader reports progress, so it must be an instance method (a
     // field initializer cannot reference one). Giải quyết lúc dùng: downloader mặc định báo tiến độ
@@ -94,7 +125,7 @@ public sealed class LlamaRuntimeManager(
     // Trạng thái attempt được đăng ký đồng bộ trước khi StartDownload trả về, kể cả lượt đang xếp hàng.
     private readonly object _attemptLock = new();
     private long _attempt;
-    private long? _failedAttempt;
+    private LlmRuntimeAttemptState _attemptState;
     private string? _downloadError;
     private bool _downloading;
 
@@ -154,14 +185,16 @@ public sealed class LlamaRuntimeManager(
             ? Path.Combine(_rootDir, activeFlavor, tag, "llama-server.exe")
             : null;
         long attempt;
+        LlmRuntimeAttemptState attemptState;
         bool downloading;
         bool downloadFailed;
         string? downloadError;
         lock (_attemptLock)
         {
             attempt = _attempt;
+            attemptState = _attemptState;
             downloading = _downloading;
-            downloadFailed = _failedAttempt == _attempt;
+            downloadFailed = _attemptState == LlmRuntimeAttemptState.Failed;
             downloadError = downloadFailed ? _downloadError : null;
         }
         bool installed = serverPath is not null && File.Exists(serverPath) && !downloading;
@@ -178,6 +211,7 @@ public sealed class LlamaRuntimeManager(
             Downloading = downloading,
             Flavor = activeFlavor,
             Attempt = attempt,
+            AttemptState = attemptState,
         });
     }
 
@@ -211,6 +245,7 @@ public sealed class LlamaRuntimeManager(
     /// <param name="ct">Token used to cancel the download. Token dùng để hủy tải.</param>
     /// <exception cref="RpcMethodException">Thrown for an unknown flavor (-32602). Khi flavor lạ (-32602).</exception>
     /// <exception cref="InvalidOperationException">Thrown when no release carries a matching asset. Khi không release nào có asset khớp.</exception>
+    /// <exception cref="InvalidDataException">Thrown when the extracted build has no final <c>llama-server.exe</c>. Khi bản giải nén không có <c>llama-server.exe</c> ở thư mục final.</exception>
     public Task DownloadAsync(string flavor, CancellationToken ct) => StartDownload(flavor, ct).Task;
 
     /// <summary>
@@ -221,6 +256,7 @@ public sealed class LlamaRuntimeManager(
     /// <param name="ct">Token used to cancel the download. Token dùng để hủy tải.</param>
     /// <returns>The attempt ID and its completion task. ID attempt và task hoàn tất của nó.</returns>
     /// <exception cref="RpcMethodException">Thrown for an unknown flavor (-32602). Ném khi flavor lạ (-32602).</exception>
+    /// <exception cref="InvalidDataException">The completion task faults when the extracted build has no final <c>llama-server.exe</c>. Task hoàn tất fault khi bản giải nén không có <c>llama-server.exe</c> ở thư mục final.</exception>
     public LlmRuntimeDownload StartDownload(string flavor, CancellationToken ct)
     {
         _ = FlavorPattern(flavor);
@@ -228,6 +264,7 @@ public sealed class LlamaRuntimeManager(
         lock (_attemptLock)
         {
             attempt = ++_attempt;
+            _attemptState = LlmRuntimeAttemptState.Running;
             _downloadError = null;
             _downloading = true;
         }
@@ -263,10 +300,42 @@ public sealed class LlamaRuntimeManager(
             {
                 TryDeleteDirectory(stagingDir);
             }
+            lock (_attemptLock)
+            {
+                if (_attempt == attempt)
+                {
+                    _attemptState = LlmRuntimeAttemptState.Succeeded;
+                    _downloadError = null;
+                }
+            }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            throw; // user/timeout cancellation is surfaced by the poll window, not the flag / hủy do cửa sổ poll, không phải flag
+            lock (_attemptLock)
+            {
+                if (_attempt == attempt)
+                {
+                    _attemptState = LlmRuntimeAttemptState.Cancelled;
+                    _downloadError = null;
+                }
+            }
+            throw;
+        }
+        catch (OperationCanceledException ex)
+        {
+            // HttpClient timeout also surfaces as TaskCanceledException; only the caller token means
+            // intentional cancellation. HttpClient timeout cũng ném TaskCanceledException; chỉ token
+            // của caller mới biểu thị hủy chủ động.
+            lock (_attemptLock)
+            {
+                if (_attempt == attempt)
+                {
+                    _attemptState = LlmRuntimeAttemptState.Failed;
+                    _downloadError = ex.Message;
+                }
+            }
+            _errorWriter.WriteLine($"llm.runtime.download failed for '{flavor}': {ex.Message}");
+            throw;
         }
         catch (Exception ex)
         {
@@ -276,10 +345,13 @@ public sealed class LlamaRuntimeManager(
             // lỗi của attempt khác. Caller trực tiếp vẫn nhận exception như cũ.
             lock (_attemptLock)
             {
-                _failedAttempt = attempt;
-                _downloadError = ex.Message;
+                if (_attempt == attempt)
+                {
+                    _attemptState = LlmRuntimeAttemptState.Failed;
+                    _downloadError = ex.Message;
+                }
             }
-            Console.Error.WriteLine($"llm.runtime.download failed for '{flavor}': {ex.Message}");
+            _errorWriter.WriteLine($"llm.runtime.download failed for '{flavor}': {ex.Message}");
             throw;
         }
         finally
@@ -342,6 +414,12 @@ public sealed class LlamaRuntimeManager(
             }
             Directory.Move(stagingDir, finalDir);
             newMoved = true;
+            string serverPath = Path.Combine(finalDir, "llama-server.exe");
+            if (!File.Exists(serverPath))
+            {
+                throw new InvalidDataException(
+                    $"The downloaded llama.cpp runtime does not contain llama-server.exe: {finalDir}");
+            }
             WriteState(tag, flavor);
         }
         catch

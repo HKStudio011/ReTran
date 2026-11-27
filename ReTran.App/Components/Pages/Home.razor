@@ -522,6 +522,11 @@
             await Pipeline.StartAsync(BuildSelection(), CancellationToken.None);
             _pipelineState = "running";
         }
+        catch (OperationCanceledException)
+        {
+            // Hủy từ popup là kết thúc bình thường; rollback đã xong và không có lỗi để hiển thị.
+            _pipelineState = "stopped";
+        }
         catch (Exception ex)
         {
             // Cặp model OCR chưa tải — bật notice first-run dẫn tới mục Model OCR trong Cài đặt.
@@ -598,7 +603,7 @@
     {
         try
         {
-            SettingsStore.Save(SettingsStore.Load() with { Dst = _quickDst });
+            SettingsStore.Update(current => current with { Dst = _quickDst });
         }
         catch (Exception)
         {

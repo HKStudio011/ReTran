@@ -81,6 +81,9 @@
     @* Modal setup chạy lần đầu — tự trigger trong OnInitialized, render rỗng khi wizard đã xong (spec §5.9) *@
     <SetupModal />
 
+    @* Start local LLM từ Home hoặc floating menu đều đi qua cùng concrete controller. *@
+    <LlmStartupModal Pipeline="Pipeline" />
+
     @* Toast stack: fixed góc dưới phải, z-index cao để nổi trên nội dung *@
     <div class="rt-toasts" aria-live="polite">
         @foreach (var toast in _toasts)

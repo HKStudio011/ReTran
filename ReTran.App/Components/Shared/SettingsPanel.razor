@@ -19,288 +19,48 @@
 
 <section class="rt-sect">
     <h3>@(L["deck.settings.section.provider"])</h3>
-    <div class="rt-srow">
-        <span>@(L["deck.settings.provider"])</span>
-        <div class="rt-select">
-            <select @bind="_model.Provider" aria-label="@(L["deck.settings.provider"])">
-                <option value="google">@(L["settings.provider.google"])</option>
-                <option value="deepl" disabled>@(L["settings.provider.deepl"]) (@(L["settings.opt.comingSoon"]))</option>
-                <option value="llm">@(L["settings.provider.llm"])</option>
-            </select>
-            <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
-        </div>
-    </div>
-    @* Ô API key ở đây phục vụ DeepL; LLM API có ô key riêng trong mục LLM (plan 2026-11-14). *@
-    <div class="rt-srow">
-        <span>@(L["deck.settings.apiKey"])</span>
-        <input type="text" class="rt-input" @bind="_model.ApiKey" disabled="@(_model.Provider != "deepl")"
-               placeholder="@(L["deck.settings.apiKeyHint"])" aria-label="@(L["deck.settings.apiKey"])" />
-    </div>
-</section>
-
-<section class="rt-sect">
-    <h3>@(L["deck.settings.section.lang"])</h3>
-    <div class="rt-srow">
-        <span>@(L["deck.settings.src"])</span>
-        <div class="rt-select">
-            <select @bind="_model.Src" aria-label="@(L["deck.settings.src"])">
-                @foreach (string lang in _srcOptions)
-                {
-                    <option value="@lang">@(lang == "auto" ? L["settings.opt.auto"] : I18nStrings.LanguageName(lang))</option>
-                }
-            </select>
-            <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
-        </div>
-    </div>
-    <div class="rt-srow">
-        <span>@(L["deck.settings.dst"])</span>
-        <div class="rt-select">
-            <select @bind="_model.Dst" aria-label="@(L["deck.settings.dst"])">
-                @foreach (string lang in _dstOptions)
-                {
-                    <option value="@lang">@(I18nStrings.LanguageName(lang))</option>
-                }
-            </select>
-            <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
-        </div>
-    </div>
-    <p class="rt-hint">@(L["settings.note.srcNextStart"])</p>
-</section>
-
-<section class="rt-sect">
-    <h3>@(L["deck.settings.section.ocr"])</h3>
-    @if (_ocrModels is null || _ocrModels.Count == 0)
-    {
-        <p class="rt-hint">@(_ocrLoadFailed ? L["deck.ocr.loadFailed"] : _ocrModels is null ? L["deck.ocr.loading"] : L["deck.ocr.empty"])</p>
-        @if (_ocrModels is not null || _ocrLoadFailed)
-        {
-            <button type="button" class="rt-btn rt-mini" style="margin-top: 6px;" disabled="@_ocrBusy" @onclick="ReloadOcrModelsAsync">@(L["deck.ocr.refresh"])</button>
-        }
-    }
-    else
-    {
+    <div class="rt-settings-group">
+        <h4 class="rt-group-title">@(L["deck.settings.group.provider"])</h4>
         <div class="rt-srow">
-            <span>@(L["deck.settings.ocr.det"])</span>
+            <span>@(L["deck.settings.provider"])</span>
             <div class="rt-select">
-                <select @bind="_ocrDetPick" aria-label="@(L["deck.settings.ocr.det"])">
-                    @foreach (OcrModelInfo m in _ocrModels.Where(m => m.Kind == "det"))
+                <select @bind="_model.Provider" aria-label="@(L["deck.settings.provider"])">
+                    <option value="google">@(L["settings.provider.google"])</option>
+                    <option value="llm">@(L["settings.provider.llm"])</option>
+                </select>
+                <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+            </div>
+        </div>
+        <div class="rt-srow">
+            <span>@(L["deck.settings.src"])</span>
+            <div class="rt-select">
+                <select @bind="_model.Src" aria-label="@(L["deck.settings.src"])">
+                    @foreach (string lang in _srcOptions)
                     {
-                        <option value="@m.Name">@m.Name</option>
+                        <option value="@lang">@(lang == "auto" ? L["settings.opt.auto"] : I18nStrings.LanguageName(lang))</option>
                     }
                 </select>
                 <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
             </div>
         </div>
         <div class="rt-srow">
-            <span>@(L["deck.settings.ocr.rec"])</span>
+            <span>@(L["deck.settings.dst"])</span>
             <div class="rt-select">
-                <select @bind="_ocrRecPick" aria-label="@(L["deck.settings.ocr.rec"])">
-                    @foreach (OcrModelInfo m in _ocrModels.Where(m => m.Kind == "rec"))
+                <select @bind="_model.Dst" aria-label="@(L["deck.settings.dst"])">
+                    @foreach (string lang in _dstOptions)
                     {
-                        <option value="@m.Name">@m.Name</option>
+                        <option value="@lang">@(I18nStrings.LanguageName(lang))</option>
                     }
                 </select>
                 <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
             </div>
         </div>
-        @if (OcrSrcNotCovered is { } src)
-        {
-            <p class="rt-hint" style="color: var(--rt-danger); margin: 0 0 8px;">@(L.Fmt("deck.ocr.srcNotCovered", src))</p>
-        }
-        <div class="rt-field-row" style="flex-wrap: wrap; gap: 10px; margin-bottom: 8px;">
-            <button type="button" class="rt-btn rt-btn-primary rt-mini" disabled="@_ocrBusy" @onclick="SaveOcrPairAsync">@(L["deck.ocr.savePair"])</button>
-            <button type="button" class="rt-btn rt-mini" disabled="@_ocrBusy" @onclick="ReloadOcrModelsAsync">@(L["deck.ocr.refresh"])</button>
-        </div>
-        <p class="rt-hint" style="margin-bottom: 10px;">@OcrActivePairText @(L["deck.ocr.downloadHint"])</p>
-        <table class="rt-model-table">
-            <thead>
-                <tr style="color: var(--rt-dim); text-align: left;">
-                    <th style="font-weight: 500; padding: 4px 8px 4px 0;">@(L["deck.ocr.col.model"])</th>
-                    <th style="font-weight: 500; padding: 4px 8px;">@(L["deck.ocr.col.status"])</th>
-                    <th style="font-weight: 500; padding: 4px 0; text-align: right;">@(L["deck.ocr.col.actions"])</th>
-                </tr>
-            </thead>
-            <tbody>
-                @* Nhóm bảng theo vai trò (spec 17-11 §11): họ OCR v6, rec legacy (Ngôn ngữ), còn lại Khác. *@
-                @foreach ((string groupKey, List<OcrModelInfo> group) in OcrTableGroups())
-                {
-                    <tr>
-                        <td colspan="3" class="rt-model-group">@(L[groupKey])</td>
-                    </tr>
-                    @foreach (OcrModelInfo m in group)
-                    {
-                        <tr style="border-top: 1px solid var(--rt-line);">
-                            <td style="padding: 6px 8px 6px 0; vertical-align: top;">
-                                <div class="rt-mono">@m.Name</div>
-                                <div class="rt-hint">@OcrMetaText(m)</div>
-                            </td>
-                            <td style="padding: 6px 8px; vertical-align: top;">
-                                @if (m.Downloading)
-                                {
-                                    <span class="rt-hint">@OcrProgressText(m)</span>
-                                }
-                                else
-                                {
-                                    <span class="rt-hint" style="@(m.Installed ? "" : "color: var(--rt-danger)")">@(m.Installed ? L["deck.ocr.installed"] : L["deck.ocr.notInstalled"])</span>
-                                }
-                                @if (m.InUse)
-                                {
-                                    <span class="rt-hint" style="color: var(--rt-tally)">· @(L["deck.ocr.inUse"])</span>
-                                }
-                                @if (!string.IsNullOrWhiteSpace(m.DownloadError))
-                                {
-                                    <div class="rt-hint" style="color: var(--rt-danger); white-space: normal;">@(L.Fmt("deck.ocr.downloadFailed", m.DownloadError))</div>
-                                }
-                            </td>
-                            <td style="padding: 6px 0; text-align: right; vertical-align: top; white-space: nowrap;">
-                                <button type="button" class="rt-btn rt-mini" disabled="@(m.Installed || m.Downloading || _ocrBusy)" @onclick="() => DownloadOcrModelAsync(m)">@(L["deck.ocr.download"])</button>
-                                <button type="button" class="rt-btn rt-mini" disabled="@(m.InUse || !m.Installed || _ocrBusy)" @onclick="() => DeleteOcrModelAsync(m)">@(L["deck.ocr.delete"])</button>
-                            </td>
-                        </tr>
-                    }
-                }
-            </tbody>
-        </table>
-    }
+        <p class="rt-hint">@(L["settings.note.srcNextStart"])</p>
+    </div>
 
-    @* Tham số máy OCR: render động từ schema sidecar (spec §8) — nhãn/hint/tip i18n theo key. *@
-    @if (_ocrSchema is null)
-    {
-        <p class="rt-hint" style="margin-top: 12px;">@(_ocrSchemaFailed ? L["deck.ocr.params.loadFailed"] : L["deck.ocr.loading"])</p>
-        @if (_ocrSchemaFailed)
-        {
-            <button type="button" class="rt-btn rt-mini" style="margin-top: 6px;" disabled="@_ocrParamsBusy" @onclick="ReloadOcrSchemaAsync">@(L["deck.ocr.refresh"])</button>
-        }
-    }
-    else
-    {
-        <h4 class="rt-hint" style="margin: 12px 0 6px;">@(L["deck.ocr.params.title"])</h4>
-        @if (_ocrSchemaFailed)
-        {
-            <p class="rt-hint" style="color: var(--rt-danger);">@(L["deck.ocr.params.loadFailed"])</p>
-        }
-        @foreach (IGrouping<string, OcrParamSpec> group in _ocrSchema.GroupBy(p => p.Group))
-        {
-            <details open="@(group.Key is not ("device" or "models"))"
-                     class="rt-subcard" style="margin-bottom: 8px;">
-                <summary style="cursor: pointer; font-size: 11.5px; color: var(--rt-dim); letter-spacing: .02em;">@(L["ocr.group." + group.Key])</summary>
-                <div style="margin-top: 10px;">
-                    @foreach (OcrParamSpec p in group)
-                    {
-                        string label = L["ocr.param." + p.Key + ".label"];
-                        <div class="rt-srow" title="@(L["ocr.param." + p.Key + ".tip"])">
-                            <span>@label</span>
-                            @if (p.Type == "bool")
-                            {
-                                <input type="checkbox" @bind="_ocrBool[p.Key]" aria-label="@label" />
-                            }
-                            else if (p.Type == "enum")
-                            {
-                                <div class="rt-select">
-                                    <select @bind="_ocrText[p.Key]" aria-label="@label">
-                                        @if (p.Default is null)
-                                        {
-                                            <option value="">@(L["settings.opt.auto"])</option>
-                                        }
-                                        @foreach (string option in p.Values)
-                                        {
-                                            <option value="@option">@option</option>
-                                        }
-                                    </select>
-                                    <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
-                                </div>
-                            }
-                            else if (p.Type == "json")
-                            {
-                                <textarea class="rt-input rt-mono" rows="3"
-                                          style="height: auto; min-height: 68px; padding: 7px 10px; resize: vertical; line-height: 1.4;"
-                                          placeholder="@OcrPlaceholder(p)" @bind="_ocrText[p.Key]" @bind:event="oninput"
-                                          aria-label="@label" aria-invalid="@(_ocrFieldErrors.ContainsKey(p.Key))"></textarea>
-                            }
-                            else if (p.Type is "int" or "float")
-                            {
-                                <input type="number" class="rt-input rt-mono"
-                                       min="@FormatBound(p.Min)" max="@FormatBound(p.Max)" step="@FormatBound(p.Step)"
-                                       placeholder="@OcrPlaceholder(p)" @bind="_ocrText[p.Key]" aria-label="@label" />
-                            }
-                            else
-                            {
-                                <input type="text" class="rt-input" placeholder="@OcrPlaceholder(p)"
-                                       @bind="_ocrText[p.Key]" aria-label="@label" />
-                            }
-                            <p class="rt-hint">@(L["ocr.param." + p.Key + ".hint"])</p>
-                            @if (_ocrFieldErrors.TryGetValue(p.Key, out string? fieldError))
-                            {
-                                <p class="rt-hint" style="color: var(--rt-danger);">@(L["ocr.param.error." + fieldError])</p>
-                            }
-                        </div>
-                    }
-                </div>
-            </details>
-        }
-        @* Nhịp OCR: 2 tham số pipeline (không thuộc schema sidecar), chỉ áp dụng ở core.start kế tiếp. *@
-        <details open="true"
-                 class="rt-subcard" style="margin-bottom: 8px;">
-            <summary style="cursor: pointer; font-size: 11.5px; color: var(--rt-dim); letter-spacing: .02em;">@(L["ocr.group.rhythm"])</summary>
-            <div style="margin-top: 10px;">
-                <div class="rt-srow">
-                    <span>@(L["deck.ocr.rhythm.ocrFps"])</span>
-                    <input type="number" class="rt-input rt-mono" min="1" max="60" step="1"
-                           aria-label="@(L["deck.ocr.rhythm.ocrFps"])" @bind="_ocrFpsText" />
-                </div>
-                <div class="rt-srow">
-                    <span>@(L["deck.ocr.rhythm.captureFps"])</span>
-                    <input type="number" class="rt-input rt-mono" min="1" max="60" step="1"
-                           aria-label="@(L["deck.ocr.rhythm.captureFps"])" @bind="_captureFpsText" />
-                </div>
-                <p class="rt-hint">@(L["deck.ocr.rhythm.note"])</p>
-            </div>
-        </details>
-        <div class="rt-srow">
-            <span>@(L["deck.ocr.mergeLines.label"])</span>
-            <input type="checkbox" @bind="_mergeLines" aria-label="@L["deck.ocr.mergeLines.label"]" />
-            <p class="rt-hint">@(L["deck.ocr.mergeLines.hint"])</p>
-        </div>
-        @* Ba ngưỡng gộp dòng: chỉ nhập được khi Gộp nhiều dòng đang bật; giá trị vẫn được lưu
-           kể cả khi tắt (hành vi như hôm nay). type="text" + inputmode có chủ đích — ô number
-           không nhận dạng dấu phẩy thập phân ("0,6") mà TryParseRatio chấp nhận. *@
-        <div class="rt-srow rt-srow--num">
-            <span>@(L["deck.ocr.mergeGap.label"])</span>
-            <input type="text" class="rt-input rt-mono" inputmode="decimal"
-                   aria-label="@(L["deck.ocr.mergeGap.label"])"
-                   disabled="@(!_mergeLines)" @bind="_mergeGapText" />
-            <p class="rt-hint">@(L["deck.ocr.mergeGap.hint"])</p>
-        </div>
-        <div class="rt-srow rt-srow--num">
-            <span>@(L["deck.ocr.mergeHeight.label"])</span>
-            <input type="text" class="rt-input rt-mono" inputmode="decimal"
-                   aria-label="@(L["deck.ocr.mergeHeight.label"])"
-                   disabled="@(!_mergeLines)" @bind="_mergeHeightText" />
-            <p class="rt-hint">@(L["deck.ocr.mergeHeight.hint"])</p>
-        </div>
-        <div class="rt-srow rt-srow--num">
-            <span>@(L["deck.ocr.mergeOverlap.label"])</span>
-            <input type="text" class="rt-input rt-mono" inputmode="decimal"
-                   aria-label="@(L["deck.ocr.mergeOverlap.label"])"
-                   disabled="@(!_mergeLines)" @bind="_mergeOverlapText" />
-            <p class="rt-hint">@(L["deck.ocr.mergeOverlap.hint"])</p>
-        </div>
-        <div class="rt-field-row" style="flex-wrap: wrap; gap: 10px; margin-top: 10px; position: sticky; bottom: 0; z-index: 1; background: var(--rt-panel); padding: 8px 0; border-top: 1px solid var(--rt-line);">
-            <button type="button" class="rt-btn rt-btn-primary" disabled="@(_ocrParamsBusy || !SettingsPanelSync.CanSaveOcrParams(_ocrSchema, _ocrSchemaFailed))" @onclick="SaveOcrParamsAsync">@(L["deck.ocr.params.save"])</button>
-            <button type="button" class="rt-btn rt-mini" disabled="@(_ocrParamsBusy || !SettingsPanelSync.CanSaveOcrParams(_ocrSchema, _ocrSchemaFailed))" @onclick="RestoreOcrParamsAsync">@(L["deck.ocr.params.restore"])</button>
-            @if (_ocrStatusText.Length > 0)
-            {
-                <span class="rt-hint" style="@(_ocrStatusError ? "color: var(--rt-danger)" : "")">@_ocrStatusText</span>
-            }
-        </div>
-    }
-</section>
-
-@* Mục LLM (spec 2026-11-14 D9/D10): mode Local/API, quản lý runtime llama.cpp + model GGUF
-   (mirror mục OCR), khối prompt system/user với mặc định Hy-MT2 hiển thị khi chưa ghi đè.
-   Mọi thứ lưu settings.json và áp từ lần Start kế tiếp (pattern OCR). *@
-<section class="rt-sect">
-    <h3>@(L["deck.settings.section.llm"])</h3>
+    @* LLM là nhóm con của cùng cấu hình dịch: mode Local/API, runtime/models và prompts. *@
+    <div class="rt-settings-group">
+        <h4 class="rt-group-title">@(L["deck.settings.group.llm"])</h4>
     <div class="rt-srow">
         <span>@(L["deck.llm.mode"])</span>
         <div class="rt-seg" role="group" aria-label="@(L["deck.llm.mode"])">
@@ -315,7 +75,7 @@
         <div class="rt-srow">
             <span>@(L["deck.llm.runtime.title"])</span>
             <div class="rt-select">
-                <select value="@_llmFlavor" @onchange="OnLlmFlavorChanged" aria-label="@(L["deck.llm.runtime.flavor"])">
+                <select value="@_llmFlavor" @onchange="OnLlmFlavorChanged" disabled="@_llmRuntimeBusy" aria-label="@(L["deck.llm.runtime.flavor"])">
                     <option value="cuda">@(L["deck.llm.runtime.flavor.cuda"])</option>
                     <option value="cpu">@(L["deck.llm.runtime.flavor.cpu"])</option>
                 </select>
@@ -453,23 +213,254 @@
             <p class="rt-hint">@(L["deck.llm.prompt.placeholders"])</p>
         </div>
     </details>
-    <p class="rt-hint" style="margin-top: 10px;">@(L["deck.llm.note.nextStart"])</p>
+        <p class="rt-hint" style="margin-top: 10px;">@(L["deck.llm.note.nextStart"])</p>
+    </div>
+    <div class="rt-actionbar">
+        <button type="button" class="rt-btn rt-btn-primary" @onclick="Save">@(L["settings.btn.saveTranslation"])</button>
+        @if (StatusText.Length > 0)
+        {
+            <span class="rt-hint" style="@(_statusKind == "saved" ? "" : "color: var(--rt-danger)")">@StatusText</span>
+        }
+        <span class="rt-hint">@(L["settings.note.saveScope"])</span>
+    </div>
 </section>
 
-@* "Chạy lại setup" (smoke #8 / BA 17-11): luôn có trong Cài đặt — đây là đường SỬA LỖI chạy lại
-   TỪ BƯỚC 1: xoá câu trả lời + marker, hỏi lại cả 3 màn, pipeline xác minh lại; model đã cài thật
-   vẫn không tải lại. Điều kiện cũ (chỉ hiện khi wizard đã xong / đã bỏ qua phiên) đã bị bỏ: máy
-   có isComplete=false vì một bước fail (vd llama.cpp) sẽ MẤT nút — đúng kịch bản user báo 17-11.
-   Nút tự disable trong lúc một lượt chạy đang diễn ra (_rerunStarted). *@
-@if (!Setup.IsRunning)
-{
-    <section class="rt-sect">
-        <h3>@(L["setup.section"])</h3>
-        <div class="rt-field-row" style="flex-wrap: wrap; gap: 10px;">
-            <button type="button" class="rt-btn rt-mini" disabled="@_rerunStarted" @onclick="RerunSetup">@(L["setup.rerun"])</button>
+<section class="rt-sect">
+    <h3>@(L["deck.settings.section.ocr"])</h3>
+    <div class="rt-settings-group">
+        <h4 class="rt-group-title">@(L["deck.settings.group.ocrModels"])</h4>
+    @if (_ocrModels is null || _ocrModels.Count == 0)
+    {
+        <p class="rt-hint">@(_ocrLoadFailed ? L["deck.ocr.loadFailed"] : _ocrModels is null ? L["deck.ocr.loading"] : L["deck.ocr.empty"])</p>
+        @if (_ocrModels is not null || _ocrLoadFailed)
+        {
+            <button type="button" class="rt-btn rt-mini" style="margin-top: 6px;" disabled="@_ocrBusy" @onclick="ReloadOcrModelsAsync">@(L["deck.ocr.refresh"])</button>
+        }
+    }
+    else
+    {
+        <div class="rt-srow">
+            <span>@(L["deck.settings.ocr.det"])</span>
+            <div class="rt-select">
+                <select @bind="_ocrDetPick" aria-label="@(L["deck.settings.ocr.det"])">
+                    @foreach (OcrModelInfo m in _ocrModels.Where(m => m.Kind == "det"))
+                    {
+                        <option value="@m.Name">@m.Name</option>
+                    }
+                </select>
+                <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+            </div>
         </div>
-    </section>
-}
+        <div class="rt-srow">
+            <span>@(L["deck.settings.ocr.rec"])</span>
+            <div class="rt-select">
+                <select @bind="_ocrRecPick" aria-label="@(L["deck.settings.ocr.rec"])">
+                    @foreach (OcrModelInfo m in _ocrModels.Where(m => m.Kind == "rec"))
+                    {
+                        <option value="@m.Name">@m.Name</option>
+                    }
+                </select>
+                <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+            </div>
+        </div>
+        @if (OcrSrcNotCovered is { } src)
+        {
+            <p class="rt-hint" style="color: var(--rt-danger); margin: 0 0 8px;">@(L.Fmt("deck.ocr.srcNotCovered", src))</p>
+        }
+        <p class="rt-hint" style="margin-bottom: 10px;">@OcrActivePairText @(L["deck.ocr.downloadHint"])</p>
+        <table class="rt-model-table">
+            <thead>
+                <tr style="color: var(--rt-dim); text-align: left;">
+                    <th style="font-weight: 500; padding: 4px 8px 4px 0;">@(L["deck.ocr.col.model"])</th>
+                    <th style="font-weight: 500; padding: 4px 8px;">@(L["deck.ocr.col.status"])</th>
+                    <th style="font-weight: 500; padding: 4px 0; text-align: right;">@(L["deck.ocr.col.actions"])</th>
+                </tr>
+            </thead>
+            <tbody>
+                @* Nhóm bảng theo vai trò (spec 17-11 §11): họ OCR v6, rec legacy (Ngôn ngữ), còn lại Khác. *@
+                @foreach ((string groupKey, List<OcrModelInfo> group) in OcrTableGroups())
+                {
+                    <tr>
+                        <td colspan="3" class="rt-model-group">@(L[groupKey])</td>
+                    </tr>
+                    @foreach (OcrModelInfo m in group)
+                    {
+                        <tr style="border-top: 1px solid var(--rt-line);">
+                            <td style="padding: 6px 8px 6px 0; vertical-align: top;">
+                                <div class="rt-mono">@m.Name</div>
+                                <div class="rt-hint">@OcrMetaText(m)</div>
+                            </td>
+                            <td style="padding: 6px 8px; vertical-align: top;">
+                                @if (m.Downloading)
+                                {
+                                    <span class="rt-hint">@OcrProgressText(m)</span>
+                                }
+                                else
+                                {
+                                    <span class="rt-hint" style="@(m.Installed ? "" : "color: var(--rt-danger)")">@(m.Installed ? L["deck.ocr.installed"] : L["deck.ocr.notInstalled"])</span>
+                                }
+                                @if (m.InUse)
+                                {
+                                    <span class="rt-hint" style="color: var(--rt-tally)">· @(L["deck.ocr.inUse"])</span>
+                                }
+                                @if (!string.IsNullOrWhiteSpace(m.DownloadError))
+                                {
+                                    <div class="rt-hint" style="color: var(--rt-danger); white-space: normal;">@(L.Fmt("deck.ocr.downloadFailed", m.DownloadError))</div>
+                                }
+                            </td>
+                            <td style="padding: 6px 0; text-align: right; vertical-align: top; white-space: nowrap;">
+                                <button type="button" class="rt-btn rt-mini" disabled="@(m.Installed || m.Downloading || _ocrBusy)" @onclick="() => DownloadOcrModelAsync(m)">@(L["deck.ocr.download"])</button>
+                                <button type="button" class="rt-btn rt-mini" disabled="@(m.InUse || !m.Installed || _ocrBusy)" @onclick="() => DeleteOcrModelAsync(m)">@(L["deck.ocr.delete"])</button>
+                            </td>
+                        </tr>
+                    }
+                }
+            </tbody>
+        </table>
+    }
+    @if (_ocrModels is { Count: > 0 })
+    {
+        <div class="rt-actionbar">
+            <button type="button" class="rt-btn rt-btn-primary rt-mini" disabled="@_ocrBusy" @onclick="SaveOcrPairAsync">@(L["deck.ocr.savePair"])</button>
+            <button type="button" class="rt-btn rt-mini" disabled="@_ocrBusy" @onclick="ReloadOcrModelsAsync">@(L["deck.ocr.refresh"])</button>
+        </div>
+    }
+    </div>
+
+    <div class="rt-settings-group">
+        <h4 class="rt-group-title">@(L["deck.ocr.params.title"])</h4>
+    @* Tham số máy OCR: render động từ schema sidecar (spec §8) — nhãn/hint/tip i18n theo key. *@
+    @if (_ocrSchema is null)
+    {
+        <p class="rt-hint" style="margin-top: 12px;">@(_ocrSchemaFailed ? L["deck.ocr.params.loadFailed"] : L["deck.ocr.loading"])</p>
+        @if (_ocrSchemaFailed)
+        {
+            <button type="button" class="rt-btn rt-mini" style="margin-top: 6px;" disabled="@_ocrParamsBusy" @onclick="ReloadOcrSchemaAsync">@(L["deck.ocr.refresh"])</button>
+        }
+    }
+    else
+    {
+        @if (_ocrSchemaFailed)
+        {
+            <p class="rt-hint" style="color: var(--rt-danger);">@(L["deck.ocr.params.loadFailed"])</p>
+        }
+        @foreach (IGrouping<string, OcrParamSpec> group in _ocrSchema.GroupBy(p => p.Group))
+        {
+            <details open="@(group.Key is not ("device" or "models"))"
+                     class="rt-subcard" style="margin-bottom: 8px;">
+                <summary style="cursor: pointer; font-size: 11.5px; color: var(--rt-dim); letter-spacing: .02em;">@(L["ocr.group." + group.Key])</summary>
+                <div style="margin-top: 10px;">
+                    @foreach (OcrParamSpec p in group)
+                    {
+                        string label = L["ocr.param." + p.Key + ".label"];
+                        <div class="rt-srow" title="@(L["ocr.param." + p.Key + ".tip"])">
+                            <span>@label</span>
+                            @if (p.Type == "bool")
+                            {
+                                <input type="checkbox" @bind="_ocrBool[p.Key]" aria-label="@label" />
+                            }
+                            else if (p.Type == "enum")
+                            {
+                                <div class="rt-select">
+                                    <select @bind="_ocrText[p.Key]" aria-label="@label">
+                                        @if (p.Default is null)
+                                        {
+                                            <option value="">@(L["settings.opt.auto"])</option>
+                                        }
+                                        @foreach (string option in p.Values)
+                                        {
+                                            <option value="@option">@option</option>
+                                        }
+                                    </select>
+                                    <svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>
+                                </div>
+                            }
+                            else if (p.Type == "json")
+                            {
+                                <textarea class="rt-input rt-mono" rows="3"
+                                          style="height: auto; min-height: 68px; padding: 7px 10px; resize: vertical; line-height: 1.4;"
+                                          placeholder="@OcrPlaceholder(p)" @bind="_ocrText[p.Key]" @bind:event="oninput"
+                                          aria-label="@label" aria-invalid="@(_ocrFieldErrors.ContainsKey(p.Key))"></textarea>
+                            }
+                            else if (p.Type is "int" or "float")
+                            {
+                                <input type="number" class="rt-input rt-mono"
+                                       min="@FormatBound(p.Min)" max="@FormatBound(p.Max)" step="@FormatBound(p.Step)"
+                                       placeholder="@OcrPlaceholder(p)" @bind="_ocrText[p.Key]" aria-label="@label" />
+                            }
+                            else
+                            {
+                                <input type="text" class="rt-input" placeholder="@OcrPlaceholder(p)"
+                                       @bind="_ocrText[p.Key]" aria-label="@label" />
+                            }
+                            <p class="rt-hint">@(L["ocr.param." + p.Key + ".hint"])</p>
+                            @if (_ocrFieldErrors.TryGetValue(p.Key, out string? fieldError))
+                            {
+                                <p class="rt-hint" style="color: var(--rt-danger);">@(L["ocr.param.error." + fieldError])</p>
+                            }
+                        </div>
+                    }
+                </div>
+            </details>
+        }
+        @* Nhịp OCR: 2 tham số pipeline (không thuộc schema sidecar), chỉ áp dụng ở core.start kế tiếp. *@
+        <details open="true"
+                 class="rt-subcard" style="margin-bottom: 8px;">
+            <summary style="cursor: pointer; font-size: 11.5px; color: var(--rt-dim); letter-spacing: .02em;">@(L["ocr.group.rhythm"])</summary>
+            <div style="margin-top: 10px;">
+                <div class="rt-srow">
+                    <span>@(L["deck.ocr.rhythm.ocrFps"])</span>
+                    <input type="number" class="rt-input rt-mono" min="1" max="60" step="1"
+                           aria-label="@(L["deck.ocr.rhythm.ocrFps"])" @bind="_ocrFpsText" />
+                </div>
+                <div class="rt-srow">
+                    <span>@(L["deck.ocr.rhythm.captureFps"])</span>
+                    <input type="number" class="rt-input rt-mono" min="1" max="60" step="1"
+                           aria-label="@(L["deck.ocr.rhythm.captureFps"])" @bind="_captureFpsText" />
+                </div>
+                <p class="rt-hint">@(L["deck.ocr.rhythm.note"])</p>
+            </div>
+        </details>
+        <div class="rt-srow">
+            <span>@(L["deck.ocr.mergeLines.label"])</span>
+            <input type="checkbox" @bind="_mergeLines" aria-label="@L["deck.ocr.mergeLines.label"]" />
+            <p class="rt-hint">@(L["deck.ocr.mergeLines.hint"])</p>
+        </div>
+        @* Ba ngưỡng gộp dòng: chỉ nhập được khi Gộp nhiều dòng đang bật; giá trị vẫn được lưu
+           kể cả khi tắt (hành vi như hôm nay). type="text" + inputmode có chủ đích — ô number
+           không nhận dạng dấu phẩy thập phân ("0,6") mà TryParseRatio chấp nhận. *@
+        <div class="rt-srow rt-srow--num">
+            <span>@(L["deck.ocr.mergeGap.label"])</span>
+            <input type="text" class="rt-input rt-mono" inputmode="decimal"
+                   aria-label="@(L["deck.ocr.mergeGap.label"])"
+                   disabled="@(!_mergeLines)" @bind="_mergeGapText" />
+            <p class="rt-hint">@(L["deck.ocr.mergeGap.hint"])</p>
+        </div>
+        <div class="rt-srow rt-srow--num">
+            <span>@(L["deck.ocr.mergeHeight.label"])</span>
+            <input type="text" class="rt-input rt-mono" inputmode="decimal"
+                   aria-label="@(L["deck.ocr.mergeHeight.label"])"
+                   disabled="@(!_mergeLines)" @bind="_mergeHeightText" />
+            <p class="rt-hint">@(L["deck.ocr.mergeHeight.hint"])</p>
+        </div>
+        <div class="rt-srow rt-srow--num">
+            <span>@(L["deck.ocr.mergeOverlap.label"])</span>
+            <input type="text" class="rt-input rt-mono" inputmode="decimal"
+                   aria-label="@(L["deck.ocr.mergeOverlap.label"])"
+                   disabled="@(!_mergeLines)" @bind="_mergeOverlapText" />
+            <p class="rt-hint">@(L["deck.ocr.mergeOverlap.hint"])</p>
+        </div>
+        <div class="rt-actionbar">
+            <button type="button" class="rt-btn rt-btn-primary" disabled="@(_ocrParamsBusy || !SettingsPanelSync.CanSaveOcrParams(_ocrSchema, _ocrSchemaFailed))" @onclick="SaveOcrParamsAsync">@(L["deck.ocr.params.save"])</button>
+            <button type="button" class="rt-btn rt-mini" disabled="@(_ocrParamsBusy || !SettingsPanelSync.CanSaveOcrParams(_ocrSchema, _ocrSchemaFailed))" @onclick="RestoreOcrParamsAsync">@(L["deck.ocr.params.restore"])</button>
+            @if (_ocrStatusText.Length > 0)
+            {
+                <span class="rt-hint" style="@(_ocrStatusError ? "color: var(--rt-danger)" : "")">@_ocrStatusText</span>
+            }
+        </div>
+    }
+    </div>
+</section>
 
 <section class="rt-sect">
     <h3>@(L["deck.settings.section.look"])</h3>
@@ -482,17 +473,6 @@
         </div>
     </div>
     <div class="rt-srow">
-        <span>@(L["deck.settings.accent"])</span>
-        <div class="rt-swatches">
-            <button type="button" class="rt-swatch s-amber" aria-label="@(L["deck.settings.accent.amber"])"
-                    aria-pressed="@Pressed(_accent == "amber")" @onclick='() => SetAccentAsync("amber")'></button>
-            <button type="button" class="rt-swatch s-jade" aria-label="@(L["deck.settings.accent.jade"])"
-                    aria-pressed="@Pressed(_accent == "jade")" @onclick='() => SetAccentAsync("jade")'></button>
-            <button type="button" class="rt-swatch s-coral" aria-label="@(L["deck.settings.accent.coral"])"
-                    aria-pressed="@Pressed(_accent == "coral")" @onclick='() => SetAccentAsync("coral")'></button>
-        </div>
-    </div>
-    <div class="rt-srow">
         <span>@(L["deck.settings.uiLang"])</span>
         <div class="rt-seg" role="group" aria-label="@(L["deck.settings.uiLang"])">
             <button type="button" aria-pressed="@Pressed(L.Lang == "vi")" @onclick='() => SetLangAsync("vi")'>Tiếng Việt</button>
@@ -501,33 +481,41 @@
     </div>
 </section>
 
-@if (UpdateFeature.IsEnabled)
+@* Setup rerun vẫn hỏi lại từ bước 1 và chỉ tải artifact thiếu/hỏng; System ẩn hoàn toàn
+   khi cả setup lẫn update đều không có hành động khả dụng. *@
+@if (!Setup.IsRunning || UpdateFeature.IsEnabled)
 {
     <section class="rt-sect">
-        <h3>@(L["deck.settings.section.update"])</h3>
-        <div class="rt-field-row" style="flex-wrap: wrap; gap: 10px;">
-            <span class="rt-hint rt-mono">v@_appVersion</span>
-            @if (Check.IsUpdateAvailable)
-            {
-                <span class="rt-chip live"><span class="rt-lamp"></span><span class="rt-txt">@(L["update.badge"])</span></span>
-            }
-            <button type="button" class="rt-btn rt-mini" disabled="@_checking" @onclick="CheckAsync">@(L["update.check"])</button>
-            @if (Check.IsUpdateAvailable)
-            {
-                <button type="button" class="rt-btn rt-btn-primary rt-mini" disabled="@Coordinator.UpdateInProgress" @onclick="UpdateNow">@(L["update.now"])</button>
-            }
-        </div>
+        <h3>@(L["deck.settings.section.system"])</h3>
+        @if (!Setup.IsRunning)
+        {
+            <div class="rt-settings-group">
+                <h4 class="rt-group-title">@(L["deck.settings.group.setup"])</h4>
+                <div class="rt-field-row" style="flex-wrap: wrap; gap: 10px;">
+                    <button type="button" class="rt-btn rt-mini" disabled="@_rerunStarted" @onclick="RerunSetup">@(L["setup.rerun"])</button>
+                </div>
+            </div>
+        }
+        @if (UpdateFeature.IsEnabled)
+        {
+            <div class="rt-settings-group">
+                <h4 class="rt-group-title">@(L["deck.settings.section.update"])</h4>
+                <div class="rt-field-row" style="flex-wrap: wrap; gap: 10px;">
+                    <span class="rt-hint rt-mono">v@_appVersion</span>
+                    @if (Check.IsUpdateAvailable)
+                    {
+                        <span class="rt-chip live"><span class="rt-lamp"></span><span class="rt-txt">@(L["update.badge"])</span></span>
+                    }
+                    <button type="button" class="rt-btn rt-mini" disabled="@_checking" @onclick="CheckAsync">@(L["update.check"])</button>
+                    @if (Check.IsUpdateAvailable)
+                    {
+                        <button type="button" class="rt-btn rt-btn-primary rt-mini" disabled="@Coordinator.UpdateInProgress" @onclick="UpdateNow">@(L["update.now"])</button>
+                    }
+                </div>
+            </div>
+        }
     </section>
 }
-
-<p class="rt-hint" style="margin: 14px 0 0;">@(L["settings.note.saveScope"])</p>
-<div class="rt-sheet-foot">
-    <button type="button" class="rt-btn" @onclick="Save">@(L["settings.btn.save"])</button>
-    @if (StatusText.Length > 0)
-    {
-        <span class="rt-hint" style="@(_statusKind == "saved" ? "" : "color: var(--rt-danger)")">@StatusText</span>
-    }
-</div>
 
 @code {
     // Model mutable cho @bind — AppSettings là record init-only nên không bind trực tiếp được.
@@ -536,7 +524,6 @@
         public string Provider { get; set; } = "google";
         public string Src { get; set; } = "auto";
         public string Dst { get; set; } = "vi";
-        public string? ApiKey { get; set; }
     }
 
     private static readonly string[] SrcCodes = ["auto", "en", "ja", "ko", "zh", "ru", "fr", "de", "es"];
@@ -549,7 +536,6 @@
     private string _appVersion = string.Empty;
     private bool _checking;
     private string _themeSetting = "system";
-    private string _accent = "amber";
     private bool _appearanceLoaded;
 
     // OCR model manager: null = chưa nạp catalog; _ocrBusy chặn bấm chồng khi RPC đang chạy.
@@ -600,6 +586,7 @@
     private LlmRuntimeStatusInfo? _llmRuntime;
     private LlmRuntimeCheckInfo? _llmRuntimeCheck;
     private bool _llmRuntimeBusy;
+    private int _llmRuntimeRevision;
     private LlmServerStatusInfo? _llmServerStatus;
     private bool _llmServerStatusFailed;
     private bool _llmServerStatusBusy;
@@ -629,10 +616,9 @@
     protected override void OnInitialized()
     {
         AppSettings current = SettingsStore.Load();
-        _model.Provider = current.Provider;
+        _model.Provider = SettingsPanelSync.NormalizeProvider(current.Provider);
         _model.Src = current.Src;
         _model.Dst = current.Dst;
-        _model.ApiKey = current.ApiKey;
         _ocrDetPick = current.OcrDet;
         _ocrRecPick = current.OcrRec;
         _ocrDetBaseline = current.OcrDet;
@@ -685,16 +671,14 @@
         if (!_disposed) RequestRender();
     });
 
-    // Theme/accent sống trong localStorage của WebView — đọc lại sau khi JS bridge sẵn sàng.
+    // Theme sống trong localStorage của WebView — đọc lại sau khi JS bridge sẵn sàng.
     private async Task LoadAppearanceAsync()
     {
         if (_appearanceLoaded || !Js.IsWebViewReady) return;
         try
         {
             string? theme = await Js.GetThemeSettingAsync();
-            string? accent = await Js.GetAccentAsync();
             if (theme is "light" or "dark" or "system") _themeSetting = theme;
-            if (accent is "amber" or "jade" or "coral") _accent = accent;
             _appearanceLoaded = true;
         }
         catch (Exception)
@@ -705,6 +689,7 @@
 
     private void Save()
     {
+        _model.Provider = SettingsPanelSync.NormalizeProvider(_model.Provider);
         // Prompt LLM: ô trắng hoặc thiếu {source_text} đều lỗi ngay tại Settings — không để Core
         // âm thầm đổi hành vi user vừa nhập thành prompt mặc định ở lần Start kế tiếp (spec D1).
         if (!SettingsPanelSync.LlmUserPromptValid(_model.Provider, _llmUserPromptText))
@@ -715,12 +700,11 @@
         try
         {
             // `with` giữ nguyên overlay/capture options hiện có — form này sửa provider/ngôn ngữ/LLM.
-            SettingsStore.Save(SettingsStore.Load() with
+            SettingsStore.Update(current => current with
             {
                 Provider = _model.Provider,
                 Src = _model.Src,
                 Dst = _model.Dst,
-                ApiKey = _model.ApiKey,
                 LlmMode = _llmMode,
                 LlmBaseUrl = _llmBaseUrl,
                 LlmApiKey = string.IsNullOrWhiteSpace(_llmApiKey) ? null : _llmApiKey,
@@ -896,7 +880,20 @@
         _ocrBusy = true;
         try
         {
-            await Pipeline.DeleteOcrModelAsync(model.Name, CancellationToken.None);
+            string[] installed = (_ocrModels ?? [])
+                .Where(candidate => candidate.Installed && candidate.Name != model.Name)
+                .Select(candidate => candidate.Name)
+                .ToArray();
+            string[] engineActive = (_ocrModels ?? [])
+                .Where(candidate => candidate.InUse && candidate.Name != model.Name)
+                .Select(candidate => candidate.Name)
+                .ToArray();
+            await Setup.DeleteOcrModelAsync(model.Name, installed, engineActive, CancellationToken.None);
+            AppSettings synchronized = SettingsStore.Load();
+            _ocrDetPick = synchronized.OcrDet;
+            _ocrRecPick = synchronized.OcrRec;
+            _ocrDetBaseline = synchronized.OcrDet;
+            _ocrRecBaseline = synchronized.OcrRec;
             Toast.Show(L.Fmt("deck.ocr.deleted", model.Name));
             await LoadOcrModelsAsync();
         }
@@ -919,7 +916,7 @@
         {
             // Cặp đã chọn phải vào settings.json trước tiên — core.start lần sau gửi đúng cặp
             // này kể cả khi bên dưới bị hoãn (đang chạy thì không đổi model giữa phiên, C8).
-            SettingsStore.Save(SettingsStore.Load() with { OcrDet = _ocrDetPick, OcrRec = _ocrRecPick });
+            SettingsStore.Update(current => current with { OcrDet = _ocrDetPick, OcrRec = _ocrRecPick });
             _ocrDetBaseline = _ocrDetPick;
             _ocrRecBaseline = _ocrRecPick;
             // C8: pipeline đang chạy → không gọi ocr.models.set (sidecar giữ predictor đang
@@ -1058,8 +1055,8 @@
             }
 
             OcrConfigSetResult result = await Pipeline.SetOcrConfigAsync(map, CancellationToken.None);
-            SettingsStore.Save(SettingsPanelSync.WithOcrParams(
-                SettingsStore.Load(), map, ocrFps, captureFps,
+            SettingsStore.Update(current => SettingsPanelSync.WithOcrParams(
+                current, map, ocrFps, captureFps,
                 _mergeLines, mergeGap, mergeHeight, mergeOverlap));
             _ocrValues = new Dictionary<string, JsonNode?>(map);
             SetOcrStatus(L[result.Deferred.Count > 0 ? "deck.ocr.params.deferred" : "deck.ocr.params.applied"],
@@ -1213,6 +1210,10 @@
     private static readonly TimeSpan LlmRuntimePollInterval = TimeSpan.FromSeconds(2);
     private const int LlmRuntimePollAttempts = 300;
 
+    private bool IsCurrentLlmFlavor(string requestedFlavor, int requestedRevision) =>
+        SettingsPanelSync.IsCurrentFlavor(
+            requestedFlavor, _llmFlavor, requestedRevision, _llmRuntimeRevision);
+
     // Chỉ hiện nút Cập nhật khi check thấy tag mới khác tag đang cài.
     private bool LlmUpdateAvailable =>
         _llmRuntimeCheck?.Latest is { } latest
@@ -1298,9 +1299,14 @@
 
     private async Task LoadLlmRuntimeAsync()
     {
+        string requestedFlavor = _llmFlavor;
+        int requestedRevision = _llmRuntimeRevision;
         try
         {
-            _llmRuntime = await Pipeline.GetLlmRuntimeStatusAsync(CancellationToken.None, _llmFlavor);
+            LlmRuntimeStatusInfo status = await Pipeline.GetLlmRuntimeStatusAsync(
+                CancellationToken.None, requestedFlavor);
+            if (!IsCurrentLlmFlavor(requestedFlavor, requestedRevision)) return;
+            _llmRuntime = status;
         }
         catch (Exception)
         {
@@ -1356,7 +1362,18 @@
         _llmModelsBusy = true;
         try
         {
-            await Pipeline.DeleteLlmModelAsync(model.Name, CancellationToken.None);
+            string[] installed = (_llmModels ?? [])
+                .Where(candidate => candidate.Installed && candidate.Name != model.Name)
+                .Select(candidate => candidate.Name)
+                .ToArray();
+            string[] engineActive = (_llmModels ?? [])
+                .Where(candidate => candidate.InUse && candidate.Name != model.Name)
+                .Select(candidate => candidate.Name)
+                .ToArray();
+            await Setup.DeleteLlmModelAsync(model.Name, installed, engineActive, CancellationToken.None);
+            AppSettings synchronized = SettingsStore.Load();
+            _llmActiveModel = synchronized.LlmActiveModel;
+            _llmActiveModelBaseline = synchronized.LlmActiveModel;
             Toast.Show(L.Fmt("deck.llm.deleted", model.Name));
             await LoadLlmModelsAsync();
         }
@@ -1379,7 +1396,7 @@
         try
         {
             await Pipeline.SetLlmModelAsync(model.Name, CancellationToken.None);
-            SettingsStore.Save(SettingsStore.Load() with { LlmActiveModel = model.Name });
+            SettingsStore.Update(current => current with { LlmActiveModel = model.Name });
             _llmActiveModel = model.Name;
             _llmActiveModelBaseline = model.Name;
             Toast.Show(L.Fmt("deck.llm.useSaved", model.Name));
@@ -1398,9 +1415,11 @@
 
     private void OnLlmFlavorChanged(ChangeEventArgs args)
     {
+        if (_llmRuntimeBusy) return;
         string selected = args.Value?.ToString() == "cpu" ? "cpu" : "cuda";
         if (selected == _llmFlavor) return;
         _llmFlavor = selected;
+        _llmRuntimeRevision++;
         _llmRuntimeCheck = null; // kết quả check thuộc flavor cũ
         _llmRuntime = null;
         _ = LoadLlmRuntimeAsync();
@@ -1410,15 +1429,21 @@
     {
         if (_llmRuntimeBusy) return;
         _llmRuntimeBusy = true;
+        string requestedFlavor = _llmFlavor;
+        int requestedRevision = _llmRuntimeRevision;
         try
         {
-            _llmRuntimeCheck = await Pipeline.CheckLlmRuntimeAsync(_llmFlavor, CancellationToken.None);
+            LlmRuntimeCheckInfo check = await Pipeline.CheckLlmRuntimeAsync(
+                requestedFlavor, CancellationToken.None);
+            if (!IsCurrentLlmFlavor(requestedFlavor, requestedRevision)) return;
+            _llmRuntimeCheck = check;
             await LoadLlmRuntimeAsync();
-            if (_llmRuntimeCheck.Latest is not { } latest)
+            if (!IsCurrentLlmFlavor(requestedFlavor, requestedRevision)) return;
+            if (check.Latest is not { } latest)
             {
                 Toast.Show(L["deck.llm.runtime.noAsset"]);
             }
-            else if (string.Equals(latest, _llmRuntimeCheck.Current, StringComparison.Ordinal))
+            else if (string.Equals(latest, check.Current, StringComparison.Ordinal))
             {
                 Toast.Show(L.Fmt("deck.llm.runtime.latest", latest));
             }
@@ -1429,7 +1454,8 @@
         }
         catch (Exception ex)
         {
-            Toast.Show(L.Fmt("deck.llm.runtime.checkFailed", ex.Message), ToastSeverity.Error);
+            if (IsCurrentLlmFlavor(requestedFlavor, requestedRevision))
+                Toast.Show(L.Fmt("deck.llm.runtime.checkFailed", ex.Message), ToastSeverity.Error);
         }
         finally
         {
@@ -1443,39 +1469,53 @@
     {
         if (_llmRuntimeBusy) return;
         _llmRuntimeBusy = true;
+        string requestedFlavor = _llmFlavor;
+        int requestedRevision = _llmRuntimeRevision;
         try
         {
-            long downloadAttempt = await Pipeline.DownloadLlmRuntimeAsync(_llmFlavor, CancellationToken.None);
-            Toast.Show(L.Fmt("deck.llm.runtime.downloadStarted", L["deck.llm.runtime.flavor." + _llmFlavor]));
+            long downloadAttempt = await Pipeline.DownloadLlmRuntimeAsync(requestedFlavor, CancellationToken.None);
+            if (!IsCurrentLlmFlavor(requestedFlavor, requestedRevision)) return;
+            Toast.Show(L.Fmt("deck.llm.runtime.downloadStarted", L["deck.llm.runtime.flavor." + requestedFlavor]));
             for (int i = 0; i < LlmRuntimePollAttempts; i++)
             {
                 await Task.Delay(LlmRuntimePollInterval);
-                if (_disposed) return;
-                _llmRuntime = await Pipeline.GetLlmRuntimeStatusAsync(CancellationToken.None, _llmFlavor);
+                if (_disposed || !IsCurrentLlmFlavor(requestedFlavor, requestedRevision)) return;
+                LlmRuntimeStatusInfo status = await Pipeline.GetLlmRuntimeStatusAsync(
+                    CancellationToken.None, requestedFlavor);
+                if (!IsCurrentLlmFlavor(requestedFlavor, requestedRevision)) return;
+                _llmRuntime = status;
                 RequestRender();
-                switch (LlmRuntimePoll.Evaluate(_llmRuntime, downloadAttempt))
+                switch (LlmRuntimePoll.Evaluate(status, downloadAttempt))
                 {
                     case LlmRuntimePollOutcome.Superseded:
                         Toast.Show(L["deck.llm.runtime.downloadSuperseded"], ToastSeverity.Error);
                         return;
+                    case LlmRuntimePollOutcome.Cancelled:
+                        // Hủy chủ động không phải success và cũng không cần error toast.
+                        return;
                     case LlmRuntimePollOutcome.Failed:
-                        Toast.Show(_llmRuntime.DownloadError is { } error
+                        Toast.Show(status.DownloadError is { } error
                             ? L.Fmt("deck.llm.runtime.downloadFailedDetail", error)
                             : L["deck.llm.runtime.downloadFailed"], ToastSeverity.Error);
                         return;
                     case LlmRuntimePollOutcome.Completed:
                         // Check lại theo đúng flavor sau MỌI lượt thành công: repair cùng tag không
                         // làm badge Update bị xoá nhầm, flavor mới không bị so với release CUDA.
-                        _llmRuntimeCheck = await Pipeline.CheckLlmRuntimeAsync(_llmFlavor, CancellationToken.None);
+                        LlmRuntimeCheckInfo check = await Pipeline.CheckLlmRuntimeAsync(
+                            requestedFlavor, CancellationToken.None);
+                        if (!IsCurrentLlmFlavor(requestedFlavor, requestedRevision)) return;
+                        _llmRuntimeCheck = check;
                         Toast.Show(L["deck.llm.runtime.installedToast"]);
                         return;
                 }
             }
-            Toast.Show(L["deck.llm.runtime.downloadTimeout"], ToastSeverity.Error);
+            if (IsCurrentLlmFlavor(requestedFlavor, requestedRevision))
+                Toast.Show(L["deck.llm.runtime.downloadTimeout"], ToastSeverity.Error);
         }
         catch (Exception ex)
         {
-            Toast.Show(L.Fmt("deck.llm.actionFailed", ex.Message), ToastSeverity.Error);
+            if (IsCurrentLlmFlavor(requestedFlavor, requestedRevision))
+                Toast.Show(L.Fmt("deck.llm.actionFailed", ex.Message), ToastSeverity.Error);
         }
         finally
         {
@@ -1498,19 +1538,6 @@
         catch (Exception)
         {
             // Không đổi được theme không phá form; giữ lựa chọn cũ.
-        }
-    }
-
-    private async Task SetAccentAsync(string accent)
-    {
-        try
-        {
-            await Js.SetAccentAsync(accent);
-            _accent = accent;
-        }
-        catch (Exception)
-        {
-            // Như trên.
         }
     }
 
@@ -1565,8 +1592,8 @@
         _ = Coordinator.StartUpdateAsync(release);
     }
 
-    // "Chạy lại setup": force wizard = SỬA LỖI chạy lại từ bước 1 (xoá answers + marker, hỏi lại cả
-    // 3 màn, pipeline xác minh lại; model đã cài thật vẫn không tải lại — spec BA 17-11).
+    // "Chạy lại setup": force wizard = SỬA LỖI chạy lại từ bước 1, giữ answers còn hợp lệ,
+    // xoá step markers/IsComplete và chỉ repair artifact hoặc hỏi lại phần còn thiếu; model hợp lệ không tải lại.
     private bool _rerunStarted;
 
     private void RerunSetup()

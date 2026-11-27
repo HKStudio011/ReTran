@@ -37,6 +37,13 @@ public static class SetupPaths
     public static string ModelsDir => Path.Combine(OcrDir, "models");
 
     /// <summary>
+    /// Local LLM data root containing downloaded GGUF models and llama.cpp runtimes.
+    /// Thư mục gốc LLM local chứa các model GGUF và runtime llama.cpp đã tải.
+    /// </summary>
+    public static string LlmRoot { get; } = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ReTran", "llm");
+
+    /// <summary>
     /// Bundled uv executable shipped under <c>runtimes\win-x64</c>.
     /// uv đi kèm, đóng gói dưới <c>runtimes\win-x64</c>.
     /// </summary>
@@ -48,4 +55,11 @@ public static class SetupPaths
     /// </summary>
     public static string SetupJsonPath { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ReTran", "setup.json");
+
+    /// <summary>
+    /// Persistent journal for one in-flight model deletion and its selection repair.
+    /// Journal bền cho một lượt xoá model và việc sửa lựa chọn liên quan đang dở.
+    /// </summary>
+    public static string ModelDeletionJsonPath { get; } = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ReTran", "model-deletion.json");
 }

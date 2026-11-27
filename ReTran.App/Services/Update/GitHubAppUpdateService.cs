@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace ReTran_App.Services.Update;
@@ -18,12 +19,23 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
     private const string UpdateFolderName = "ReTran_Update";
 
     private readonly HttpClient _http;
+    private readonly string _downloadOwnerId = Guid.NewGuid().ToString("N");
+
+    // Attempt creation, path publication, and verification snapshots share this lock so a stale download
+    // cannot clear, delete, or publish over a newer attempt. The per-service GUID keeps attempt directories
+    // isolated across service instances and processes; each attempt writes only below its own directory.
+    private readonly object _downloadSync = new();
+    private long _downloadAttemptId;
+    private long _publishedDownloadAttemptId;
+
+    private readonly record struct DownloadSnapshot(long AttemptId, string? ZipPath, string? SignaturePath);
 
     /// <summary>
     /// Public key (SPKI Base64) verify chữ ký zip update — production dùng
     /// <see cref="PackageSignatureVerifier.ReleasePublicKeyBase64"/>; test inject keypair khác.
     /// </summary>
     private readonly string _signingPublicKeyBase64;
+    private readonly Func<string, string, string, bool> _packageVerifier;
 
     /// <summary>
     /// Install directory the updater is looked up in — <c>AppContext.BaseDirectory</c> in
@@ -62,7 +74,12 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
     // chứ không phải app — không ép được thì mọi assertion về version sẽ phụ thuộc runner.
     // appDir cho test: test bin giờ chứa sẵn ReTran.Updater.exe (Task 6 wiring) nên nhánh
     // "thiếu updater" phải chỉ vào thư mục trống thay vì AppContext.BaseDirectory.
-    internal GitHubAppUpdateService(HttpClient http, string currentVersion, string? signingPublicKeyBase64 = null, string? appDir = null)
+    internal GitHubAppUpdateService(
+        HttpClient http,
+        string currentVersion,
+        string? signingPublicKeyBase64 = null,
+        string? appDir = null,
+        Func<string, string, string, bool>? packageVerifier = null)
     {
         ArgumentNullException.ThrowIfNull(http);
         ArgumentNullException.ThrowIfNull(currentVersion);
@@ -70,6 +87,7 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
         _http = http;
         CurrentVersion = currentVersion;
         _signingPublicKeyBase64 = signingPublicKeyBase64 ?? PackageSignatureVerifier.ReleasePublicKeyBase64;
+        _packageVerifier = packageVerifier ?? PackageSignatureVerifier.Verify;
         _appDir = appDir ?? AppContext.BaseDirectory;
     }
 
@@ -137,21 +155,36 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
     }
 
     /// <inheritdoc />
-    public async Task<string?> DownloadUpdateAsync(ReleaseInfo release, IProgress<int>? progress)
+    public async Task<string?> DownloadUpdateAsync(
+        ReleaseInfo release, IProgress<int>? progress, CancellationToken cancellationToken = default)
     {
         // Tải file + ghi đĩa là thao tác Windows-only theo contract của updater.
         if (!OperatingSystem.IsWindows()) return null;
 
-        // Invalidate NGAY khi bắt đầu attempt mới: FileStream bên dưới dùng FileMode.Create nên sẽ
-        // truncate zip cũ — nếu attempt này fail giữa chừng, path không được trỏ tới file rác
-        // (InstallUpdateAsync chỉ check File.Exists nên sẽ cài bản hỏng).
-        DownloadedZipPath = null;
-        DownloadedSignaturePath = null;
+        long attemptId;
+        lock (_downloadSync)
+        {
+            attemptId = ++_downloadAttemptId;
 
+            // Invalidate paths when this attempt becomes latest; no partial or superseded zip is installable.
+            _publishedDownloadAttemptId = 0;
+            DownloadedZipPath = null;
+            DownloadedSignaturePath = null;
+        }
+
+        var attemptDir = Path.Combine(
+            Path.GetTempPath(),
+            UpdateFolderName,
+            _downloadOwnerId,
+            attemptId.ToString(System.Globalization.CultureInfo.InvariantCulture));
         string? zipPath = null;
         string? signaturePath = null;
+        var published = false;
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            Directory.CreateDirectory(attemptDir);
+
             var asset = release.Assets.FirstOrDefault(a =>
                 a.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) &&
                 !a.Name.Contains("symbols", StringComparison.OrdinalIgnoreCase));
@@ -162,26 +195,22 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
             // (Các release trước khi triển khai ký sẽ không cập nhật được — intended.)
             var signatureAsset = release.Assets.FirstOrDefault(a =>
                 string.Equals(a.Name, asset.Name + ".sig", StringComparison.OrdinalIgnoreCase));
-            if (signatureAsset is null)
-            {
-                DeletePartialFile(zipPath);
-                return null;
-            }
+            if (signatureAsset is null) return null;
 
-            // Ghi đè (FileMode.Create) thay vì reuse — bản tải dở lần trước có thể đã hỏng.
-            var tempDir = Path.Combine(Path.GetTempPath(), UpdateFolderName);
-            Directory.CreateDirectory(tempDir);
-            zipPath = Path.Combine(tempDir, asset.Name);
+            // Every attempt has distinct paths, so an old writer cannot truncate or delete a newer download.
+            zipPath = Path.Combine(attemptDir, asset.Name);
             signaturePath = zipPath + ".sig";
 
-            var request = new HttpRequestMessage(HttpMethod.Get, asset.BrowserDownloadUrl);
+            using var request = new HttpRequestMessage(HttpMethod.Get, asset.BrowserDownloadUrl);
             request.Headers.UserAgent.ParseAdd($"Retran/{CurrentVersion}");
 
-            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+            using var response = await _http.SendAsync(
+                request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             if (!response.IsSuccessStatusCode) return null;
 
             var totalBytes = response.Content.Headers.ContentLength ?? -1;
-            using var contentStream = await response.Content.ReadAsStreamAsync();
+            using var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
             await using (var fileStream = new FileStream(zipPath, FileMode.Create, FileAccess.Write, FileShare.None))
             {
                 var buffer = new byte[81920];
@@ -189,9 +218,9 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
                 var lastReported = 0;
                 int bytesRead;
 
-                while ((bytesRead = await contentStream.ReadAsync(buffer)) > 0)
+                while ((bytesRead = await contentStream.ReadAsync(buffer, cancellationToken)) > 0)
                 {
-                    await fileStream.WriteAsync(buffer, 0, bytesRead);
+                    await fileStream.WriteAsync(buffer, 0, bytesRead, cancellationToken);
                     readBytes += bytesRead;
 
                     // Chỉ báo khi % tăng — tránh spam progress với 81920 byte mỗi lần đọc.
@@ -205,32 +234,46 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
                         }
                     }
                 }
+
+                await fileStream.FlushAsync(cancellationToken);
             }
 
             // Tải chữ ký (file nhỏ, đọc trọn 1 lần — không cần progress)
-            var signatureRequest = new HttpRequestMessage(HttpMethod.Get, signatureAsset.BrowserDownloadUrl);
+            using var signatureRequest = new HttpRequestMessage(HttpMethod.Get, signatureAsset.BrowserDownloadUrl);
             signatureRequest.Headers.UserAgent.ParseAdd($"Retran/{CurrentVersion}");
 
-            using var signatureResponse = await _http.SendAsync(signatureRequest);
-            if (!signatureResponse.IsSuccessStatusCode)
+            using var signatureResponse = await _http.SendAsync(signatureRequest, cancellationToken);
+            if (!signatureResponse.IsSuccessStatusCode) return null;
+
+            var signatureBytes = await signatureResponse.Content.ReadAsByteArrayAsync(cancellationToken);
+            await File.WriteAllBytesAsync(signaturePath, signatureBytes, cancellationToken);
+
+            lock (_downloadSync)
             {
-                DeletePartialFile(zipPath);
-                return null;
+                if (attemptId == _downloadAttemptId && !cancellationToken.IsCancellationRequested)
+                {
+                    _publishedDownloadAttemptId = attemptId;
+                    DownloadedSignaturePath = signaturePath;
+                    DownloadedZipPath = zipPath;
+                    published = true;
+                }
             }
 
-            var signatureBytes = await signatureResponse.Content.ReadAsByteArrayAsync();
-            await File.WriteAllBytesAsync(signaturePath, signatureBytes);
-
-            DownloadedSignaturePath = signaturePath;
-            DownloadedZipPath = zipPath;
-            return zipPath;
+            return published ? zipPath : null;
         }
         catch (Exception)
         {
-            // Lỗi mạng/đĩa → xóa zip + sig dở dang rồi trả null để UI báo tải thất bại.
-            DeletePartialFile(zipPath);
-            DeletePartialFile(signaturePath);
+            // Network, disk, and cancellation failures all invalidate this attempt; finally cleans only its files.
             return null;
+        }
+        finally
+        {
+            if (!published)
+            {
+                DeletePartialFile(zipPath);
+                DeletePartialFile(signaturePath);
+                DeleteAttemptDirectory(attemptDir);
+            }
         }
     }
 
@@ -250,24 +293,61 @@ public sealed class GitHubAppUpdateService : IAppUpdateService
         }
     }
 
+    // Non-recursive by design: an attempt may remove only its own empty directory, never a sibling attempt.
+    private static void DeleteAttemptDirectory(string attemptDir)
+    {
+        try
+        {
+            Directory.Delete(attemptDir, recursive: false);
+        }
+        catch (Exception)
+        {
+            // Best-effort temp cleanup; a locked file or unexpected extra file must not affect another attempt.
+        }
+    }
+
     /// <inheritdoc />
     public bool VerifyDownloadedPackage()
     {
         // Verify đọc file + ghi đĩa (xóa rác) — Windows-only theo contract của updater.
         if (!OperatingSystem.IsWindows()) return false;
 
-        if (DownloadedZipPath is not null && DownloadedSignaturePath is not null &&
-            PackageSignatureVerifier.Verify(DownloadedZipPath, DownloadedSignaturePath, _signingPublicKeyBase64))
+        DownloadSnapshot snapshot;
+        lock (_downloadSync)
         {
-            return true;
+            snapshot = new DownloadSnapshot(
+                _publishedDownloadAttemptId, DownloadedZipPath, DownloadedSignaturePath);
         }
 
-        // Fail-closed: không xác thực được (thiếu path/sai chữ ký) → xóa cả zip lẫn .sig rác
-        // và null cả hai property để không attempt nào dùng nhầm file đã bị từ chối.
-        DeletePartialFile(DownloadedZipPath);
-        DeletePartialFile(DownloadedSignaturePath);
-        DownloadedZipPath = null;
-        DownloadedSignaturePath = null;
+        try
+        {
+            if (snapshot.AttemptId > 0 && snapshot.ZipPath is not null && snapshot.SignaturePath is not null &&
+                _packageVerifier(snapshot.ZipPath, snapshot.SignaturePath, _signingPublicKeyBase64))
+            {
+                return true;
+            }
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or CryptographicException)
+        {
+            // Unreadable/locked files and verifier failures are verification failures, never coordinator faults.
+            // Fall through to the same snapshot-scoped cleanup as an invalid signature.
+        }
+
+        // Fail-closed cleanup is scoped to the consistent snapshot, never to paths a newer attempt may publish.
+        DeletePartialFile(snapshot.ZipPath);
+        DeletePartialFile(snapshot.SignaturePath);
+        lock (_downloadSync)
+        {
+            if (_publishedDownloadAttemptId == snapshot.AttemptId &&
+                string.Equals(DownloadedZipPath, snapshot.ZipPath, StringComparison.Ordinal) &&
+                string.Equals(DownloadedSignaturePath, snapshot.SignaturePath, StringComparison.Ordinal))
+            {
+                _publishedDownloadAttemptId = 0;
+                DownloadedZipPath = null;
+                DownloadedSignaturePath = null;
+            }
+        }
+
         return false;
     }
 

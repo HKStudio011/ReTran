@@ -1,4 +1,6 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.Extensions.Logging;
 using ReTran_App.Services;
 using ReTran_App.Services.Setup;
 
@@ -44,6 +46,7 @@ public class SetupCoordinatorTests : IDisposable
     private readonly string _dir;
     private readonly string _setupJson;
     private readonly string _settingsJson;
+    private readonly string _deletionJson;
     private readonly FakeUv _uvFake;
     private readonly UvSyncRunner _syncRunner;
     private readonly FakeCoreBridge _bridge;
@@ -58,6 +61,7 @@ public class SetupCoordinatorTests : IDisposable
         Directory.CreateDirectory(_dir);
         _setupJson = Path.Combine(_dir, "setup.json");
         _settingsJson = Path.Combine(_dir, "settings.json");
+        _deletionJson = Path.Combine(_dir, "model-deletion.json");
         _uvFake = new FakeUv();
         _syncRunner = new UvSyncRunner(
             _uvFake, @"C:\retran-test-fake\runtimes\win-x64\uv.exe", Path.Combine(_dir, "ReTran.OCR"));
@@ -75,6 +79,19 @@ public class SetupCoordinatorTests : IDisposable
     // ── helpers ───────────────────────────────────────────────────────────────────────────────────
 
     private static IVideoAdapterSource Adapters(params VideoAdapterInfo[] items) => new FakeAdapters(items);
+
+    private static string ReadArtifactText(string path)
+    {
+        if (path.EndsWith("llm-models.json", StringComparison.Ordinal))
+        {
+            return $$"""
+                [{"name":"{{FakeCoreBridge.LlmCatalogNames[0]}}","file":"{{FakeCoreBridge.LlmCatalogNames[0]}}.gguf"},{"name":"{{FakeCoreBridge.LlmCatalogNames[1]}}","file":"{{FakeCoreBridge.LlmCatalogNames[1]}}.gguf"}]
+                """;
+        }
+        if (path.EndsWith("runtime.json", StringComparison.Ordinal))
+            return """{"tag":"b7234","flavor":"cuda"}""";
+        return File.ReadAllText(path);
+    }
 
     /// <summary>
     /// Builds a coordinator over the shared fakes; state and settings point at temp files, model
@@ -96,7 +113,13 @@ public class SetupCoordinatorTests : IDisposable
         Func<string, bool>? fileExists = null,
         TimeSpan? modelDownloadTimeout = null,
         Func<string, int>? countModelEntries = null,
-        Func<string, bool>? modelDirExists = null)
+        Func<string, bool>? modelDirExists = null,
+        Func<string, string>? readText = null,
+        string? llmRoot = null,
+        string? deletionJournalPath = null,
+        TimeSpan? modelPollInterval = null,
+        ILogger<SetupCoordinator>? logger = null,
+        Func<SetupState>? stateFactory = null)
     {
         var coordinator = new SetupCoordinator(
             adapters ?? Adapters(NvidiaCurrent),
@@ -106,12 +129,16 @@ public class SetupCoordinatorTests : IDisposable
             _bridge,
             _settings,
             () => _closeAppCalled = true,
-            stateFactory: () => SetupState.Load(_setupJson),
-            fileExists: fileExists ?? (_ => true),
+            stateFactory: stateFactory ?? (() => SetupState.Load(_setupJson)),
+            fileExists: fileExists ?? (path => !path.EndsWith(".partial", StringComparison.Ordinal)),
             countModelEntries: countModelEntries ?? (_ => 0),
             modelDirExists: modelDirExists ?? (_ => true),
-            modelPollInterval: TimeSpan.FromMilliseconds(10),
-            modelDownloadTimeout: modelDownloadTimeout ?? TimeSpan.FromSeconds(5));
+            readText: readText ?? ReadArtifactText,
+            llmRoot: llmRoot,
+            deletionJournalPath: deletionJournalPath ?? _deletionJson,
+            modelPollInterval: modelPollInterval ?? TimeSpan.FromMilliseconds(10),
+            modelDownloadTimeout: modelDownloadTimeout ?? TimeSpan.FromSeconds(5),
+            logger: logger);
         coordinator.Changed += () => Interlocked.Increment(ref _changedCount);
         return coordinator;
     }
@@ -119,6 +146,44 @@ public class SetupCoordinatorTests : IDisposable
     private void WriteSetupJson(string json) => File.WriteAllText(_setupJson, json);
 
     private void WriteSettingsJson(string json) => File.WriteAllText(_settingsJson, json);
+
+    private void WriteCompleteSetup(
+        string[]? dets = null,
+        string? activeDet = null,
+        string[]? recs = null,
+        string? activeRec = null,
+        string[]? llmModels = null,
+        string? activeLlm = null)
+    {
+        SetupState state = SetupState.Load(_setupJson) with
+        {
+            Flavor = "gpu",
+            Language = "vi",
+            Dets = [.. dets ?? [FakeCoreBridge.DetModel]],
+            ActiveDet = activeDet ?? FakeCoreBridge.DetModel,
+            Recs = [.. recs ?? [FakeCoreBridge.RecModel]],
+            ActiveRec = activeRec ?? FakeCoreBridge.RecModel,
+            Langs = [],
+            ActiveLang = null,
+            LlmModels = [.. llmModels ?? []],
+            ActiveLlm = activeLlm,
+            Steps = new Dictionary<string, string>
+            {
+                ["checking"] = "done",
+                ["choosingocrmodels"] = "done",
+                ["choosinglanguages"] = "done",
+                ["choosingllmmodels"] = "done",
+                ["verifyingfiles"] = "done",
+                ["syncing"] = "done",
+                ["verifyingsidecar"] = "done",
+                ["downloadingllmruntime"] = "done",
+                ["downloadingmodels"] = "done",
+                ["applying"] = "done",
+            },
+            IsComplete = true,
+        };
+        state.Save();
+    }
 
     /// <summary>
     /// True when a model-dir probe path points AT the named model's directory (the probe receives the
@@ -1215,6 +1280,92 @@ public class SetupCoordinatorTests : IDisposable
     }
 
     [Fact]
+    public async Task Setup_MissingArtifactSameTag_ReportsRepairNotUpdate()
+    {
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":["Hy-MT2-1.8B-UD-Q4_K_XL"],"steps":{"checking":"done","verifyingfiles":"done","syncing":"done","verifyingsidecar":"done","downloadingmodels":"done","applying":"done"}}""");
+        _bridge.LlmRuntimeInstalled = false;
+        _bridge.LlmRuntimeTag = "b7234";
+        _bridge.LlmRuntimeLatestTag = "b7234";
+        var logger = new RecordingLogger<SetupCoordinator>();
+        var coordinator = NewCoordinator(logger: logger);
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Equal("cuda", Assert.Single(_bridge.LlmRuntimeChecks));
+        Assert.Equal("cuda", Assert.Single(_bridge.LlmRuntimeDownloads));
+        var decision = Assert.Single(logger.Entries, entry =>
+            entry.Message.Contains("runtime llama.cpp decision", StringComparison.Ordinal));
+        Assert.Contains("flavor=cuda", decision.Message, StringComparison.Ordinal);
+        Assert.Contains("current=b7234", decision.Message, StringComparison.Ordinal);
+        Assert.Contains("latest=b7234", decision.Message, StringComparison.Ordinal);
+        Assert.Contains("installed=False", decision.Message, StringComparison.Ordinal);
+        Assert.Contains("action=repair-same-tag", decision.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(logger.Entries, entry => entry.Message.Contains("cập nhật", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task LlmRuntime_AcceptedCancelledAttempt_OldInstallDoesNotComplete()
+    {
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":["Hy-MT2-1.8B-UD-Q4_K_XL"],"steps":{"checking":"done","verifyingfiles":"done","syncing":"done","verifyingsidecar":"done","downloadingmodels":"done","applying":"done"}}""");
+        _bridge.LlmRuntimeInstalled = true;
+        _bridge.LlmRuntimeTag = "b7000";
+        _bridge.LlmRuntimeLatestTag = "b7234";
+        _bridge.LlmRuntimeDownloadCompletes = false;
+        _bridge.LlmRuntimeAttemptState = "Cancelled";
+        var coordinator = NewCoordinator(modelDownloadTimeout: TimeSpan.FromMilliseconds(150));
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+        Assert.Equal(SetupCoordinator.MaxRetries + 1, _bridge.LlmRuntimeDownloads.Count);
+    }
+
+    [Theory]
+    [InlineData("absent", SetupStep.Done)]
+    [InlineData("null", SetupStep.Failed)]
+    [InlineData("malformed", SetupStep.Failed)]
+    [InlineData("succeeded", SetupStep.Done)]
+    public async Task LlmRuntime_AttemptStatePresence_GatesLegacyCompletion(string wireCase, SetupStep expected)
+    {
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":["Hy-MT2-1.8B-UD-Q4_K_XL"],"steps":{"checking":"done","verifyingfiles":"done","syncing":"done","verifyingsidecar":"done","downloadingmodels":"done","applying":"done"}}""");
+        _bridge.LlmRuntimeTag = "b7000";
+        _bridge.LlmRuntimeLatestTag = "b7234";
+        _bridge.LlmRuntimeStatusFactory = attempt =>
+        {
+            var status = new JsonObject
+            {
+                ["tag"] = "b7000",
+                ["installed"] = true,
+                ["serverPath"] = @"C:\fake\llm\runtime\b7000\llama-server.exe",
+                ["downloadFailed"] = false,
+                ["downloading"] = false,
+                ["attempt"] = attempt,
+            };
+            if (wireCase != "absent")
+            {
+                status["attemptState"] = wireCase switch
+                {
+                    "null" => null,
+                    "malformed" => JsonValue.Create(42),
+                    "succeeded" => JsonValue.Create("Succeeded"),
+                    _ => throw new ArgumentOutOfRangeException(nameof(wireCase)),
+                };
+            }
+            return status;
+        };
+        var coordinator = NewCoordinator(
+            modelPollInterval: TimeSpan.FromMilliseconds(5),
+            modelDownloadTimeout: TimeSpan.FromMilliseconds(50));
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(expected, coordinator.Step);
+        Assert.Equal(expected == SetupStep.Done ? 1 : SetupCoordinator.MaxRetries + 1,
+            _bridge.LlmRuntimeDownloads.Count);
+    }
+
+    [Fact]
     public async Task LlmRuntime_Offline_SkipsAsOk()
     {
         // Mất mạng khi tra bản mới ⇒ coi bản đang cài là ok, không chặn wizard.
@@ -1521,11 +1672,10 @@ public class SetupCoordinatorTests : IDisposable
     }
 
     [Fact]
-    public async Task Rerun_ForceReset_ClearsAnswersAndMarkers_ReasksFromFirstQuestion()
+    public async Task Rerun_ForceReset_PreservesAnswersAndRepairsPipeline()
     {
-        // Máy đã hoàn tất v2: bấm "Chạy lại setup" phải CHẠY LẠI TỪ ĐẦU — xoá câu trả lời + mọi
-        // marker, hỏi lại cả 3 màn (det/rec trước), chạy lại pipeline; model ĐÃ CÀI THẬT thì bước
-        // tải vẫn bỏ qua (không tải lại vô ích).
+        // Máy đã hoàn tất v2: rerun xoá mọi marker nhưng giữ câu trả lởi hợp lệ, không hỏi lại ba màn;
+        // pipeline chạy lại và model đã cài thật không bị tải lại vô ích.
         WriteSetupJson("""
             {
               "flavor": "gpu",
@@ -1558,26 +1708,19 @@ public class SetupCoordinatorTests : IDisposable
 
         await coordinator.StartAsync(force: true, ct: TestContext.Current.CancellationToken);
 
-        // Hỏi lại từ màn hỏi ĐẦU TIÊN; file đã reset (crash giữa rerun vẫn là state "đang rerun").
-        Assert.Equal(SetupStep.ChoosingOcrModels, coordinator.Step);
-        SetupState reset = ReadSetupJson();
-        Assert.Null(reset.Dets);
-        Assert.Null(reset.Langs);
-        Assert.Null(reset.LlmModels);
-        Assert.False(reset.IsComplete);
-        // Chỉ marker Checking của LƯỢT NÀY tồn tại — mọi marker pipeline cũ đã bị xoá.
-        Assert.Equal("done", reset.Steps!["checking"]);
-        Assert.False(reset.Steps.ContainsKey("syncing"));
-        Assert.False(reset.Steps.ContainsKey("downloadingmodels"));
-        Assert.False(reset.Steps.ContainsKey("choosingocrmodels"));
-
-        // Trả lời lại cả 3 màn → chạy lại pipeline → Done.
-        await coordinator.ContinueWithOcrModelsAsync([FakeCoreBridge.DetModel], FakeCoreBridge.DetModel,
-            [FakeCoreBridge.RecModel], FakeCoreBridge.RecModel, TestContext.Current.CancellationToken);
-        await coordinator.ContinueWithLanguagesAsync([], null, TestContext.Current.CancellationToken);
-        await coordinator.ContinueWithLlmModelsAsync([], null, TestContext.Current.CancellationToken);
-
+        // Câu trả lởi được giữ nguyên và pipeline repair chạy thẳng tới Done.
         Assert.Equal(SetupStep.Done, coordinator.Step);
+        SetupState repaired = ReadSetupJson();
+        Assert.Equal([FakeCoreBridge.DetModel], repaired.Dets);
+        Assert.Equal([FakeCoreBridge.RecModel], repaired.Recs);
+        Assert.Empty(repaired.Langs!);
+        Assert.Empty(repaired.LlmModels!);
+        Assert.True(repaired.IsComplete);
+        // Các marker pipeline đều được tạo lại sau khi bước tương ứng thành công.
+        Assert.Equal("done", repaired.Steps!["checking"]);
+        Assert.Equal("done", repaired.Steps["syncing"]);
+        Assert.Equal("done", repaired.Steps["downloadingmodels"]);
+
         // Pipeline chạy LẠI (marker đã xoá): sidecar được ping/verify lại...
         Assert.Contains(_bridge.Calls, c => c.Method == "sidecar.ping");
         // ...uv sync chạy THẬT (không đường nhanh cùng-flavor — BA 17-11: rerun phải chạy đủ bước)...
@@ -1839,12 +1982,12 @@ public class SetupCoordinatorTests : IDisposable
         release.SetResult();
         await startTask.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
-        // The run finished: a forced rerun now RESTARTS FROM STEP 1 (answers + markers cleared), so it
-        // pauses at the first question instead of passing straight back to Done — IsRunning is false.
-        // Lượt chạy kết thúc: rerun có force giờ CHẠY LẠI TỪ BƯỚC 1 (xoá answers + marker), nên nó
-        // dừng ở câu hỏi đầu tiên thay vì quay thẳng Done — IsRunning về false.
-        Assert.Equal(SetupStep.ChoosingOcrModels, coordinator.Step);
-        Assert.False(coordinator.IsComplete);
+        // The run finished: force clears markers but preserves valid answers, so repair reaches Done
+        // without asking the three screens again and IsRunning returns to false.
+        // Lượt chạy kết thúc: force xoá marker nhưng giữ câu trả lởi hợp lệ, nên repair tới Done mà
+        // không hỏi lại ba màn và IsRunning về false.
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.True(coordinator.IsComplete);
         Assert.False(coordinator.IsRunning);
     }
 
@@ -1945,6 +2088,665 @@ public class SetupCoordinatorTests : IDisposable
         Assert.False(coordinator.IsRunning);
     }
 
+    // ── Task 2: rerun/artifact integrity, Applying và deletion ─────────────────────────────────────
+
+    [Fact]
+    public async Task ForceRerun_PreservesAnswersAndRepairsOnlyMissingArtifacts()
+    {
+        const string mediumDet = "PP-OCRv6_medium_det";
+        const string otherLlm = "Hy-MT2-7B-Q5_K_M";
+        WriteCompleteSetup(
+            dets: [FakeCoreBridge.DetModel, mediumDet],
+            activeDet: FakeCoreBridge.DetModel,
+            llmModels: [FakeCoreBridge.LlmCatalogNames[0], otherLlm],
+            activeLlm: FakeCoreBridge.LlmCatalogNames[0]);
+        _bridge.Installed.Add(FakeCoreBridge.DetModel);
+        _bridge.Installed.Add(FakeCoreBridge.RecModel);
+        _bridge.LlmInstalled.Add(FakeCoreBridge.LlmCatalogNames[0]);
+        _bridge.LlmRuntimeInstalled = true;
+        _bridge.LlmRuntimeTag = "b7234";
+        _bridge.LlmRuntimeLatestTag = "b7234";
+        var coordinator = NewCoordinator(
+            modelDirExists: path => !HasModelDir(path, mediumDet));
+
+        await coordinator.StartAsync(force: true, TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        SetupState state = ReadSetupJson();
+        Assert.Equal([FakeCoreBridge.DetModel, mediumDet], state.Dets);
+        Assert.Equal(FakeCoreBridge.DetModel, state.ActiveDet);
+        Assert.Equal([FakeCoreBridge.RecModel], state.Recs);
+        Assert.Empty(state.Langs!);
+        Assert.Equal([FakeCoreBridge.LlmCatalogNames[0], otherLlm], state.LlmModels);
+        Assert.Equal(FakeCoreBridge.LlmCatalogNames[0], state.ActiveLlm);
+        Assert.Equal([mediumDet], _bridge.Downloaded);
+        Assert.Equal([otherLlm], _bridge.LlmDownloaded);
+        Assert.Empty(_bridge.LlmRuntimeDownloads);
+    }
+
+    [Fact]
+    public async Task Applying_CallsOcrModelsSetBeforeDone()
+    {
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
+        _bridge.Installed.Add(FakeCoreBridge.DetModel);
+        _bridge.Installed.Add(FakeCoreBridge.RecModel);
+        var coordinator = NewCoordinator();
+        _bridge.OnOcrSet = () =>
+        {
+            Assert.Equal(SetupStep.Applying, coordinator.Step);
+            AppSettings persisted = _settings.Load();
+            Assert.Equal(FakeCoreBridge.DetModel, persisted.OcrDet);
+            Assert.Equal(FakeCoreBridge.RecModel, persisted.OcrRec);
+        };
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Equal([(FakeCoreBridge.DetModel, FakeCoreBridge.RecModel)], _bridge.OcrSetCalls);
+    }
+
+    [Fact]
+    public async Task Applying_OcrSetFailure_DoesNotComplete_AndRetryIsIdempotent()
+    {
+        WriteSetupJson("""{"flavor":"gpu","language":"vi","tiers":["small"],"activeTier":"small","extraLangs":[],"llmModels":[]}""");
+        _bridge.Installed.Add(FakeCoreBridge.DetModel);
+        _bridge.Installed.Add(FakeCoreBridge.RecModel);
+        _bridge.OcrSetFailuresRemaining = SetupCoordinator.MaxRetries + 1;
+        var coordinator = NewCoordinator();
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+        Assert.False(coordinator.IsComplete);
+        Assert.Equal(SetupCoordinator.MaxRetries + 1, _bridge.OcrSetCalls.Count);
+        Assert.All(_bridge.OcrSetCalls,
+            pair => Assert.Equal((FakeCoreBridge.DetModel, FakeCoreBridge.RecModel), pair));
+        Assert.False(ReadSetupJson().IsComplete);
+        Assert.Equal(FakeCoreBridge.DetModel, _settings.Load().OcrDet);
+        Assert.Equal(FakeCoreBridge.RecModel, _settings.Load().OcrRec);
+
+        await coordinator.RetryAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Equal(SetupCoordinator.MaxRetries + 2, _bridge.OcrSetCalls.Count);
+        Assert.Equal((FakeCoreBridge.DetModel, FakeCoreBridge.RecModel), _bridge.OcrSetCalls[^1]);
+    }
+
+    [Fact]
+    public void RemoveDeletedModel_UpdatesSetupSettingsAndPublishes()
+    {
+        const string deleted = "PP-OCRv6_medium_det";
+        WriteCompleteSetup(
+            dets: [FakeCoreBridge.DetModel, deleted], activeDet: deleted);
+        _settings.Save(AppSettings.Default with
+        {
+            OcrDet = deleted,
+            OcrRec = FakeCoreBridge.RecModel,
+            LlmActiveModel = string.Empty,
+        });
+        var coordinator = NewCoordinator();
+        int before = _changedCount;
+
+        coordinator.RemoveDeletedModel(
+            deleted,
+            [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel],
+            [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel]);
+
+        SetupState state = ReadSetupJson();
+        Assert.Equal([FakeCoreBridge.DetModel], state.Dets);
+        Assert.Equal(FakeCoreBridge.DetModel, state.ActiveDet);
+        Assert.Equal(FakeCoreBridge.DetModel, coordinator.ActiveDet);
+        Assert.Equal(FakeCoreBridge.DetModel, _settings.Load().OcrDet);
+        Assert.True(state.IsComplete);
+        Assert.True(coordinator.IsComplete);
+        Assert.True(_changedCount > before);
+    }
+
+    [Theory]
+    [InlineData("setup.json")]
+    [InlineData("settings.json")]
+    public void Delete_PersistenceFailure_FailsClosed(string failingFile)
+    {
+        const string deleted = "PP-OCRv6_medium_det";
+        WriteCompleteSetup(dets: [deleted], activeDet: deleted);
+        _settings.Save(AppSettings.Default with
+        {
+            OcrDet = deleted,
+            OcrRec = FakeCoreBridge.RecModel,
+            LlmActiveModel = string.Empty,
+        });
+        var coordinator = NewCoordinator();
+        int before = _changedCount;
+        if (failingFile == "setup.json")
+        {
+            File.Delete(_setupJson);
+            Directory.CreateDirectory(_setupJson);
+        }
+        else
+        {
+            File.Delete(_settingsJson);
+            Directory.CreateDirectory(_settingsJson);
+        }
+
+        InvalidOperationException failure = Assert.Throws<InvalidOperationException>(() =>
+            coordinator.RemoveDeletedModel(deleted, [], []));
+
+        Assert.False(coordinator.IsComplete);
+        Assert.False(PipelineGate.CanStartPipeline(
+            coordinator.IsComplete, coordinator.IsRunning, coordinator.SkippedForSession));
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+        Assert.Equal(string.Empty, coordinator.ActiveDet);
+        Assert.Contains(failingFile, failure.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(_changedCount > before);
+        if (failingFile == "settings.json")
+        {
+            SetupState persisted = ReadSetupJson();
+            Assert.False(persisted.IsComplete);
+            Assert.Equal(string.Empty, persisted.ActiveDet);
+        }
+    }
+
+    [Fact]
+    public async Task Delete_SettingsFailure_RepairNeverRestoresDeletedLlm()
+    {
+        string deleted = FakeCoreBridge.LlmCatalogNames[1];
+        WriteCompleteSetup(llmModels: [deleted], activeLlm: deleted);
+        _settings.Save(AppSettings.Default with
+        {
+            OcrDet = FakeCoreBridge.DetModel,
+            OcrRec = FakeCoreBridge.RecModel,
+            LlmActiveModel = deleted,
+        });
+        _bridge.Installed.Add(FakeCoreBridge.DetModel);
+        _bridge.Installed.Add(FakeCoreBridge.RecModel);
+        var coordinator = NewCoordinator();
+        File.Delete(_settingsJson);
+        Directory.CreateDirectory(_settingsJson);
+        Assert.Throws<InvalidOperationException>(() => coordinator.RemoveDeletedModel(
+            deleted, [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel],
+            [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel]));
+
+        Directory.Delete(_settingsJson, recursive: true);
+        _settings.Save(AppSettings.Default with
+        {
+            OcrDet = FakeCoreBridge.DetModel,
+            OcrRec = FakeCoreBridge.RecModel,
+            LlmActiveModel = deleted,
+        });
+        await coordinator.RetryAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.ChoosingLlmModels, coordinator.Step);
+
+        await coordinator.ContinueWithLlmModelsAsync([], null, TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Equal(string.Empty, _settings.Load().LlmActiveModel);
+        Assert.DoesNotContain(deleted, _bridge.LlmSetCalls);
+    }
+
+    [Fact]
+    public void BeginModelDeletion_PersistsIntentAndClosesGateBeforeCompletion()
+    {
+        WriteCompleteSetup();
+        var coordinator = NewCoordinator();
+        string deleted = FakeCoreBridge.LlmCatalogNames[1];
+
+        coordinator.BeginModelDeletion(
+            deleted, [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel],
+            [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel]);
+
+        Assert.True(File.Exists(_deletionJson));
+        using JsonDocument journal = JsonDocument.Parse(File.ReadAllText(_deletionJson));
+        Assert.Equal(deleted, journal.RootElement.GetProperty("name").GetString());
+        Assert.False(coordinator.IsComplete);
+        Assert.False(PipelineGate.CanStartPipeline(
+            coordinator.IsComplete, coordinator.IsRunning, coordinator.SkippedForSession));
+    }
+
+    [Fact]
+    public async Task Delete_RpcRejectedBeforeDelete_RestoresSelectionsAndOriginalError()
+    {
+        (string deleted, string replacement) = PrepareLlmDeletion();
+        _bridge.DeleteError = new InvalidOperationException("RPC rejected before delete");
+        var coordinator = NewCoordinator();
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            coordinator.DeleteLlmModelAsync(deleted, [replacement], [], TestContext.Current.CancellationToken));
+
+        Assert.Equal("RPC rejected before delete", error.Message);
+        Assert.True(coordinator.IsComplete);
+        Assert.Equal(deleted, coordinator.ActiveLlm);
+        Assert.Equal(deleted, ReadSetupJson().ActiveLlm);
+        Assert.Equal(deleted, _settings.Load().LlmActiveModel);
+        Assert.Equal("fixture-secret", _settings.Load().ApiKey);
+        Assert.False(File.Exists(_deletionJson));
+        Assert.Single(_bridge.DeleteCalls);
+        Assert.Empty(_bridge.LlmDownloaded);
+    }
+
+    [Fact]
+    public async Task Delete_RpcErrorAfterConfirmedDelete_CompletesDeletedConfirmedState()
+    {
+        (string deleted, string replacement) = PrepareLlmDeletion();
+        _bridge.DeleteError = new InvalidOperationException("response lost after delete");
+        _bridge.DeleteErrorAfterRemoval = true;
+        var coordinator = NewCoordinator();
+
+        await coordinator.DeleteLlmModelAsync(
+            deleted, [replacement], [], TestContext.Current.CancellationToken);
+
+        Assert.True(coordinator.IsComplete);
+        Assert.Equal(replacement, coordinator.ActiveLlm);
+        Assert.Equal(replacement, ReadSetupJson().ActiveLlm);
+        Assert.Equal(replacement, _settings.Load().LlmActiveModel);
+        Assert.False(File.Exists(_deletionJson));
+        Assert.Single(_bridge.DeleteCalls);
+        Assert.Empty(_bridge.LlmDownloaded);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Delete_AmbiguousOutcome_SameSessionRetryReconcilesActualCatalog(bool confirmedMissing)
+    {
+        (string deleted, string replacement) = PrepareLlmDeletion();
+        _bridge.DeleteError = new InvalidOperationException("unknown RPC outcome");
+        _bridge.DeleteErrorAfterRemoval = confirmedMissing;
+        _bridge.LlmListError = new IOException("catalog temporarily unavailable");
+        var coordinator = NewCoordinator();
+
+        InvalidOperationException error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            coordinator.DeleteLlmModelAsync(deleted, [replacement], [], TestContext.Current.CancellationToken));
+
+        Assert.Contains("unknown RPC outcome", error.Message, StringComparison.Ordinal);
+        Assert.Contains("retry", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+        Assert.Equal(deleted, coordinator.ActiveLlm);
+        Assert.Equal(deleted, ReadSetupJson().ActiveLlm);
+        Assert.Equal("Pending", JsonDocument.Parse(File.ReadAllText(_deletionJson)).RootElement.GetProperty("state").GetString());
+        Assert.Empty(_bridge.LlmDownloaded);
+
+        _bridge.LlmListError = null;
+        await coordinator.RetryAsync(TestContext.Current.CancellationToken);
+
+        string expected = confirmedMissing ? replacement : deleted;
+        Assert.Equal(expected, coordinator.ActiveLlm);
+        Assert.Equal(expected, ReadSetupJson().ActiveLlm);
+        Assert.Equal(expected, _settings.Load().LlmActiveModel);
+        Assert.True(coordinator.IsComplete);
+        Assert.False(File.Exists(_deletionJson));
+        Assert.Single(_bridge.DeleteCalls); // retry reconciles; it never deletes again
+        Assert.Empty(_bridge.LlmDownloaded);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Delete_AmbiguousOutcome_RestartReconcilesBeforeAnyDownload(bool confirmedMissing)
+    {
+        (string deleted, string replacement) = PrepareLlmDeletion();
+        _bridge.DeleteError = new InvalidOperationException("process lost the RPC response");
+        _bridge.DeleteErrorAfterRemoval = confirmedMissing;
+        _bridge.LlmListError = new IOException("catalog temporarily unavailable");
+        var coordinator = NewCoordinator();
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            coordinator.DeleteLlmModelAsync(deleted, [replacement], [], TestContext.Current.CancellationToken));
+
+        var restarted = NewCoordinator();
+        Assert.Equal(SetupStep.Failed, restarted.Step);
+        Assert.Equal(deleted, restarted.ActiveLlm); // restart alone proves nothing about deletion
+        Assert.Equal(deleted, ReadSetupJson().ActiveLlm);
+
+        _bridge.LlmListError = null;
+        await restarted.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        string expected = confirmedMissing ? replacement : deleted;
+        Assert.Equal(expected, restarted.ActiveLlm);
+        Assert.Equal(expected, ReadSetupJson().ActiveLlm);
+        Assert.Equal(expected, _settings.Load().LlmActiveModel);
+        Assert.True(restarted.IsComplete);
+        Assert.False(File.Exists(_deletionJson));
+        Assert.Single(_bridge.DeleteCalls);
+        Assert.Empty(_bridge.LlmDownloaded);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Delete_AmbiguousOutcome_ColdCoreIsStartedBeforeCatalogReconciliation(
+        bool confirmedMissing, bool useRetry)
+    {
+        (string deleted, string replacement) = PrepareLlmDeletion();
+        _bridge.DeleteError = new InvalidOperationException("process lost the RPC response");
+        _bridge.DeleteErrorAfterRemoval = confirmedMissing;
+        _bridge.LlmListError = new IOException("catalog temporarily unavailable");
+        var coordinator = NewCoordinator();
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            coordinator.DeleteLlmModelAsync(deleted, [replacement], [], TestContext.Current.CancellationToken));
+
+        _bridge.LlmListError = null;
+        _bridge.ColdCore = true;
+        var restarted = NewCoordinator();
+        if (useRetry) await restarted.RetryAsync(TestContext.Current.CancellationToken);
+        else await restarted.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        string expected = confirmedMissing ? replacement : deleted;
+        Assert.Equal(expected, restarted.ActiveLlm);
+        Assert.Equal(expected, ReadSetupJson().ActiveLlm);
+        Assert.Equal(expected, _settings.Load().LlmActiveModel);
+        Assert.True(restarted.IsComplete);
+        Assert.Equal(1, _bridge.EnsureStartedCount);
+        Assert.False(_bridge.ColdCore);
+        Assert.False(File.Exists(_deletionJson));
+        Assert.Single(_bridge.DeleteCalls);
+        Assert.Empty(_bridge.LlmDownloaded);
+    }
+
+    [Fact]
+    public async Task Delete_ConfirmedMarkerPrecedesFailClosedSelectionPersistence()
+    {
+        (string deleted, string replacement) = PrepareLlmDeletion();
+        var coordinator = NewCoordinator();
+        File.Delete(_setupJson);
+        Directory.CreateDirectory(_setupJson);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            coordinator.DeleteLlmModelAsync(deleted, [replacement], [], TestContext.Current.CancellationToken));
+
+        using JsonDocument journal = JsonDocument.Parse(File.ReadAllText(_deletionJson));
+        Assert.Equal("DeletedConfirmed", journal.RootElement.GetProperty("state").GetString());
+        Assert.Equal(deleted, journal.RootElement.GetProperty("name").GetString());
+        Assert.False(coordinator.IsComplete);
+        Assert.DoesNotContain(deleted, _bridge.LlmInstalled);
+        Assert.DoesNotContain("fixture-secret", File.ReadAllText(_deletionJson), StringComparison.Ordinal);
+    }
+
+    private (string Deleted, string Replacement) PrepareLlmDeletion()
+    {
+        string deleted = FakeCoreBridge.LlmCatalogNames[1];
+        string replacement = FakeCoreBridge.LlmCatalogNames[0];
+        WriteCompleteSetup(llmModels: [deleted, replacement], activeLlm: deleted);
+        _settings.Save(AppSettings.Default with
+        {
+            ApiKey = "fixture-secret",
+            LlmApiKey = "fixture-llm-secret",
+            OcrDet = FakeCoreBridge.DetModel,
+            OcrRec = FakeCoreBridge.RecModel,
+            LlmActiveModel = deleted,
+        });
+        _bridge.LlmInstalled.Add(deleted);
+        _bridge.LlmInstalled.Add(replacement);
+        _bridge.LlmRuntimeInstalled = true;
+        _bridge.LlmRuntimeTag = "b7234";
+        _bridge.LlmRuntimeLatestTag = "b7234";
+        return (deleted, replacement);
+    }
+
+    [Fact]
+    public void PendingDeletion_Restart_DoesNotApplyAfterDeleteOrExposeSecrets()
+    {
+        string deleted = FakeCoreBridge.LlmCatalogNames[1];
+        WriteCompleteSetup(llmModels: [deleted], activeLlm: deleted);
+        _settings.Save(AppSettings.Default with
+        {
+            ApiKey = "fixture-secret-never-journal",
+            LlmApiKey = "fixture-llm-secret-never-journal",
+            OcrDet = FakeCoreBridge.DetModel,
+            OcrRec = FakeCoreBridge.RecModel,
+            LlmActiveModel = deleted,
+        });
+        var coordinator = NewCoordinator();
+        coordinator.BeginModelDeletion(deleted, [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel], []);
+
+        var restarted = NewCoordinator();
+
+        Assert.Equal(deleted, restarted.ActiveLlm); // Pending is intent, not proof of deletion
+        Assert.Equal(SetupStep.Failed, restarted.Step);
+        Assert.False(restarted.IsComplete);
+        string journal = File.ReadAllText(_deletionJson);
+        Assert.Contains("pending", journal, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("fixture-secret", journal, StringComparison.Ordinal);
+        Assert.DoesNotContain("apiKey", journal, StringComparison.Ordinal);
+        Assert.Contains("rollback", journal, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(deleted, ReadSetupJson().ActiveLlm);
+    }
+
+    [Fact]
+    public async Task Retry_NullActiveLlm_DoesNotCompleteUntilDeletedSettingsSynced()
+    {
+        string deleted = FakeCoreBridge.LlmCatalogNames[1];
+        WriteCompleteSetup(llmModels: [], activeLlm: null);
+        _settings.Save(AppSettings.Default with
+        {
+            OcrDet = FakeCoreBridge.DetModel,
+            OcrRec = FakeCoreBridge.RecModel,
+            LlmActiveModel = deleted,
+        });
+        _bridge.Installed.Add(FakeCoreBridge.DetModel);
+        _bridge.Installed.Add(FakeCoreBridge.RecModel);
+        var coordinator = NewCoordinator();
+        File.Delete(_settingsJson);
+        Directory.CreateDirectory(_settingsJson);
+        Assert.Throws<InvalidOperationException>(() => coordinator.RemoveDeletedModel(
+            deleted, [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel],
+            [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel]));
+
+        await coordinator.RetryAsync(TestContext.Current.CancellationToken);
+
+        Assert.False(coordinator.IsComplete);
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+        Assert.True(File.Exists(_deletionJson));
+
+        Directory.Delete(_settingsJson, recursive: true);
+        _settings.Save(AppSettings.Default with
+        {
+            OcrDet = FakeCoreBridge.DetModel,
+            OcrRec = FakeCoreBridge.RecModel,
+            LlmActiveModel = deleted,
+        });
+        await coordinator.RetryAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.Equal(string.Empty, _settings.Load().LlmActiveModel);
+        Assert.False(File.Exists(_deletionJson));
+    }
+
+    [Fact]
+    public void Delete_PersistenceFailure_SkipForSession_KeepsGateClosed()
+    {
+        const string deleted = "PP-OCRv6_medium_det";
+        WriteCompleteSetup(dets: [FakeCoreBridge.DetModel, deleted], activeDet: deleted);
+        _settings.Save(AppSettings.Default with { OcrDet = deleted });
+        var coordinator = NewCoordinator();
+        File.Delete(_settingsJson);
+        Directory.CreateDirectory(_settingsJson);
+        Assert.Throws<InvalidOperationException>(() => coordinator.RemoveDeletedModel(
+            deleted, [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel],
+            [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel]));
+
+        coordinator.SkipForSession();
+
+        Assert.False(coordinator.SkippedForSession);
+        Assert.False(PipelineGate.CanStartPipeline(
+            coordinator.IsComplete, coordinator.IsRunning, coordinator.SkippedForSession));
+    }
+
+    [Fact]
+    public async Task Delete_FirstSetupWriteFailure_RestartRestoresTombstoneWithoutRedownload()
+    {
+        string deleted = FakeCoreBridge.LlmCatalogNames[1];
+        WriteCompleteSetup(llmModels: [deleted], activeLlm: deleted);
+        _settings.Save(AppSettings.Default with
+        {
+            OcrDet = FakeCoreBridge.DetModel,
+            OcrRec = FakeCoreBridge.RecModel,
+            LlmActiveModel = deleted,
+        });
+        _bridge.Installed.Add(FakeCoreBridge.DetModel);
+        _bridge.Installed.Add(FakeCoreBridge.RecModel);
+        string staleSetup = File.ReadAllText(_setupJson);
+        var coordinator = NewCoordinator();
+        File.Delete(_setupJson);
+        Directory.CreateDirectory(_setupJson);
+        Assert.Throws<InvalidOperationException>(() => coordinator.RemoveDeletedModel(
+            deleted, [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel],
+            [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel]));
+        Directory.Delete(_setupJson, recursive: true);
+        File.WriteAllText(_setupJson, staleSetup);
+
+        var restarted = NewCoordinator();
+
+        Assert.False(restarted.IsComplete);
+        Assert.NotEqual(deleted, restarted.ActiveLlm);
+        Assert.False(PipelineGate.CanStartPipeline(
+            restarted.IsComplete, restarted.IsRunning, restarted.SkippedForSession));
+        await restarted.StartAsync(ct: TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.ChoosingLlmModels, restarted.Step);
+        Assert.DoesNotContain(deleted, _bridge.LlmDownloaded);
+    }
+
+    [Fact]
+    public async Task Retry_DefaultReplacement_RequiresSuccessfulSettingsWriteBeforeJournalClear()
+    {
+        string replacement = AppSettings.Default.LlmActiveModel;
+        string deleted = FakeCoreBridge.LlmCatalogNames[1];
+        WriteCompleteSetup(llmModels: [deleted, replacement], activeLlm: deleted);
+        _settings.Save(AppSettings.Default with
+        {
+            OcrDet = FakeCoreBridge.DetModel,
+            OcrRec = FakeCoreBridge.RecModel,
+            LlmActiveModel = deleted,
+        });
+        _bridge.Installed.Add(FakeCoreBridge.DetModel);
+        _bridge.Installed.Add(FakeCoreBridge.RecModel);
+        var coordinator = NewCoordinator();
+        int settingsWrites = 0;
+        _settings.Changed += () => settingsWrites++;
+        File.Delete(_settingsJson);
+        Directory.CreateDirectory(_settingsJson);
+        Assert.Throws<InvalidOperationException>(() => coordinator.RemoveDeletedModel(
+            deleted,
+            [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel, replacement],
+            [FakeCoreBridge.DetModel, FakeCoreBridge.RecModel, replacement]));
+
+        await coordinator.RetryAsync(TestContext.Current.CancellationToken);
+
+        Assert.False(coordinator.IsComplete);
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+        Assert.True(File.Exists(_deletionJson));
+        Assert.Equal(0, settingsWrites);
+
+        Directory.Delete(_settingsJson, recursive: true);
+        _settings.Save(AppSettings.Default with
+        {
+            OcrDet = FakeCoreBridge.DetModel,
+            OcrRec = FakeCoreBridge.RecModel,
+            LlmActiveModel = deleted,
+        });
+        settingsWrites = 0;
+        await coordinator.RetryAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.True(settingsWrites > 0);
+        Assert.Equal(replacement, _settings.Load().LlmActiveModel);
+        Assert.NotEqual(deleted, _settings.Load().LlmActiveModel);
+        Assert.False(File.Exists(_deletionJson));
+    }
+
+    // ── Task 3: observable setup faults and fail-fast model downloads ─────────────────────────────
+
+    [Fact]
+    public async Task StartAsync_SaveFault_PublishesFailedAndReleasesRun()
+    {
+        // A directory at setup.json makes the real atomic Save fail when it tries to replace that path.
+        Directory.CreateDirectory(_setupJson);
+        var logger = new RecordingLogger<SetupCoordinator>();
+        var coordinator = NewCoordinator(logger: logger);
+        SetupMessage? publishedError = null;
+        bool? runningAtFailurePublish = null;
+        coordinator.Changed += () =>
+        {
+            if (coordinator.Step != SetupStep.Failed) return;
+            publishedError = coordinator.Error;
+            runningAtFailurePublish = coordinator.IsRunning;
+        };
+
+        await coordinator.StartAsync(ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+        Assert.Equal("setup.fail.unexpected", coordinator.Error?.Key);
+        Assert.NotEqual("setup.fail.unexpected", Text(coordinator.Error));
+        Assert.NotNull(publishedError);
+        Assert.Equal(true, runningAtFailurePublish); // Failed is observable before EndRun releases the button.
+        Assert.False(coordinator.IsRunning);
+        Assert.Contains(logger.Entries, entry => entry.Level == LogLevel.Error && entry.Exception is not null);
+    }
+
+    [Fact]
+    public async Task StartAsync_FaultFromDoneBeforeChecking_RetryRecoversFromChecking()
+    {
+        WriteCompleteSetup();
+        int stateLoads = 0;
+        SetupState StateFactory()
+        {
+            stateLoads++;
+            if (stateLoads == 2) throw new InvalidOperationException("injected pre-check load fault");
+            return SetupState.Load(_setupJson);
+        }
+        var coordinator = NewCoordinator(stateFactory: StateFactory);
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+
+        await coordinator.StartAsync(force: true, TestContext.Current.CancellationToken);
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+
+        await coordinator.RetryAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(SetupStep.Done, coordinator.Step);
+        Assert.NotEmpty(coordinator.Checks); // Retry really re-entered Checking instead of indexing PipelineSteps[-1].
+        Assert.Single(_uvFake.SyncCalls);    // The normal recovery pipeline then ran through Done.
+        Assert.False(coordinator.IsRunning);
+    }
+
+    [Fact]
+    public async Task DownloadModels_DownloadError_FailsAttemptImmediately()
+    {
+        WriteCompleteSetup();
+        _bridge.OcrDownloadErrors[FakeCoreBridge.DetModel] = "fake background download failed";
+        var coordinator = NewCoordinator(
+            modelPollInterval: TimeSpan.FromMinutes(1),
+            modelDownloadTimeout: TimeSpan.FromMinutes(1));
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+
+        await coordinator.StartAsync(force: true, deadline.Token);
+
+        Assert.False(deadline.IsCancellationRequested); // no poll-interval or 60-minute wait after the failure
+        Assert.Equal(SetupStep.Failed, coordinator.Step);
+        Assert.Equal("setup.fail.models", coordinator.Error?.Key);
+        Assert.Equal(SetupCoordinator.MaxRetries + 1,
+            _bridge.Downloaded.Count(name => name == FakeCoreBridge.DetModel));
+        Assert.Equal(1, _bridge.Downloaded.Count(name => name == FakeCoreBridge.RecModel));
+        Assert.False(coordinator.IsRunning);
+    }
+
+    private sealed class RecordingLogger<T> : ILogger<T>
+    {
+        public List<(LogLevel Level, Exception? Exception, string Message)> Entries { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) =>
+            Entries.Add((logLevel, exception, formatter(state, exception)));
+    }
+
     // ── fakes ─────────────────────────────────────────────────────────────────────────────────────
 
     private sealed class FakeAdapters(VideoAdapterInfo[] items) : IVideoAdapterSource
@@ -2027,8 +2829,33 @@ public class SetupCoordinatorTests : IDisposable
 
         public List<string> Downloaded { get; } = [];
 
+        /// <summary>Failed idle OCR downloads exposed by the catalog. Các lượt tải OCR đã dừng và báo lỗi trong catalog.</summary>
+        public Dictionary<string, string> OcrDownloadErrors { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>OCR pairs accepted via ocr.models.set, in order. Cặp OCR nhận qua ocr.models.set, theo thứ tự.</summary>
+        public List<(string Det, string Rec)> OcrSetCalls { get; } = [];
+
+        /// <summary>Number of ocr.models.set calls that fail before success. Số lời gọi ocr.models.set fail trước khi thành công.</summary>
+        public int OcrSetFailuresRemaining { get; set; }
+
+        /// <summary>Runs after a successful pair update. Chạy sau khi cập nhật cặp thành công.</summary>
+        public Action? OnOcrSet { get; set; }
+
         /// <summary>GGUF names the fake reports installed. Tên GGUF fake báo đã cài.</summary>
         public HashSet<string> LlmInstalled { get; } = [];
+
+        /// <summary>Optional delete failure used to exercise rejection and lost-response outcomes. Lỗi xoá tùy chọn để kiểm tra reject và mất phản hồi.</summary>
+        public Exception? DeleteError { get; set; }
+
+        /// <summary>Whether the fake removes the artifact before throwing <see cref="DeleteError"/>. Có xoá artifact trước khi ném <see cref="DeleteError"/> hay không.</summary>
+        public bool DeleteErrorAfterRemoval { get; set; }
+
+        /// <summary>Optional catalog failures for ambiguous deletion reconciliation. Lỗi catalog tùy chọn cho reconcile xoá chưa rõ kết quả.</summary>
+        public Exception? OcrListError { get; set; }
+        public Exception? LlmListError { get; set; }
+
+        /// <summary>Delete RPC names in call order. Tên các RPC xoá theo thứ tự gọi.</summary>
+        public List<string> DeleteCalls { get; } = [];
 
         /// <summary>GGUF names accepted via <c>llm.models.download</c>, in order. Tên GGUF nhận qua <c>llm.models.download</c>, theo thứ tự.</summary>
         public List<string> LlmDownloaded { get; } = [];
@@ -2059,6 +2886,13 @@ public class SetupCoordinatorTests : IDisposable
 
         /// <summary>Whether the latest accepted runtime attempt is queued/in-flight. Attempt runtime mới nhận còn đang xếp hàng/chạy hay không.</summary>
         public bool LlmRuntimeDownloading { get; set; }
+
+        /// <summary>Attempt state exposed by <c>llm.runtime.status</c>. Trạng thái attempt mà <c>llm.runtime.status</c> phơi ra.</summary>
+        public string LlmRuntimeAttemptState { get; set; } = "None";
+
+        /// <summary>Optional full status factory for wire-shape regressions. Factory status đầy đủ tuỳ chọn cho regression về wire shape.</summary>
+        public Func<long, JsonObject>? LlmRuntimeStatusFactory { get; set; }
+
         private long _llmRuntimeAttempt;
 
         /// <summary>Optional <c>downloadFailed</c> flag the fake includes in <c>llm.runtime.status</c>. Cờ <c>downloadFailed</c> tuỳ chọn fake nhúng vào <c>llm.runtime.status</c>.</summary>
@@ -2078,6 +2912,24 @@ public class SetupCoordinatorTests : IDisposable
 
         public int RestartCount { get; private set; }
 
+        /// <summary>Simulates a peer whose JSON-RPC calls fail until EnsureStartedAsync is called.</summary>
+        public bool ColdCore { get; set; }
+
+        /// <summary>Number of cold starts performed by EnsureStartedAsync.</summary>
+        public int EnsureStartedCount { get; private set; }
+
+        /// <summary>Starts the fake core only when it is cold.</summary>
+        public Task EnsureStartedAsync(CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (ColdCore)
+            {
+                ColdCore = false;
+                EnsureStartedCount++;
+            }
+            return Task.CompletedTask;
+        }
+
         /// <summary>The dev machine's GPU (RTX 5060 Ti, CC 12.0 — measured 2026-11-08).</summary>
         public JsonNode? DeviceResult { get; set; } = new JsonObject
         {
@@ -2095,44 +2947,55 @@ public class SetupCoordinatorTests : IDisposable
         public Task<JsonNode?> CallAsync(string method, JsonNode? @params, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
+            if (ColdCore) throw new InvalidOperationException("Core not started");
             Calls.Add((method, @params));
             return method switch
             {
                 "sidecar.ping" => Task.FromResult<JsonNode?>(JsonValue.Create("pong")),
-                "ocr.models.list" => Task.FromResult<JsonNode?>(BuildList()),
+                "ocr.models.list" => ListOcrModels(),
+                "ocr.models.delete" => DeleteOcrModel(@params),
                 "ocr.models.recommend" => Task.FromResult<JsonNode?>(new JsonObject
                 {
                     ["det"] = DetModel,
                     ["rec"] = RecModel,
                 }),
                 "ocr.models.download" => Download(@params),
+                "ocr.models.set" => SetOcrModelPair(@params),
                 "sidecar.device" => Task.FromResult(DeviceResult),
-                "llm.runtime.status" => Task.FromResult<JsonNode?>(new JsonObject
-                {
-                    ["tag"] = LlmRuntimeInstalled ? "b7234" : null,
-                    ["installed"] = LlmRuntimeInstalled,
-                    ["serverPath"] = LlmRuntimeInstalled
-                        ? @"C:\fake\llm\runtime\b7234\llama-server.exe"
-                        : null,
-                    ["downloadFailed"] = LlmRuntimeDownloadFailed,
-                    ["downloadError"] = LlmRuntimeDownloadFailed ? LlmRuntimeDownloadError : null,
-                    ["downloading"] = LlmRuntimeDownloading,
-                    ["attempt"] = _llmRuntimeAttempt,
-                    ["progress"] = LlmRuntimeProgress is null
-                        ? null
-                        : new JsonObject
-                        {
-                            ["receivedBytes"] = LlmRuntimeProgress.ReceivedBytes,
-                            ["totalBytes"] = LlmRuntimeProgress.TotalBytes,
-                            ["bytesPerSec"] = LlmRuntimeProgress.BytesPerSec,
-                        },
-                }),
+                "llm.runtime.status" => Task.FromResult<JsonNode?>(BuildLlmRuntimeStatus()),
                 "llm.runtime.download" => DownloadLlmRuntime(@params),
                 "llm.runtime.check" => CheckLlmRuntime(@params),
-                "llm.models.list" => Task.FromResult<JsonNode?>(BuildLlmList()),
+                "llm.models.list" => ListLlmModels(),
+                "llm.models.delete" => DeleteLlmModel(@params),
                 "llm.models.download" => DownloadLlmModel(@params),
                 "llm.models.set" => SetLlmModel(@params),
                 _ => Task.FromResult<JsonNode?>(null),
+            };
+        }
+
+        private JsonObject BuildLlmRuntimeStatus()
+        {
+            if (LlmRuntimeStatusFactory is { } factory) return factory(_llmRuntimeAttempt);
+            return new JsonObject
+            {
+                ["tag"] = LlmRuntimeInstalled ? "b7234" : null,
+                ["installed"] = LlmRuntimeInstalled,
+                ["serverPath"] = LlmRuntimeInstalled
+                    ? @"C:\fake\llm\runtime\b7234\llama-server.exe"
+                    : null,
+                ["downloadFailed"] = LlmRuntimeDownloadFailed,
+                ["downloadError"] = LlmRuntimeDownloadFailed ? LlmRuntimeDownloadError : null,
+                ["downloading"] = LlmRuntimeDownloading,
+                ["attempt"] = _llmRuntimeAttempt,
+                ["attemptState"] = LlmRuntimeAttemptState,
+                ["progress"] = LlmRuntimeProgress is null
+                    ? null
+                    : new JsonObject
+                    {
+                        ["receivedBytes"] = LlmRuntimeProgress.ReceivedBytes,
+                        ["totalBytes"] = LlmRuntimeProgress.TotalBytes,
+                        ["bytesPerSec"] = LlmRuntimeProgress.BytesPerSec,
+                    },
             };
         }
 
@@ -2140,16 +3003,46 @@ public class SetupCoordinatorTests : IDisposable
         {
             string name = @params!["name"]!.GetValue<string>();
             Downloaded.Add(name);
-            Installed.Add(name); // the fake "download" completes immediately
+            if (!OcrDownloadErrors.ContainsKey(name))
+                Installed.Add(name); // the fake "download" completes immediately unless it failed in the background
             return Task.FromResult<JsonNode?>(new JsonObject { ["accepted"] = true });
+        }
+
+        private Task<JsonNode?> SetOcrModelPair(JsonNode? @params)
+        {
+            string det = @params!["det"]!.GetValue<string>();
+            string rec = @params!["rec"]!.GetValue<string>();
+            OcrSetCalls.Add((det, rec));
+            if (OcrSetFailuresRemaining > 0)
+            {
+                OcrSetFailuresRemaining--;
+                throw new InvalidOperationException("fake: ocr.models.set failed");
+            }
+            OnOcrSet?.Invoke();
+            return Task.FromResult<JsonNode?>(new JsonObject
+            {
+                ["active"] = new JsonObject { ["det"] = det, ["rec"] = rec },
+            });
         }
 
         private Task<JsonNode?> DownloadLlmRuntime(JsonNode? @params)
         {
             LlmRuntimeDownloads.Add(@params!["flavor"]!.GetValue<string>());
             _llmRuntimeAttempt++;
-            LlmRuntimeDownloading = !LlmRuntimeDownloadCompletes;
-            if (LlmRuntimeDownloadCompletes) LlmRuntimeInstalled = true; // fast network unless disabled
+            if (LlmRuntimeDownloadCompletes)
+            {
+                LlmRuntimeAttemptState = "Succeeded";
+                LlmRuntimeInstalled = true; // fast network unless disabled
+            }
+            else if (LlmRuntimeDownloadFailed)
+            {
+                LlmRuntimeAttemptState = "Failed";
+            }
+            else if (LlmRuntimeAttemptState != "Cancelled")
+            {
+                LlmRuntimeAttemptState = "Running";
+            }
+            LlmRuntimeDownloading = LlmRuntimeAttemptState == "Running";
             return Task.FromResult<JsonNode?>(new JsonObject
             {
                 ["accepted"] = true,
@@ -2183,6 +3076,36 @@ public class SetupCoordinatorTests : IDisposable
             return Task.FromResult<JsonNode?>(new JsonObject { ["active"] = @params!["name"]!.GetValue<string>() });
         }
 
+        private Task<JsonNode?> ListOcrModels()
+        {
+            if (OcrListError is not null) throw OcrListError;
+            return Task.FromResult<JsonNode?>(BuildList());
+        }
+
+        private Task<JsonNode?> ListLlmModels()
+        {
+            if (LlmListError is not null) throw LlmListError;
+            return Task.FromResult<JsonNode?>(BuildLlmList());
+        }
+
+        private Task<JsonNode?> DeleteOcrModel(JsonNode? @params)
+        {
+            string name = @params!["name"]!.GetValue<string>();
+            DeleteCalls.Add($"ocr:{name}");
+            if (DeleteError is null || DeleteErrorAfterRemoval) Installed.Remove(name);
+            if (DeleteError is not null) throw DeleteError;
+            return Task.FromResult<JsonNode?>(new JsonObject { ["deleted"] = true });
+        }
+
+        private Task<JsonNode?> DeleteLlmModel(JsonNode? @params)
+        {
+            string name = @params!["name"]!.GetValue<string>();
+            DeleteCalls.Add($"llm:{name}");
+            if (DeleteError is null || DeleteErrorAfterRemoval) LlmInstalled.Remove(name);
+            if (DeleteError is not null) throw DeleteError;
+            return Task.FromResult<JsonNode?>(new JsonObject { ["deleted"] = true });
+        }
+
         private JsonNode BuildLlmList()
         {
             // Hình dạng thật: array entry phẳng (JsonSerializer của List<LlmModelInfo>).
@@ -2208,6 +3131,8 @@ public class SetupCoordinatorTests : IDisposable
                     ["name"] = name,
                     ["kind"] = name.EndsWith("det", StringComparison.Ordinal) ? "det" : "rec",
                     ["installed"] = Installed.Contains(name),
+                    ["downloading"] = false,
+                    ["downloadError"] = OcrDownloadErrors.TryGetValue(name, out string? error) ? error : null,
                 });
             }
 

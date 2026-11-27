@@ -1,3 +1,5 @@
+using System.Runtime.ExceptionServices;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
 
@@ -75,6 +77,13 @@ public interface ISetupCoreBridge
     /// Disposes and starts the core process again (the existing kill+start path).
     /// Dispose và khởi động lại tiến trình core (đường kill+start có sẵn).
     /// </summary>
+    /// <summary>
+    /// Ensures the Core process is running without restarting an already healthy peer.
+    /// Đảm bảo tiến trình Core đang chạy mà không khởi động lại peer vẫn khỏe.
+    /// </summary>
+    /// <param name="ct">Cancellation token. Token hủy.</param>
+    Task EnsureStartedAsync(CancellationToken ct);
+
     /// <param name="ct">Cancellation token. Token hủy.</param>
     Task RestartAsync(CancellationToken ct);
 }
@@ -147,6 +156,12 @@ public sealed class SetupCoordinator
 
     private static readonly TimeSpan DefaultModelPollInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan DefaultModelDownloadTimeout = TimeSpan.FromMinutes(60);
+    private static readonly JsonSerializerOptions DeletionJournalJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true,
+        WriteIndented = true,
+    };
 
     // Pipeline steps in order; Checking and the pre-pipeline answers (det/rec models, languages, LLM)
     // run before it, Done after it.
@@ -173,11 +188,18 @@ public sealed class SetupCoordinator
     private readonly Func<string, bool> _fileExists;
     private readonly Func<string, int>? _countModelEntries;
     private readonly Func<string, bool> _modelDirExists;
+    private readonly Func<string, string> _readText;
+    private readonly string _llmRoot;
+    private readonly string _deletionJournalPath;
     private readonly TimeSpan _modelPollInterval;
     private readonly TimeSpan _modelDownloadTimeout;
     private readonly ILogger<SetupCoordinator>? _logger;
 
     private SetupState _state;
+    private bool _selectionPersistenceFailed;
+    private ModelDeletionIntent? _deletionIntent;
+    private bool _deletionJournalUnreadable;
+    private bool _deletionSettingsWritten;
     private int _running; // 0 idle / 1 a run is in progress (Interlocked) - guards against double starts
     private SetupCheckItem[] _checks = []; // snapshot checklist Checking - thay nguyên khối mỗi event
     private SetupDownloadInfo[] _downloads = []; // snapshot tiến độ tải - thay nguyên khối mỗi poll
@@ -215,6 +237,9 @@ public sealed class SetupCoordinator
     /// <param name="fileExists">File-existence probe for uv.exe (Checking + VerifyingFiles); defaults to <see cref="File.Exists"/>. Probe tồn tại file cho uv.exe (Checking + VerifyingFiles); mặc định <see cref="File.Exists"/>.</param>
     /// <param name="countModelEntries">Counts installed models for the Checking checklist; defaults to the real models directory. Đếm model đã cài cho checklist Checking; mặc định là thư mục models thật.</param>
     /// <param name="modelDirExists">Installed-probe for one model directory under the models cache, used by the rerun reconcile; defaults to <see cref="IsModelDirInstalled"/> (the sidecar's strict rule — non-empty dir, no <c>.partial</c> marker). Probe "đã cài" cho thư mục của một model trong cache model, dùng bởi reconcile khi chạy lại; mặc định <see cref="IsModelDirInstalled"/> (luật nghiêm của sidecar — thư mục không rỗng, không có marker <c>.partial</c>).</param>
+    /// <param name="readText">Text-read seam for selected-artifact JSON preflight; defaults to <see cref="File.ReadAllText"/>. Seam đọc text cho preflight JSON artifact đã chọn; mặc định <see cref="File.ReadAllText"/>.</param>
+    /// <param name="llmRoot">Local LLM root for artifact preflight; defaults to <see cref="SetupPaths.LlmRoot"/>. Thư mục gốc LLM local cho preflight artifact; mặc định <see cref="SetupPaths.LlmRoot"/>.</param>
+    /// <param name="deletionJournalPath">Persistent model-deletion intent journal path; defaults to <see cref="SetupPaths.ModelDeletionJsonPath"/>. Đường dẫn journal intent xoá model bền; mặc định <see cref="SetupPaths.ModelDeletionJsonPath"/>.</param>
     /// <param name="modelPollInterval">Delay between <c>ocr.models.list</c> polls while models download; default 2 s. Khoảng cách giữa các lần poll <c>ocr.models.list</c> khi đang tải model; mặc định 2 s.</param>
     /// <param name="modelDownloadTimeout">Total window per download attempt; default 60 min. Cửa sổ tổng cho mỗi lượt tải; mặc định 60 phút.</param>
     /// <param name="logger">DI logger, or <see langword="null"/> to log nothing. Logger DI, hoặc <see langword="null"/> để không ghi log.</param>
@@ -231,6 +256,9 @@ public sealed class SetupCoordinator
         Func<string, bool>? fileExists = null,
         Func<string, int>? countModelEntries = null,
         Func<string, bool>? modelDirExists = null,
+        Func<string, string>? readText = null,
+        string? llmRoot = null,
+        string? deletionJournalPath = null,
         TimeSpan? modelPollInterval = null,
         TimeSpan? modelDownloadTimeout = null,
         ILogger<SetupCoordinator>? logger = null)
@@ -254,10 +282,14 @@ public sealed class SetupCoordinator
         _fileExists = fileExists ?? File.Exists;
         _countModelEntries = countModelEntries;
         _modelDirExists = modelDirExists ?? IsModelDirInstalled;
+        _readText = readText ?? File.ReadAllText;
+        _llmRoot = llmRoot ?? SetupPaths.LlmRoot;
+        _deletionJournalPath = deletionJournalPath ?? SetupPaths.ModelDeletionJsonPath;
         _modelPollInterval = modelPollInterval ?? DefaultModelPollInterval;
         _modelDownloadTimeout = modelDownloadTimeout ?? DefaultModelDownloadTimeout;
         _logger = logger;
         _state = _stateFactory();
+        RestoreDeletionIntent();
 
         // A fresh launch on an already-set-up machine must not leave the singleton stuck at Checking:
         // SetupModal's cheap path (NeedsSetup false) never calls StartAsync, and both the pipeline gate
@@ -267,7 +299,7 @@ public sealed class SetupCoordinator
         // của SetupModal (NeedsSetup false) không bao giờ gọi StartAsync, và cả gate pipeline lẫn section
         // khôi phục trong Settings ("Chạy lại setup") đều đọc IsComplete từ Step. Chỉ là khởi tạo — không
         // Publish vì thời điểm construct chưa có subscriber nào.
-        if (_state.IsComplete) Step = SetupStep.Done;
+        if (_state.IsComplete && !_selectionPersistenceFailed) Step = SetupStep.Done;
     }
 
     /// <summary>
@@ -406,26 +438,28 @@ public sealed class SetupCoordinator
     /// Starts the wizard: re-runs the system check (it is pure and cheap, and the flavor must follow
     /// the CURRENT hardware), pauses at the first unanswered pre-pipeline question (det/rec models →
     /// languages → LLM), then runs the pipeline from the first not-done step. A completed
-    /// state short-circuits straight to <see cref="SetupStep.Done"/>. With <paramref name="force"/>
-    /// (the Settings "re-run setup" repair path) the run RESTARTS FROM STEP 1 instead: the v2 answers
-    /// and every step marker are cleared (and saved immediately, so a crash mid-rerun leaves a
-    /// consistent "rerunning" state), all three question screens are asked again, and the pipeline
-    /// re-verifies — while genuinely installed models are still not re-downloaded.
+    /// state short-circuits straight to <see cref="SetupStep.Done"/> only while every selected artifact
+    /// remains present. With <paramref name="force"/> (the Settings repair path), every step marker is
+    /// cleared and persisted immediately, valid answers are preserved, only missing/invalid question
+    /// screens are asked again, and the pipeline re-verifies without re-downloading installed models.
     /// Khởi động wizard: chạy lại check system (thuần và rẻ, flavor phải theo phần cứng HIỆN TẠI), dừng
     /// ở câu hỏi pre-pipeline đầu tiên chưa được trả lời (model det/rec → Ngôn ngữ → LLM), rồi
-    /// chạy pipeline từ bước chưa done đầu tiên. State đã xong thì nhảy thẳng tới
-    /// <see cref="SetupStep.Done"/>. Với <paramref name="force"/> (đường "chạy lại setup" trong
-    /// Settings — để sửa lỗi) lượt chạy CHẠY LẠI TỪ BƯỚC 1: xoá câu trả lời v2 và mọi marker bước
-    /// (ghi file ngay, để crash giữa rerun vẫn là state "đang rerun" nhất quán), hỏi lại cả 3 màn,
-    /// pipeline xác minh lại — còn model ĐÃ CÀI THẬT vẫn không bị tải lại.
+    /// chạy pipeline từ bước chưa done đầu tiên. State đã xong chỉ nhảy thẳng tới
+    /// <see cref="SetupStep.Done"/> khi mọi artifact đã chọn còn đủ. Với <paramref name="force"/>
+    /// (đường sửa lỗi trong Settings), mọi marker bước bị xoá và ghi ngay, câu trả lởi hợp lệ được giữ,
+    /// chỉ màn thiếu/không hợp lệ được hỏi lại, pipeline xác minh lại và không tải lại model đã cài.
     /// </summary>
-    /// <param name="force">Bypasses the <c>IsComplete</c> short-circuit and restarts the wizard from step 1 (answers and markers cleared — the repair rerun). Bỏ qua nhánh tắt <c>IsComplete</c> và chạy lại wizard từ bước 1 (xoá câu trả lời và marker — lượt rerun sửa lỗi).</param>
+    /// <param name="force">Bypasses the complete-state short-circuit and clears step markers while preserving valid answers for repair. Bỏ qua nhánh tắt hoàn tất và xoá marker bước nhưng giữ câu trả lởi hợp lệ để sửa.</param>
     /// <param name="ct">Cancellation token; cancelling aborts the run (state is left where it was). Token hủy; hủy sẽ dừng lượt chạy (state giữ nguyên ở chỗ nó đang ở).</param>
+    /// <remarks>Unexpected faults are logged and published as <see cref="SetupStep.Failed"/> before the run lock is released. Lỗi không mong đợi được ghi log và publish ở <see cref="SetupStep.Failed"/> trước khi nhả khóa lượt chạy.</remarks>
+    /// <exception cref="OperationCanceledException">Thrown when the run is canceled; cancellation is not converted to a failure. Ném khi lượt chạy bị hủy; hủy không bị chuyển thành lỗi.</exception>
     public async Task StartAsync(bool force = false, CancellationToken ct = default)
     {
         if (!TryBeginRun()) return;
         try
         {
+            if (!await ResolveDeletionBeforeSetupAsync(ct).ConfigureAwait(false)) return;
+
             // An explicit run (the modal's first-run trigger or the Settings re-run) revokes the
             // session skip: after "skip setup", the way back IS this run, and the wizard must be
             // visible again while it runs.
@@ -449,7 +483,7 @@ public sealed class SetupCoordinator
             Notice = null;
             _flavorSwitchConfirmed = false;
 
-            _state = _stateFactory();
+            if (!_selectionPersistenceFailed) _state = _stateFactory();
 
             // A fresh app session cannot assume the Core from a previous session is still alive: the
             // VerifyingSidecar marker is SESSION truth, not disk truth. Drop it on every run start so
@@ -464,30 +498,15 @@ public sealed class SetupCoordinator
 
             if (force)
             {
-                // The repair rerun restarts from step 1: clear the v2 answers (all three question
-                // screens are asked again) and every step marker (the pipeline re-verifies), then
-                // persist immediately — a crash mid-rerun must leave "rerunning", never the old
-                // "complete" state. What stays: the model download step still skips genuinely
-                // installed models (its bridge catalog is the truth); Syncing always runs its real
-                // frozen sync anyway (see RunSyncStepAsync).
-                // Lượt rerun sửa lỗi chạy lại từ bước 1: xoá câu trả lời v2 (cả 3 màn được hỏi lại)
-                // và mọi marker bước (pipeline xác minh lại), rồi lưu NGAY — crash giữa rerun phải
-                // để lại state "đang rerun", không bao giờ là "đã xong" cũ. Cái giữ nguyên: bước tải
-                // vẫn bỏ qua model đã cài THẬT (catalog của bridge là sự thật); Syncing luôn chạy
-                // frozen sync thật (xem RunSyncStepAsync).
-                _state = _state with
-                {
-                    Dets = null,
-                    ActiveDet = null,
-                    Recs = null,
-                    ActiveRec = null,
-                    Langs = null,
-                    ActiveLang = null,
-                    LlmModels = null,
-                    ActiveLlm = null,
-                    Steps = null,
-                    IsComplete = false,
-                };
+                // The repair rerun clears every step marker, not the answers: valid selections survive,
+                // while missing/invalid answers still pause at their own question screen. Persist immediately
+                // so a crash cannot revive the old complete state. Catalog/file probes skip valid artifacts;
+                // Syncing always runs its real frozen sync anyway (see RunSyncStepAsync).
+                // Lượt rerun sửa lỗi chỉ xoá marker bước, giữ mọi câu trả lởi hợp lệ; màn nào thiếu hoặc
+                // không hợp lệ vẫn dừng để hỏi. Lưu NGAY để crash không khôi phục trạng thái hoàn tất cũ.
+                // Probe catalog/file bỏ qua artifact còn hợp lệ; Syncing vẫn chạy frozen sync thật
+                // (xem RunSyncStepAsync).
+                _state = _state with { Steps = null, IsComplete = false };
                 _state.Save();
             }
 
@@ -498,7 +517,7 @@ public sealed class SetupCoordinator
             // Mất tắt hoàn tất chỉ có hiệu lực khi ARTIFACTS còn trên đĩa (venv + models): NeedsSetup
             // bắn khi chúng mất (spec v1 §5.9), và Done trần vô hiệu hoá trigger đó — venv mất không
             // bao giờ được sửa, start pipeline fail mỗi lần mở app (review BA 2026-11-17: dead path).
-            if (!force && _state.IsComplete && ArtifactsPresent())
+            if (!force && !_selectionPersistenceFailed && _state.IsComplete && ArtifactsPresent())
             {
                 Step = SetupStep.Done;
                 Publish();
@@ -526,7 +545,7 @@ public sealed class SetupCoordinator
                 return;
             }
 
-            if (_state.Dets is null)
+            if (!HasOcrAnswers(_state))
             {
                 Step = SetupStep.ChoosingOcrModels;
                 Publish();
@@ -535,6 +554,16 @@ public sealed class SetupCoordinator
             }
 
             await ContinueAfterAnswersAsync(ct);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            SetupStep failedStep = Step == SetupStep.Failed ? _lastFailedStep : Step;
+            if (failedStep != SetupStep.Checking && !PipelineSteps.Contains(failedStep))
+                failedStep = SetupStep.Checking;
+            _logger?.LogError(ex, "setup: run faulted at {Step}", failedStep);
+            Error = SetupMessage.Of("setup.fail.unexpected", ex.Message);
+            EnterFailed(failedStep);
         }
         finally
         {
@@ -810,6 +839,27 @@ public sealed class SetupCoordinator
         try
         {
             if (Step != SetupStep.Failed) return;
+            try
+            {
+                if (!await ResolveDeletionBeforeSetupAsync(ct).ConfigureAwait(false)) return;
+            }
+            catch (InvalidOperationException ex) when (_deletionIntent is not null)
+            {
+                _logger?.LogWarning(ex, "setup: deletion repair is still incomplete");
+                return; // persistence helpers already published the fail-closed state
+            }
+            if (Step != SetupStep.Failed)
+            {
+                if (Step == SetupStep.ChoosingLlmModels
+                    && SetupModelSelection.HasCompleteAnswers(_state))
+                {
+                    // A stale settings-only active model can fail closed even though every Setup
+                    // answer is already valid. Finish the real Applying/write instead of re-asking.
+                    Step = SetupStep.Failed;
+                    _lastFailedStep = SetupStep.Checking;
+                }
+                else return;
+            }
 
             Error = null;
             CanSwitchToCpuFlavor = false;
@@ -828,7 +878,7 @@ public sealed class SetupCoordinator
                     return;
                 }
 
-                if (_state.Dets is null)
+                if (!HasOcrAnswers(_state))
                 {
                     Step = SetupStep.ChoosingOcrModels;
                     Publish();
@@ -845,6 +895,519 @@ public sealed class SetupCoordinator
         {
             EndRun();
         }
+    }
+
+    /// <summary>
+    /// Deletes an OCR model and reconciles the real catalog before changing any saved selection.
+    /// Xoá model OCR và reconcile catalog thật trước khi thay đổi lựa chọn đã lưu.
+    /// </summary>
+    /// <param name="name">Catalog model to delete. Tên model catalog cần xoá.</param>
+    /// <param name="installed">Other installed models known before the RPC. Các model khác được biết là còn cài trước RPC.</param>
+    /// <param name="engineActive">Other engine-active models used for replacement preference. Các model engine active khác dùng để ưu tiên thay thế.</param>
+    /// <param name="ct">Token used for the delete RPC; reconciliation uses an uncancelled read when the outcome is unknown. Token cho RPC xoá; reconcile dùng lượt đọc không bị hủy khi kết quả chưa rõ.</param>
+    /// <returns>A task completed after confirmed deletion and consistent selection persistence, or after an acknowledged failed delete is reconciled. Task hoàn tất sau khi xoá được xác nhận và lựa chọn được lưu nhất quán, hoặc sau khi reconcile lượt xoá lỗi.</returns>
+    public Task DeleteOcrModelAsync(
+        string name, IReadOnlyCollection<string> installed, IReadOnlyCollection<string> engineActive,
+        CancellationToken ct = default) =>
+        DeleteModelAsync("ocr", name, installed, engineActive, ct);
+
+    /// <summary>
+    /// Deletes a GGUF model and reconciles the real catalog before changing any saved selection.
+    /// Xoá model GGUF và reconcile catalog thật trước khi thay đổi lựa chọn đã lưu.
+    /// </summary>
+    /// <param name="name">Catalog model to delete. Tên model catalog cần xoá.</param>
+    /// <param name="installed">Other installed models known before the RPC. Các model khác được biết là còn cài trước RPC.</param>
+    /// <param name="engineActive">Other engine-active models used for replacement preference. Các model engine active khác dùng để ưu tiên thay thế.</param>
+    /// <param name="ct">Token used for the delete RPC; reconciliation uses an uncancelled read when the outcome is unknown. Token cho RPC xoá; reconcile dùng lượt đọc không bị hủy khi kết quả chưa rõ.</param>
+    /// <returns>A task completed after confirmed deletion and consistent selection persistence, or after an acknowledged failed delete is reconciled. Task hoàn tất sau khi xoá được xác nhận và lựa chọn được lưu nhất quán, hoặc sau khi reconcile lượt xoá lỗi.</returns>
+    public Task DeleteLlmModelAsync(
+        string name, IReadOnlyCollection<string> installed, IReadOnlyCollection<string> engineActive,
+        CancellationToken ct = default) =>
+        DeleteModelAsync("llm", name, installed, engineActive, ct);
+
+    private async Task DeleteModelAsync(
+        string kind, string name, IReadOnlyCollection<string> installed,
+        IReadOnlyCollection<string> engineActive, CancellationToken ct)
+    {
+        if (!TryBeginRun()) throw new InvalidOperationException("Setup is busy; retry model deletion later.");
+        try
+        {
+            BeginModelDeletion(name, installed, engineActive, kind);
+            Exception? deleteError = null;
+            try
+            {
+                await _bridge.CallAsync($"{kind}.models.delete",
+                    new JsonObject { ["name"] = name }, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                deleteError = ex;
+            }
+
+            if (deleteError is null)
+            {
+                MarkDeletedConfirmed(installed, engineActive);
+                ApplyConfirmedDeletion();
+                return;
+            }
+
+            DeletionCatalog? catalog = await TryReadDeletionCatalogAsync(
+                kind, name, CancellationToken.None).ConfigureAwait(false);
+            if (catalog?.TargetInstalled == true)
+            {
+                RollbackModelDeletion();
+                ExceptionDispatchInfo.Capture(deleteError).Throw();
+                throw new InvalidOperationException("Unreachable", deleteError);
+            }
+            if (catalog?.TargetInstalled == false)
+            {
+                MarkDeletedConfirmed(catalog.Installed, catalog.EngineActive);
+                ApplyConfirmedDeletion();
+                return;
+            }
+
+            string guidance = $"Model deletion outcome is unknown; no selections or downloads were changed. Retry repair. Original error: {deleteError.Message}";
+            MarkDeletionPending(guidance);
+            throw new InvalidOperationException(guidance, deleteError);
+        }
+        finally
+        {
+            EndRun();
+        }
+    }
+
+    /// <summary>
+    /// Persists a model-deletion intent before the engine RPC and closes the pipeline gate until repair completes.
+    /// Ghi intent xoá model trước RPC engine và đóng cổng pipeline tới khi repair hoàn tất.
+    /// </summary>
+    /// <param name="name">Catalog name intended for deletion. Tên catalog dự định xoá.</param>
+    /// <param name="installed">Models expected to remain installed. Các model dự kiến còn cài.</param>
+    /// <param name="engineActive">Models active in the engine. Các model engine đang dùng.</param>
+    /// <param name="kind">Optional catalog family (<c>ocr</c>/<c>llm</c>); null infers it from current selections. Nhóm catalog tùy chọn (<c>ocr</c>/<c>llm</c>); null suy ra từ lựa chọn hiện tại.</param>
+    /// <exception cref="InvalidOperationException">Thrown when another deletion needs repair or the journal cannot be persisted. Ném khi một lượt xoá khác cần repair hoặc không ghi được journal.</exception>
+    public void BeginModelDeletion(
+        string name, IReadOnlyCollection<string> installed, IReadOnlyCollection<string> engineActive,
+        string? kind = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        ArgumentNullException.ThrowIfNull(installed);
+        ArgumentNullException.ThrowIfNull(engineActive);
+        if (kind is not null && kind is not "ocr" and not "llm")
+            throw new ArgumentException("Model kind must be 'ocr' or 'llm'.", nameof(kind));
+        if (_deletionJournalUnreadable)
+            throw new InvalidOperationException("The model-deletion journal is unreadable; repair is required.");
+        if (_deletionIntent is { } existing)
+        {
+            if (existing.Name != name)
+                throw new InvalidOperationException(
+                    $"Model deletion '{existing.Name}' still requires repair; cannot start '{name}'.");
+            return; // keep the original rollback snapshot and persisted lifecycle state
+        }
+
+        AppSettings settings = _settings.Load();
+        var rollback = new ModelDeletionRollback(
+            _state.Dets is null ? null : [.. _state.Dets], _state.ActiveDet,
+            _state.Recs is null ? null : [.. _state.Recs], _state.ActiveRec,
+            _state.Langs is null ? null : [.. _state.Langs], _state.ActiveLang,
+            _state.LlmModels is null ? null : [.. _state.LlmModels], _state.ActiveLlm,
+            _state.IsComplete, settings.OcrDet, settings.OcrRec, settings.LlmActiveModel);
+        _deletionIntent = new ModelDeletionIntent(
+            name, [.. installed], [.. engineActive], "Pending", rollback,
+            kind ?? InferDeletionKind(_state, name));
+        _deletionSettingsWritten = false;
+        _selectionPersistenceFailed = true;
+        SkippedForSession = false;
+        Error = null;
+        Step = SetupStep.Checking;
+        try
+        {
+            SaveDeletionIntent();
+            Publish();
+        }
+        catch (Exception ex)
+        {
+            throw FailDeletionPersistence("model-deletion.json", ex);
+        }
+    }
+
+    /// <summary>
+    /// Removes a successfully deleted model from setup and settings and publishes the resulting lifecycle state.
+    /// Loại model đã được engine xoá thành công khỏi setup và settings rồi publish trạng thái lifecycle.
+    /// </summary>
+    /// <param name="name">Deleted catalog name. Tên catalog đã xoá.</param>
+    /// <param name="installed">Models still installed after deletion. Các model còn cài sau khi xoá.</param>
+    /// <param name="engineActive">Models active in the engine. Các model engine đang dùng.</param>
+    /// <exception cref="InvalidOperationException">Thrown after the coordinator becomes incomplete when either state file cannot be persisted. Ném sau khi coordinator chuyển chưa hoàn tất nếu một file trạng thái không ghi được.</exception>
+    public void RemoveDeletedModel(
+        string name, IReadOnlyCollection<string> installed, IReadOnlyCollection<string> engineActive)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(name);
+        ArgumentNullException.ThrowIfNull(installed);
+        ArgumentNullException.ThrowIfNull(engineActive);
+        if (_deletionIntent is null) BeginModelDeletion(name, installed, engineActive);
+        if (_deletionIntent?.Name != name)
+            throw new InvalidOperationException("A different model deletion still requires repair.");
+        MarkDeletedConfirmed(installed, engineActive);
+        ApplyConfirmedDeletion();
+    }
+
+    private void MarkDeletedConfirmed(
+        IReadOnlyCollection<string> installed, IReadOnlyCollection<string> engineActive)
+    {
+        ModelDeletionIntent intent = _deletionIntent
+            ?? throw new InvalidOperationException("No model-deletion intent exists.");
+        _deletionIntent = intent with
+        {
+            State = "DeletedConfirmed",
+            Installed = [.. installed.Where(name => name != intent.Name)],
+            EngineActive = [.. engineActive.Where(name => name != intent.Name)],
+        };
+        try
+        {
+            SaveDeletionIntent();
+        }
+        catch (Exception ex)
+        {
+            throw FailDeletionPersistence("model-deletion.json", ex);
+        }
+    }
+
+    private void ApplyConfirmedDeletion()
+    {
+        ModelDeletionIntent intent = _deletionIntent
+            ?? throw new InvalidOperationException("No confirmed model deletion exists.");
+        if (intent.State != "DeletedConfirmed")
+            throw new InvalidOperationException("Pending deletion intent is not proof of deletion.");
+
+        SetupState originalSetup = RestoreSetupSelections(_state, intent.Rollback);
+        (SetupState updatedSetup, _) = SetupModelSelection.AfterDelete(
+            originalSetup, _settings.Load(), intent.Name, intent.Installed, intent.EngineActive);
+        _selectionPersistenceFailed = true;
+        SkippedForSession = false;
+        Error = null;
+        Step = SetupStep.Checking;
+        _state = updatedSetup with { IsComplete = false };
+        Publish();
+
+        string target = "setup.json";
+        try
+        {
+            _state.Save(); // always fail-closed before the settings write
+            target = "settings.json";
+            _settings.Update(currentSettings =>
+            {
+                (SetupState latestSetup, AppSettings latestSettings) = SetupModelSelection.AfterDelete(
+                    originalSetup, currentSettings, intent.Name, intent.Installed, intent.EngineActive);
+                updatedSetup = latestSetup;
+                return latestSettings;
+            });
+            _deletionSettingsWritten = true;
+            if (updatedSetup.IsComplete)
+            {
+                target = "setup.json";
+                _state = _state with { IsComplete = true };
+                _state.Save();
+            }
+
+            target = "setup.json/settings.json";
+            if (!DeletionStateConsistent(intent, requireCompleteAnswers: false))
+                throw new InvalidOperationException("Model deletion state is still inconsistent.");
+
+            target = "model-deletion.json";
+            ClearDeletionIntent();
+            Error = null;
+            Step = _state.IsComplete ? SetupStep.Done : FirstIncompleteQuestionStep(_state);
+            Publish();
+        }
+        catch (Exception ex)
+        {
+            throw FailDeletionPersistence(target, ex);
+        }
+    }
+
+    private void RollbackModelDeletion()
+    {
+        ModelDeletionIntent intent = _deletionIntent
+            ?? throw new InvalidOperationException("No model-deletion intent exists.");
+        if (intent.State != "Pending")
+            throw new InvalidOperationException("A confirmed deletion cannot be rolled back as still installed.");
+
+        ModelDeletionRollback? rollback = intent.Rollback;
+        SetupState restored = RestoreSetupSelections(_state, rollback);
+        AppSettings current = _settings.Load();
+        string ocrDet = rollback?.OcrDet ?? current.OcrDet;
+        string ocrRec = rollback?.OcrRec ?? current.OcrRec;
+        string llmActive = rollback?.LlmActiveModel ?? current.LlmActiveModel;
+        bool wasComplete = rollback?.IsComplete == true && SetupModelSelection.HasCompleteAnswers(restored);
+
+        _selectionPersistenceFailed = true;
+        Error = null;
+        Step = SetupStep.Checking;
+        _state = restored with { IsComplete = false };
+        Publish();
+        string target = "setup.json";
+        try
+        {
+            _state.Save();
+            target = "settings.json";
+            _settings.Update(latest => latest with
+            {
+                OcrDet = ocrDet,
+                OcrRec = ocrRec,
+                LlmActiveModel = llmActive,
+            });
+            _deletionSettingsWritten = true; // cleanup requires a real write, even for a rejected RPC
+            target = "setup.json";
+            _state = restored with { IsComplete = wasComplete };
+            _state.Save();
+            target = "setup.json/settings.json";
+            if (!RollbackStateConsistent(rollback, wasComplete))
+                throw new InvalidOperationException("Model deletion rollback is still inconsistent.");
+
+            target = "model-deletion.json";
+            ClearDeletionIntent();
+            Error = null;
+            Step = _state.IsComplete ? SetupStep.Done : FirstIncompleteQuestionStep(_state);
+            Publish();
+        }
+        catch (Exception ex)
+        {
+            throw FailDeletionPersistence(target, ex);
+        }
+    }
+
+    private bool RollbackStateConsistent(ModelDeletionRollback? rollback, bool wasComplete)
+    {
+        AppSettings settings = _settings.Load();
+        if (rollback is null) return _state.IsComplete == wasComplete;
+        return _state.IsComplete == wasComplete
+            && SameNames(_state.Dets, rollback.Dets)
+            && SameNames(_state.Recs, rollback.Recs)
+            && SameNames(_state.Langs, rollback.Langs)
+            && SameNames(_state.LlmModels, rollback.LlmModels)
+            && _state.ActiveDet == rollback.ActiveDet
+            && _state.ActiveRec == rollback.ActiveRec
+            && _state.ActiveLang == rollback.ActiveLang
+            && _state.ActiveLlm == rollback.ActiveLlm
+            && settings.OcrDet == rollback.OcrDet
+            && settings.OcrRec == rollback.OcrRec
+            && settings.LlmActiveModel == rollback.LlmActiveModel;
+
+        static bool SameNames(List<string>? left, List<string>? right) =>
+            left is null ? right is null : right is not null && left.SequenceEqual(right, StringComparer.Ordinal);
+    }
+
+    private static SetupState RestoreSetupSelections(SetupState current, ModelDeletionRollback? rollback) =>
+        rollback is null ? current : current with
+        {
+            Dets = rollback.Dets is null ? null : [.. rollback.Dets],
+            ActiveDet = rollback.ActiveDet,
+            Recs = rollback.Recs is null ? null : [.. rollback.Recs],
+            ActiveRec = rollback.ActiveRec,
+            Langs = rollback.Langs is null ? null : [.. rollback.Langs],
+            ActiveLang = rollback.ActiveLang,
+            LlmModels = rollback.LlmModels is null ? null : [.. rollback.LlmModels],
+            ActiveLlm = rollback.ActiveLlm,
+            IsComplete = rollback.IsComplete,
+        };
+
+    private static string? InferDeletionKind(SetupState state, string name)
+    {
+        bool ocr = (state.Dets?.Contains(name, StringComparer.Ordinal) == true)
+            || (state.Recs?.Contains(name, StringComparer.Ordinal) == true)
+            || (state.Langs?.Contains(name, StringComparer.Ordinal) == true);
+        bool llm = state.LlmModels?.Contains(name, StringComparer.Ordinal) == true;
+        return ocr == llm ? null : ocr ? "ocr" : "llm";
+    }
+
+    private async Task<bool> ResolveDeletionBeforeSetupAsync(CancellationToken ct)
+    {
+        if (_deletionIntent is not { } intent) return true;
+        if (intent.State == "DeletedConfirmed")
+        {
+            ApplyConfirmedDeletion();
+            return true;
+        }
+
+        DeletionCatalog? catalog = await FindDeletionCatalogAsync(intent, ct).ConfigureAwait(false);
+        if (catalog?.TargetInstalled == true)
+        {
+            RollbackModelDeletion();
+            return true;
+        }
+        if (catalog?.TargetInstalled == false)
+        {
+            MarkDeletedConfirmed(catalog.Installed, catalog.EngineActive);
+            ApplyConfirmedDeletion();
+            return true;
+        }
+
+        MarkDeletionPending("Model deletion is still unconfirmed; selections and downloads remain unchanged. Retry repair.");
+        return false;
+    }
+
+    private async Task<DeletionCatalog?> FindDeletionCatalogAsync(ModelDeletionIntent intent, CancellationToken ct)
+    {
+        await _bridge.EnsureStartedAsync(ct).ConfigureAwait(false);
+        if (intent.Kind is "ocr" or "llm")
+            return await TryReadDeletionCatalogAsync(intent.Kind, intent.Name, ct).ConfigureAwait(false);
+
+        foreach (string kind in new[] { "ocr", "llm" })
+        {
+            DeletionCatalog? catalog = await TryReadDeletionCatalogAsync(kind, intent.Name, ct).ConfigureAwait(false);
+            if (catalog?.TargetInstalled is not null) return catalog;
+        }
+        return null;
+    }
+
+    private async Task<DeletionCatalog?> TryReadDeletionCatalogAsync(
+        string kind, string name, CancellationToken ct)
+    {
+        try
+        {
+            JsonNode? reply = await _bridge.CallAsync($"{kind}.models.list", null, ct).ConfigureAwait(false);
+            JsonArray? entries = kind == "ocr"
+                ? (reply as JsonObject)?["catalog"] as JsonArray
+                : reply as JsonArray;
+            if (entries is null) return null;
+            var installed = new List<string>();
+            var engineActive = new List<string>();
+            bool found = false;
+            bool targetInstalled = false;
+            foreach (JsonNode? node in entries)
+            {
+                if (node is not JsonObject entry
+                    || entry["name"] is not JsonValue nameValue
+                    || !nameValue.TryGetValue(out string? entryName)) continue;
+                bool isInstalled = entry["installed"] is JsonValue installedValue
+                    && installedValue.TryGetValue(out bool installedFlag) && installedFlag;
+                bool inUse = entry["inUse"] is JsonValue inUseValue
+                    && inUseValue.TryGetValue(out bool inUseFlag) && inUseFlag;
+                if (isInstalled) installed.Add(entryName);
+                if (inUse) engineActive.Add(entryName);
+                if (entryName == name)
+                {
+                    found = true;
+                    targetInstalled = isInstalled;
+                }
+            }
+            if (kind == "ocr" && reply is JsonObject root && root["active"] is JsonObject active)
+            {
+                foreach (string key in new[] { "det", "rec" })
+                {
+                    if (active[key]?.GetValue<string>() is { } activeName) engineActive.Add(activeName);
+                }
+            }
+            return new DeletionCatalog(
+                found ? targetInstalled : null,
+                installed.Where(candidate => candidate != name).Distinct(StringComparer.Ordinal).ToArray(),
+                engineActive.Where(candidate => candidate != name).Distinct(StringComparer.Ordinal).ToArray());
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger?.LogWarning(ex, "setup: could not reconcile {Kind} model deletion for {Name}", kind, name);
+            return null;
+        }
+    }
+
+    private void MarkDeletionPending(string message)
+    {
+        _selectionPersistenceFailed = true;
+        _state = _state with { IsComplete = false };
+        Error = SetupMessage.Of("setup.fail.unexpected", message);
+        EnterFailed(SetupStep.Checking);
+    }
+
+    private sealed record DeletionCatalog(
+        bool? TargetInstalled, IReadOnlyCollection<string> Installed, IReadOnlyCollection<string> EngineActive);
+
+    private void RestoreDeletionIntent()
+    {
+        if (!File.Exists(_deletionJournalPath)) return;
+        try
+        {
+            ModelDeletionIntent? intent = JsonSerializer.Deserialize<ModelDeletionIntent>(
+                File.ReadAllText(_deletionJournalPath), DeletionJournalJsonOptions);
+            if (intent is null || string.IsNullOrWhiteSpace(intent.Name)
+                || intent.Installed is null || intent.EngineActive is null
+                || intent.State is not ("Pending" or "DeletedConfirmed"))
+            {
+                throw new JsonException("Invalid model-deletion journal.");
+            }
+
+            _deletionIntent = intent;
+            _deletionSettingsWritten = false;
+            _selectionPersistenceFailed = true;
+            SkippedForSession = false;
+            if (intent.State == "Pending")
+            {
+                // Journal existence is only intent. Keep every answer untouched until Retry/Start
+                // reconciles the live catalog; never turn a rejected RPC into AfterDelete on restart.
+                _state = _state with { IsComplete = false };
+                Error = SetupMessage.Of("settings.status.saveFailed");
+                Step = SetupStep.Failed;
+                _lastFailedStep = SetupStep.Checking;
+                return;
+            }
+
+            SetupState original = RestoreSetupSelections(_state, intent.Rollback);
+            (SetupState updatedSetup, _) = SetupModelSelection.AfterDelete(
+                original, _settings.Load(), intent.Name, intent.Installed, intent.EngineActive);
+            _state = updatedSetup with { IsComplete = false };
+            Step = SetupStep.Checking;
+            try
+            {
+                // DeletedConfirmed is durable proof, so repair may continue after restart. The journal
+                // remains authoritative until a real settings write and consistency check complete.
+                _state.Save();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                _logger?.LogWarning(ex, "setup: could not persist restored deletion intent");
+            }
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException
+            or InvalidOperationException or ArgumentException or NotSupportedException)
+        {
+            _deletionJournalUnreadable = true;
+            _selectionPersistenceFailed = true;
+            SkippedForSession = false;
+            _state = _state with { IsComplete = false };
+            Error = SetupMessage.Of("settings.status.saveFailed");
+            Step = SetupStep.Failed;
+            _logger?.LogError(ex, "setup: deletion journal is unreadable");
+        }
+    }
+
+    private void SaveDeletionIntent()
+    {
+        string? dir = Path.GetDirectoryName(_deletionJournalPath);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+        string tmp = _deletionJournalPath + ".tmp";
+        File.WriteAllText(tmp, JsonSerializer.Serialize(_deletionIntent, DeletionJournalJsonOptions));
+        File.Move(tmp, _deletionJournalPath, overwrite: true);
+    }
+
+    private void ClearDeletionIntent()
+    {
+        if (_deletionIntent is not null && !_deletionSettingsWritten)
+            throw new InvalidOperationException("Cannot clear deletion intent before settings.json is written.");
+        File.Delete(_deletionJournalPath);
+        _deletionIntent = null;
+        _deletionJournalUnreadable = false;
+        _deletionSettingsWritten = false;
+        _selectionPersistenceFailed = false;
+    }
+
+    private InvalidOperationException FailDeletionPersistence(string target, Exception ex)
+    {
+        _selectionPersistenceFailed = true;
+        _state = _state with { IsComplete = false };
+        Error = SetupMessage.Of("settings.status.saveFailed");
+        EnterFailed(SetupStep.Checking);
+        _logger?.LogError(ex, "setup: deletion persistence failed for {Path}", target);
+        return new InvalidOperationException(
+            $"Model deletion could not update {target}; setup repair is required: {ex.Message}", ex);
     }
 
     /// <summary>
@@ -866,7 +1429,11 @@ public sealed class SetupCoordinator
     /// </summary>
     public void SkipForSession()
     {
-        SkippedForSession = true;
+        // A deletion journal is stronger than the session escape hatch: skipping is allowed again only
+        // after setup/settings are consistent and the journal has been cleared.
+        SkippedForSession = !_selectionPersistenceFailed
+            && _deletionIntent is null
+            && !_deletionJournalUnreadable;
         Publish();
     }
 
@@ -893,13 +1460,21 @@ public sealed class SetupCoordinator
             //     (BA review 2026-11-17: the LLM half of reconcile);
             //   • Syncing: the real frozen sync validates/repairs the venv and picks up shipped
             //     pyproject/lock changes (BA 2026-11-17 — user directive: always run).
+            // Applying also always runs while a deletion journal exists: an old done marker can never
+            // substitute for the successful settings write required before journal cleanup.
             // Ba bước LUÔN thực thi khi tới lượt — phần bên trong tự bỏ qua phần đắt:
             //   • hai bước tải: GGUF/runtime bị xoá sau khi hoàn tất sẽ được tải bù ở lượt kế, marker
             //     done của phiên cũ không bao giờ che mất artifact còn thiếu (review BA 2026-11-17:
             //     nửa LLM của reconcile);
             //   • Syncing: frozen sync thật xác minh/sửa venv và nhận pyproject/lock mới theo bản
             //     cập nhật (BA 2026-11-17 — chỉ đạo của user: luôn chạy).
-            if (IsStepDone(step) && step is not (SetupStep.DownloadingModels or SetupStep.DownloadingLlmRuntime or SetupStep.Syncing)) continue;
+            bool deletionNeedsSettingsWrite = step == SetupStep.Applying && _deletionIntent is not null;
+            if (IsStepDone(step)
+                && step is not (SetupStep.DownloadingModels or SetupStep.DownloadingLlmRuntime or SetupStep.Syncing)
+                && !deletionNeedsSettingsWrite)
+            {
+                continue;
+            }
 
             StepOutcome outcome = await RunStepAsync(step, ct).ConfigureAwait(false);
             if (outcome != StepOutcome.Done) return; // Paused or Failed — state already set by the step
@@ -915,9 +1490,39 @@ public sealed class SetupCoordinator
     /// Chạy tiếp sau khi một câu trả lời pre-pipeline được lưu: dừng ở câu hỏi bước 3/bước 4 chưa trả
     /// lời kế (Ngôn ngữ, rồi model LLM), hoặc chạy pipeline từ bước đầu khi đã trả lời hết.
     /// </summary>
+    private static SetupStep FirstIncompleteQuestionStep(SetupState state)
+    {
+        if (!HasOcrAnswers(state)) return SetupStep.ChoosingOcrModels;
+        if (state.Langs is null
+            || (state.ActiveLang is not null
+                && !state.Langs.Contains(state.ActiveLang, StringComparer.Ordinal)))
+        {
+            return SetupStep.ChoosingLanguages;
+        }
+        return SetupStep.ChoosingLlmModels;
+    }
+
+    private static bool HasOcrAnswers(SetupState state) =>
+        state.Dets is { Count: > 0 }
+        && state.Recs is { Count: > 0 }
+        && state.ActiveDet is not null
+        && state.Dets.Contains(state.ActiveDet, StringComparer.Ordinal)
+        && state.ActiveRec is not null
+        && state.Recs.Contains(state.ActiveRec, StringComparer.Ordinal);
+
     private async Task ContinueAfterAnswersAsync(CancellationToken ct)
     {
-        if (_state.Langs is null)
+        if (!HasOcrAnswers(_state))
+        {
+            Step = SetupStep.ChoosingOcrModels;
+            Publish();
+            _logger?.LogInformation("setup: paused at {Step}", Step);
+            return;
+        }
+
+        if (_state.Langs is null
+            || (_state.ActiveLang is not null
+                && !_state.Langs.Contains(_state.ActiveLang, StringComparer.Ordinal)))
         {
             Step = SetupStep.ChoosingLanguages;
             Publish();
@@ -925,7 +1530,9 @@ public sealed class SetupCoordinator
             return;
         }
 
-        if (_state.LlmModels is null)
+        if (_state.LlmModels is null
+            || (_state.ActiveLlm is not null
+                && !_state.LlmModels.Contains(_state.ActiveLlm, StringComparer.Ordinal)))
         {
             Step = SetupStep.ChoosingLlmModels;
             Publish();
@@ -1168,9 +1775,10 @@ public sealed class SetupCoordinator
     /// DownloadingLlmRuntime (spec 2026-11-14 D13): the llama.cpp runtime is never bundled with the
     /// release zip, so the wizard installs it here. The runtime flavor follows the machine — GPU
     /// wheel flavor (already past the VerifyingSidecar capability gate) ⇒ <c>cuda</c>, otherwise
-    /// <c>cpu</c>. A runtime already on disk marks the step done off one status call ("re-run setup"
-    /// pass-through); otherwise it fires <c>llm.runtime.download</c> and polls
-    /// <c>llm.runtime.status</c> every <see cref="_modelPollInterval"/> until installed or the
+    /// <c>cpu</c>. A valid installed runtime skips when current matches latest or the check is offline;
+    /// an older build updates, while a missing artifact repairs even at the same tag. Every decision logs
+    /// flavor/current/latest/installed. Downloads poll <c>llm.runtime.status</c> every
+    /// <see cref="_modelPollInterval"/> until the matching attempt commits or the
     /// <see cref="_modelDownloadTimeout"/> window elapses (then a fresh attempt follows). Failure is
     /// soft like DownloadingModels: the failure popup offers retry/skip-for-session and Settings can
     /// download the runtime later.
@@ -1178,10 +1786,10 @@ public sealed class SetupCoordinator
     /// nằm trong zip release, nên wizard cài nó ở đây — nhưng chỉ khi bước 4 có chọn model LLM; bước 4
     /// để trống thì bước này tự đánh dấu done mà không gọi RPC nào. Flavor runtime theo máy — flavor
     /// wheel GPU (đã qua cổng capability ở VerifyingSidecar) ⇒ <c>cuda</c>, còn lại <c>cpu</c>. Runtime
-    /// đã có trên đĩa: so tag với bản mới nhất Core tra được (<c>llm.runtime.check</c>) — cũ thì
-    /// tải/cập nhật, mới nhất hoặc mất mạng thì đánh dấu xong ("chạy lại setup" đi thẳng qua); chưa có
-    /// thì gọi <c>llm.runtime.download</c> rồi poll <c>llm.runtime.status</c> mỗi
-    /// <see cref="_modelPollInterval"/> cho tới khi installed hoặc hết cửa sổ
+    /// đã có artifact và current==latest (hoặc không check được khi offline) thì bỏ qua; bản cũ được cập
+    /// nhật, artifact thiếu được repair kể cả cùng tag. Mọi quyết định log flavor/current/latest/installed.
+    /// Lượt tải poll <c>llm.runtime.status</c> mỗi <see cref="_modelPollInterval"/> cho tới khi đúng attempt
+    /// commit hoặc hết cửa sổ
     /// <see cref="_modelDownloadTimeout"/> (lượt thử mới sẽ chạy). Thất bại là mềm như
     /// DownloadingModels: popup màn lỗi cho retry/bỏ qua phiên, và Settings có thể tải runtime sau.
     /// </summary>
@@ -1201,16 +1809,24 @@ public sealed class SetupCoordinator
             try
             {
                 downloadError = null;
-                if (await IsLlmRuntimeInstalledAsync(runtimeFlavor, ct).ConfigureAwait(false))
+                bool installed = await IsLlmRuntimeInstalledAsync(runtimeFlavor, ct).ConfigureAwait(false);
+                (string? current, string? latest) = await CheckLlmRuntimeAsync(runtimeFlavor, ct).ConfigureAwait(false);
+                string action = installed
+                    ? current is null || latest is null
+                        ? "skip-check-unavailable"
+                        : current == latest ? "skip-current" : "update"
+                    : current is not null && current == latest
+                        ? "repair-same-tag"
+                        : current is null ? "install" : "repair";
+                _logger?.LogInformation(
+                    "setup: runtime llama.cpp decision flavor={Flavor} current={Current} latest={Latest} installed={Installed} action={Action}",
+                    runtimeFlavor, current, latest, installed, action);
+                if (installed && (current is null || latest is null || current == latest))
                 {
-                    // Đã cài: chỉ cập nhật khi Core tra được bản mới hơn (mất mạng ⇒ coi bản hiện tại là ok).
-                    (string? current, string? latest) = await CheckLlmRuntimeAsync(runtimeFlavor, ct).ConfigureAwait(false);
-                    if (current is null || latest is null || current == latest)
-                    {
-                        MarkStepDone(SetupStep.DownloadingLlmRuntime);
-                        return StepOutcome.Done;
-                    }
-                    _logger?.LogInformation("setup: runtime llama.cpp tag {Current} cũ hơn {Latest} — cập nhật", current, latest);
+                    // Valid same-tag installs still skip; an unavailable check remains a soft offline pass.
+                    // Bản cùng tag còn artifact vẫn bỏ qua; không check được vẫn cho qua mềm khi offline.
+                    MarkStepDone(SetupStep.DownloadingLlmRuntime);
+                    return StepOutcome.Done;
                 }
 
                 JsonNode? accepted = await _bridge
@@ -1232,12 +1848,25 @@ public sealed class SetupCoordinator
                     // cannot complete from that old binary either.
                     // Lỗi của attempt NÀY thắng mọi bản cũ; attempt xếp hàng/đang chạy cũng không
                     // được hoàn tất nhờ binary cũ.
-                    if (IsLlmRuntimeDownloadFailed(status))
+                    string? attemptState = ReadString(status, "attemptState");
+                    bool attemptStatePresent = status is JsonObject statusObj
+                        && statusObj.ContainsKey("attemptState");
+                    if (attemptState == "Cancelled")
+                    {
+                        throw new OperationCanceledException("llm runtime download was cancelled");
+                    }
+                    if (attemptState == "Failed" || IsLlmRuntimeDownloadFailed(status))
                     {
                         downloadError = ReadString(status, "downloadError");
                         throw new InvalidOperationException("llm runtime download failed (reported by status)");
                     }
-                    if (!IsLlmRuntimeDownloading(status) && IsLlmRuntimeInstalled(status)) break;
+                    bool committed = attemptState == "Succeeded";
+                    // Only a genuinely absent field identifies legacy Core; present null/wrong-type data
+                    // is schema drift and must never complete from an old binary.
+                    // Chỉ field thật sự vắng mới nhận diện Core cũ; null/sai kiểu là schema drift và
+                    // không bao giờ được hoàn tất nhờ binary cũ.
+                    bool legacyComplete = !attemptStatePresent && !IsLlmRuntimeDownloading(status);
+                    if ((committed || legacyComplete) && IsLlmRuntimeInstalled(status)) break;
                     // Tiến độ tải zip runtime (spec vòng 2 §9): status có `progress` → đưa vào snapshot
                     // và PUBLISH — không publish thì UI không bao giờ vẽ lại dòng % + ETA.
                     var downloads = ParseRuntimeDownloads(status);
@@ -1390,13 +2019,15 @@ public sealed class SetupCoordinator
     /// catalog reports installed (a <c>.partial</c> model counts as not installed — the sidecar
     /// re-downloads it idempotently), then polls <c>ocr.models.list</c> every
     /// <see cref="_modelPollInterval"/> until ALL needed models are installed or the
-    /// <see cref="_modelDownloadTimeout"/> window elapses (a fresh attempt follows).
+    /// <see cref="_modelDownloadTimeout"/> window elapses (a fresh attempt follows). A needed model
+    /// reporting <c>downloadError</c> while idle ends its attempt immediately after the progress snapshot.
     /// DownloadingModels: tải mọi model mà câu trả lời đã lưu cần — cặp det+rec của từng tier được
     /// tick, rec legacy của ngôn ngữ chính khi ngoài phủ v6, và rec legacy của từng ngôn ngữ bổ sung
     /// (<see cref="OcrModelChoices.NeededModels"/>) — bỏ qua model catalog báo đã cài (model có
     /// <c>.partial</c> coi như chưa cài — sidecar tải lại idempotent), rồi poll <c>ocr.models.list</c>
     /// mỗi <see cref="_modelPollInterval"/> cho tới khi MỌI model cần đều installed hoặc hết cửa sổ
-    /// <see cref="_modelDownloadTimeout"/> (lượt thử mới sẽ chạy).
+    /// <see cref="_modelDownloadTimeout"/> (lượt thử mới sẽ chạy). Model cần tải báo <c>downloadError</c>
+    /// khi đã dừng sẽ kết thúc lượt thử ngay sau khi snapshot tiến độ được publish.
     /// </summary>
     private async Task<StepOutcome> RunDownloadModelsStepAsync(CancellationToken ct)
     {
@@ -1437,9 +2068,10 @@ public sealed class SetupCoordinator
                     var downloads = new List<SetupDownloadInfo>(ParseDownloads(list, "catalog"));
 
                     bool llmDone = true;
+                    JsonNode? llmList = null;
                     if (llmNeeded.Count > 0)
                     {
-                        JsonNode? llmList = await _bridge.CallAsync("llm.models.list", null, ct).ConfigureAwait(false);
+                        llmList = await _bridge.CallAsync("llm.models.list", null, ct).ConfigureAwait(false);
                         llmDone = llmNeeded.All(name => IsInstalledInLlmCatalog(llmList, name));
                         downloads.AddRange(ParseDownloads(llmList, null));
                     }
@@ -1455,6 +2087,15 @@ public sealed class SetupCoordinator
                         Total = needed.Contains(d.Name) ? needed.Count : 0,
                     })];
                     Publish();
+                    if (SetupModelSelection.FindFailedDownload(list, "catalog", needed) is { } ocrFailure)
+                        throw new InvalidOperationException(
+                            $"OCR model '{ocrFailure.Name}' download failed: {ocrFailure.Error}");
+                    if (llmNeeded.Count > 0
+                        && SetupModelSelection.FindFailedDownload(llmList, null, llmNeeded) is { } llmFailure)
+                    {
+                        throw new InvalidOperationException(
+                            $"LLM model '{llmFailure.Name}' download failed: {llmFailure.Error}");
+                    }
                     if (ocrDone && llmDone) break;
                     await Task.Delay(_modelPollInterval, window.Token).ConfigureAwait(false);
                 }
@@ -1544,16 +2185,16 @@ public sealed class SetupCoordinator
             _state.Langs ?? []);
 
     /// <summary>
-    /// Applying (Review Focus #5 — ALWAYS runs, even when nothing was downloaded): computes the pair
-    /// from the saved answers (<see cref="OcrModelChoices.ExpectedPair"/> — the active legacy rec wins
-    /// over the v6 rec) and writes it plus <c>LlmActiveModel</c> into settings via
-    /// <see cref="AppSettingsService.Save"/>. When an active LLM is chosen it also calls
-    /// <c>llm.models.set</c> best-effort (a refusal only logs — settings are already written, spec §6).
+    /// Applying always computes <see cref="OcrModelChoices.ExpectedPair"/>, saves that pair and
+    /// <c>LlmActiveModel</c>, then calls <c>ocr.models.set</c>. Only a successful save and OCR RPC may
+    /// mark the step done; either failure uses the existing retry loop. The later <c>llm.models.set</c>
+    /// remains best-effort (a refusal only logs — settings are already written, spec §6).
     /// Applying (Review Focus #5 — LUÔN chạy, kể cả khi không tải model nào): tính cặp từ câu trả lời
     /// đã lưu (<see cref="OcrModelChoices.ExpectedPair"/> — rec legacy đang chấm thắng rec v6) và ghi
-    /// cặp đó cùng <c>LlmActiveModel</c> vào settings qua <see cref="AppSettingsService.Save"/>. Khi có
+    /// cặp đó cùng <c>LlmActiveModel</c> vào settings qua <see cref="AppSettingsService.Update"/>. Khi có
     /// LLM "Dùng chính", gọi thêm <c>llm.models.set</c> kiểu best-effort (bị từ chối chỉ log — settings
-    /// đã ghi, spec §6).
+    /// đã ghi, spec §6). Sau khi lưu settings, Applying gọi <c>ocr.models.set</c> và chỉ đánh dấu xong
+    /// khi RPC này thành công; lỗi lưu hoặc RPC OCR đều đi qua vòng retry hiện có.
     /// </summary>
     private async Task<StepOutcome> RunApplyingStepAsync(CancellationToken ct)
     {
@@ -1563,13 +2204,21 @@ public sealed class SetupCoordinator
             {
                 (string det, string rec) = OcrModelChoices.ExpectedPair(
                     _state.ActiveDet ?? "PP-OCRv6_small_det", _state.ActiveLang, _state.ActiveRec ?? "PP-OCRv6_small_rec");
-                AppSettings settings = _settings.Load();
-                _settings.Save(settings with
+                _settings.Update(settings => settings with
                 {
                     OcrDet = det,
                     OcrRec = rec,
-                    LlmActiveModel = _state.ActiveLlm ?? settings.LlmActiveModel,
+                    // A failed deletion must never resurrect the stale model when the repair answers "no LLM".
+                    LlmActiveModel = _state.ActiveLlm
+                        ?? (_selectionPersistenceFailed && _state.LlmModels is { Count: 0 }
+                            ? string.Empty
+                            : settings.LlmActiveModel),
                 });
+                if (_deletionIntent is not null) _deletionSettingsWritten = true;
+
+                await _bridge
+                    .CallAsync("ocr.models.set", new JsonObject { ["det"] = det, ["rec"] = rec }, ct)
+                    .ConfigureAwait(false);
 
                 if (_state.ActiveLlm is { } llm)
                 {
@@ -1614,16 +2263,17 @@ public sealed class SetupCoordinator
         _modelDirExists(Path.Combine(SetupPaths.ModelsDir, SetupState.OfficialModelsSubdir, modelName));
 
     /// <summary>
-    /// Whether the wizard's expensive artifacts are still on disk: the sidecar venv python and a
-    /// non-empty official models cache. Uses the injected seams so tests keep their fakes — this
-    /// gates the complete-state short-circuit (a lost venv must run the repair, not Done).
-    /// Kiểm tra các artifact đắt tiền của wizard còn trên đĩa: python venv sidecar và cache model
-    /// chính thức không rỗng. Dùng seam inject để test giữ fake — điều này chặn short-circuit
-    /// complete-state (venv mất phải chạy luồng sửa, không phải Done).
+    /// Whether every selected artifact is still on disk: the sidecar Python, all selected OCR/GGUF
+    /// files without partial markers, and the active llama.cpp runtime when LLM models are selected.
+    /// Injected seams keep this a cheap file/JSON preflight in production and tests.
+    /// Kiểm tra mọi artifact đã chọn còn trên đĩa: Python sidecar, tất cả OCR/GGUF đã chọn không có
+    /// marker partial và runtime llama.cpp active khi có model LLM. Seam inject giữ preflight này chỉ
+    /// đọc file/JSON rẻ trong production và test.
     /// </summary>
     private bool ArtifactsPresent() =>
-        _fileExists(SetupPaths.VenvPythonExe)
-        && _modelDirExists(Path.Combine(SetupPaths.ModelsDir, SetupState.OfficialModelsSubdir));
+        SetupModelSelection.ArtifactsPresent(
+            _state, SetupPaths.VenvPythonExe, SetupPaths.ModelsDir, _llmRoot,
+            _fileExists, _modelDirExists, _readText);
 
     /// <summary>
     /// The sidecar's installed rule mirrored (<c>ocr/models.py</c>): the model directory exists, is
@@ -1673,8 +2323,13 @@ public sealed class SetupCoordinator
             (string det, string rec) = OcrModelChoices.ExpectedPair(
                 _state.ActiveDet ?? "PP-OCRv6_small_det", _state.ActiveLang, _state.ActiveRec ?? "PP-OCRv6_small_rec");
             AppSettings settings = _settings.Load();
-            bool pairMismatch = settings.OcrDet != det || settings.OcrRec != rec
-                || (_state.ActiveLlm is not null && settings.LlmActiveModel != _state.ActiveLlm);
+            bool llmMismatch = _state.ActiveLlm is not null
+                ? settings.LlmActiveModel != _state.ActiveLlm
+                : _deletionIntent is not null
+                    && (_state.LlmModels is { Count: 0 }
+                        ? !string.IsNullOrEmpty(settings.LlmActiveModel)
+                        : settings.LlmActiveModel == _deletionIntent.Name);
+            bool pairMismatch = settings.OcrDet != det || settings.OcrRec != rec || llmMismatch;
             if (pairMismatch && steps.Remove(StepKey(SetupStep.Applying)))
             {
                 changed = true;
@@ -1707,10 +2362,64 @@ public sealed class SetupCoordinator
         Publish();
     }
 
+    private bool DeletionStateConsistent(
+        ModelDeletionIntent intent, bool requireCompleteAnswers = true)
+    {
+        bool completeAnswers = SetupModelSelection.HasCompleteAnswers(_state);
+        if (requireCompleteAnswers && !completeAnswers) return false;
+        AppSettings settings = _settings.Load();
+        if (settings.LlmActiveModel == intent.Name) return false;
+        if (_state.ActiveDet == intent.Name || _state.ActiveRec == intent.Name
+            || _state.ActiveLang == intent.Name || _state.ActiveLlm == intent.Name)
+        {
+            return false;
+        }
+        if (ContainsModel(_state.Dets, intent.Name)
+            || ContainsModel(_state.Recs, intent.Name)
+            || ContainsModel(_state.Langs, intent.Name)
+            || ContainsModel(_state.LlmModels, intent.Name))
+        {
+            return false;
+        }
+        if (!completeAnswers) return true;
+
+        (string det, string rec) = OcrModelChoices.ExpectedPair(
+            _state.ActiveDet!, _state.ActiveLang, _state.ActiveRec!);
+        if (settings.OcrDet != det || settings.OcrRec != rec) return false;
+        return _state.LlmModels is not { Count: 0 } || string.IsNullOrEmpty(settings.LlmActiveModel);
+
+        static bool ContainsModel(List<string>? names, string name) =>
+            names?.Contains(name, StringComparer.Ordinal) == true;
+    }
+
     private void EnterDone()
     {
+        if (_deletionJournalUnreadable
+            || (_selectionPersistenceFailed && _deletionIntent is null)
+            || (_deletionIntent is { } intent
+                && (!_deletionSettingsWritten || !DeletionStateConsistent(intent))))
+        {
+            // Never clear a deletion failure by skipping Applying through an old marker.
+            _state = _state with { IsComplete = false };
+            Error = SetupMessage.Of("settings.status.saveFailed");
+            EnterFailed(SetupStep.Applying);
+            return;
+        }
+
         _state = _state with { IsComplete = true };
         _state.Save();
+        if (_deletionIntent is not null)
+        {
+            try
+            {
+                ClearDeletionIntent();
+            }
+            catch (Exception ex)
+            {
+                throw FailDeletionPersistence("model-deletion.json", ex);
+            }
+        }
+        _selectionPersistenceFailed = false;
         Error = null;
         Step = SetupStep.Done;
         Publish();
