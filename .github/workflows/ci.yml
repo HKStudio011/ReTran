@@ -67,7 +67,7 @@ jobs:
               <ItemGroup><PackageReference Include="xunit.v3" Version="4.0.2" /></ItemGroup>
               $ExtraItems
             </Project>
-            "@
+          "@
             $csproj | Set-Content -Encoding utf8 (Join-Path $probeDir "$Name.csproj")
             'using Xunit; public class ProbeTests { [Fact] public void Pass() { } }' |
               Set-Content -Encoding utf8 (Join-Path $probeDir "ProbeTests.cs")
