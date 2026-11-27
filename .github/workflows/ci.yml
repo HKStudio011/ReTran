@@ -41,8 +41,8 @@ jobs:
       - name: Build app (Windows)
         run: dotnet build "${{ env.PROJECT_PATH }}" -f net10.0-windows10.0.19041.0 --nologo
 
-      # xUnit v3 là executable self-hosted. Chạy trực tiếp runner để tránh lỗi
-      # MTP handshake đã làm CI treo trước discovery với "Zero tests ran".
+      # xUnit v3 là executable self-hosted. Chạy qua dotnet host để tránh lỗi
+      # startup/handshake của apphost đã làm CI treo trước discovery.
       - name: Build test project
         run: dotnet build "${{ env.TEST_PROJECT }}" --nologo
 
@@ -50,19 +50,19 @@ jobs:
         timeout-minutes: 2
         shell: pwsh
         run: |
-          & "ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.exe" -assemblyInfo
+          dotnet "ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.dll" -assemblyInfo
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Test discovery
         timeout-minutes: 2
         shell: pwsh
         run: |
-          & "ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.exe" -list classes -noAutoReporters -noColor -internalDiagnostics
+          dotnet "ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.dll" -list classes -noAutoReporters -noColor -internalDiagnostics
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Test
         timeout-minutes: 5
         shell: pwsh
         run: |
-          & "ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.exe" -noAutoReporters -noLogo -noColor -longRunning 30
+          dotnet "ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.dll" -noAutoReporters -noLogo -noColor -longRunning 30
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
