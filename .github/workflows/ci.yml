@@ -25,6 +25,7 @@ env:
 jobs:
   build-and-test:
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
 
@@ -40,7 +41,14 @@ jobs:
       - name: Build app (Windows)
         run: dotnet build "${{ env.PROJECT_PATH }}" -f net10.0-windows10.0.19041.0 --nologo
 
-      # (cú pháp test của xunit MTP; dùng --no-banner thay vì --nologo: SDK 10.0.x
-      #  MTP mode forward --nologo xuống test app → exit 5 invalid args)
+      # xUnit v3 là executable self-hosted. Chạy trực tiếp runner để tránh lỗi
+      # MTP handshake đã làm CI treo trước discovery với "Zero tests ran".
+      - name: Build test project
+        run: dotnet build "${{ env.TEST_PROJECT }}" --nologo
+
       - name: Test
-        run: dotnet test "${{ env.TEST_PROJECT }}" --no-banner
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          & "ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.exe" -noLogo -noColor
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

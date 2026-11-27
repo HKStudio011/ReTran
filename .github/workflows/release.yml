@@ -26,6 +26,7 @@ env:
 jobs:
   build-windows:
     runs-on: windows-latest
+    timeout-minutes: 60
     # Environment 'release': UPDATE_SIGNING_KEY và Azure secrets nên đặt làm
     # environment secrets (Settings → Environments → release), KHÔNG phải repository
     # secrets — chỉ unlock khi job này chạy; thêm required reviewers để gate tay.
