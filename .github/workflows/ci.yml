@@ -46,27 +46,40 @@ jobs:
       - name: Build test project
         run: dotnet build "${{ env.TEST_PROJECT }}" --nologo
 
-      - name: Build minimal xUnit probe
-        timeout-minutes: 5
+      - name: Build xUnit dependency probes
+        timeout-minutes: 10
         shell: pwsh
         run: |
-          $probeDir = Join-Path $env:RUNNER_TEMP "retran-xunit-probe"
-          New-Item -ItemType Directory -Path $probeDir -Force | Out-Null
-          @'
-          <Project Sdk="Microsoft.NET.Sdk">
-            <PropertyGroup>
-              <TargetFramework>net10.0</TargetFramework>
-              <OutputType>Exe</OutputType>
-              <ImplicitUsings>enable</ImplicitUsings>
-              <Nullable>enable</Nullable>
-            </PropertyGroup>
-            <ItemGroup><PackageReference Include="xunit.v3" Version="4.0.2" /></ItemGroup>
-          </Project>
-          '@ | Set-Content -Encoding utf8 (Join-Path $probeDir "Probe.csproj")
-          'using Xunit; public class ProbeTests { [Fact] public void Pass() { } }' |
-            Set-Content -Encoding utf8 (Join-Path $probeDir "ProbeTests.cs")
-          dotnet build (Join-Path $probeDir "Probe.csproj") --nologo
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          function New-XunitProbe {
+            param([string]$Name, [string]$ExtraItems)
+            $probeDir = Join-Path $env:RUNNER_TEMP $Name
+            New-Item -ItemType Directory -Path $probeDir -Force | Out-Null
+            $csproj = @"
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+                <OutputType>Exe</OutputType>
+                <ImplicitUsings>enable</ImplicitUsings>
+                <Nullable>enable</Nullable>
+                <UseMaui>false</UseMaui>
+                <EnableMauiImageProcessing>false</EnableMauiImageProcessing>
+              </PropertyGroup>
+              <ItemGroup><PackageReference Include="xunit.v3" Version="4.0.2" /></ItemGroup>
+              $ExtraItems
+            </Project>
+            "@
+            $csproj | Set-Content -Encoding utf8 (Join-Path $probeDir "$Name.csproj")
+            'using Xunit; public class ProbeTests { [Fact] public void Pass() { } }' |
+              Set-Content -Encoding utf8 (Join-Path $probeDir "ProbeTests.cs")
+            dotnet build (Join-Path $probeDir "$Name.csproj") --nologo
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+          $repoRoot = (Get-Location).Path
+          New-XunitProbe "probe-tfm" ""
+          New-XunitProbe "probe-core" "<ItemGroup><ProjectReference Include='$repoRoot/ReTran.Core/ReTran.Core.csproj' /></ItemGroup>"
+          New-XunitProbe "probe-app" "<ItemGroup><ProjectReference Include='$repoRoot/ReTran.App/ReTran.App.csproj' /></ItemGroup>"
+          New-XunitProbe "probe-vstest" "<ItemGroup><PackageReference Include='Microsoft.NET.Test.Sdk' Version='17.14.1' /><PackageReference Include='xunit.runner.visualstudio' Version='2.8.2' /></ItemGroup>"
 
       - name: Diagnose test process startup
         timeout-minutes: 4
@@ -100,10 +113,14 @@ jobs:
 
           Invoke-BoundedProcess "core-version" "dotnet" `
             @("ReTran.Core/bin/Debug/net10.0-windows/ReTran.Core.dll", "version")
-          Invoke-BoundedProcess "minimal-xunit" "dotnet" `
-            @((Join-Path $env:RUNNER_TEMP "retran-xunit-probe/bin/Debug/net10.0/Probe.dll"), "-assemblyInfo")
+          Invoke-BoundedProcess "probe-tfm" "dotnet" `
+            @((Join-Path $env:RUNNER_TEMP "probe-tfm/bin/Debug/net10.0-windows10.0.19041.0/probe-tfm.dll"), "-assemblyInfo")
+          Invoke-BoundedProcess "probe-core" "dotnet" `
+            @((Join-Path $env:RUNNER_TEMP "probe-core/bin/Debug/net10.0-windows10.0.19041.0/probe-core.dll"), "-assemblyInfo")
+          Invoke-BoundedProcess "probe-app" "dotnet" `
+            @((Join-Path $env:RUNNER_TEMP "probe-app/bin/Debug/net10.0-windows10.0.19041.0/probe-app.dll"), "-assemblyInfo")
+          Invoke-BoundedProcess "probe-vstest" "dotnet" `
+            @((Join-Path $env:RUNNER_TEMP "probe-vstest/bin/Debug/net10.0-windows10.0.19041.0/probe-vstest.dll"), "-assemblyInfo")
           Invoke-BoundedProcess "tests-dotnet-host" "dotnet" `
             @("ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.dll", "-assemblyInfo")
-          Invoke-BoundedProcess "tests-apphost" (Resolve-Path `
-            "ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.exe").Path @("-assemblyInfo")
           if (-not $script:allSucceeded) { exit 1 }
