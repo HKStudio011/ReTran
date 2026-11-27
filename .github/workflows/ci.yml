@@ -46,6 +46,28 @@ jobs:
       - name: Build test project
         run: dotnet build "${{ env.TEST_PROJECT }}" --nologo
 
+      - name: Build minimal xUnit probe
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $probeDir = Join-Path $env:RUNNER_TEMP "retran-xunit-probe"
+          New-Item -ItemType Directory -Path $probeDir -Force | Out-Null
+          @'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <TargetFramework>net10.0</TargetFramework>
+              <OutputType>Exe</OutputType>
+              <ImplicitUsings>enable</ImplicitUsings>
+              <Nullable>enable</Nullable>
+            </PropertyGroup>
+            <ItemGroup><PackageReference Include="xunit.v3" Version="4.0.2" /></ItemGroup>
+          </Project>
+          '@ | Set-Content -Encoding utf8 (Join-Path $probeDir "Probe.csproj")
+          'using Xunit; public class ProbeTests { [Fact] public void Pass() { } }' |
+            Set-Content -Encoding utf8 (Join-Path $probeDir "ProbeTests.cs")
+          dotnet build (Join-Path $probeDir "Probe.csproj") --nologo
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Diagnose test process startup
         timeout-minutes: 4
         shell: pwsh
@@ -78,6 +100,8 @@ jobs:
 
           Invoke-BoundedProcess "core-version" "dotnet" `
             @("ReTran.Core/bin/Debug/net10.0-windows/ReTran.Core.dll", "version")
+          Invoke-BoundedProcess "minimal-xunit" "dotnet" `
+            @((Join-Path $env:RUNNER_TEMP "retran-xunit-probe/bin/Debug/net10.0/Probe.dll"), "-assemblyInfo")
           Invoke-BoundedProcess "tests-dotnet-host" "dotnet" `
             @("ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.dll", "-assemblyInfo")
           Invoke-BoundedProcess "tests-apphost" (Resolve-Path `
