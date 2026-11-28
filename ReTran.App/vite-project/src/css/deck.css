@@ -99,32 +99,10 @@ body { background: var(--rt-page); }
 .rt-brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
 
 .rt-brand-mark {
-  position: relative;
-  width: 16px;
-  height: 16px;
-  border-radius: 4px;
-  border: 1px solid var(--rt-line2);
-  background: var(--rt-well);
-  display: grid;
-  place-items: center;
-}
-
-.rt-brand-mark i {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--rt-faint);
-  transition: background .2s, box-shadow .2s;
-}
-
-.is-live .rt-brand-mark {
-  border-color: color-mix(in srgb, var(--rt-tally) 55%, transparent);
-  background: var(--rt-tally-soft);
-}
-
-.is-live .rt-brand-mark i {
-  background: var(--rt-tally);
-  animation: rt-lamp 2.6s ease-in-out infinite;
+  width: 22px;
+  height: 22px;
+  display: block;
+  flex: 0 0 22px;
 }
 
 .rt-brand-name { font-weight: 600; font-size: 15px; letter-spacing: -.01em; }

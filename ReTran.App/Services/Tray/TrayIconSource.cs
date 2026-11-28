@@ -1,13 +1,14 @@
 using System.Runtime.InteropServices;
 using SD = System.Drawing;
+using ReTran_App.Services.Branding;
 using ReTran_App.Services.OverlayWindow;
 
 namespace ReTran_App.Services.Tray;
 
 /// <summary>
-/// GDI+-drawn 32×32 tray icon (rounded dark pill with a teal "R"); owns the HICON and destroys
-/// it on dispose.
-/// Icon tray 32×32 vẽ bằng GDI+ (pill tối bo góc với chữ "R" màu teal); sở hữu HICON và hủy nó
+/// GDI+-drawn 32×32 tray icon (rounded Ink background with the folded-A monogram); owns the
+/// HICON and destroys it on dispose.
+/// Icon tray 32×32 vẽ bằng GDI+ (nền Ink bo góc với monogram A dải gấp); sở hữu HICON và hủy nó
 /// khi dispose.
 /// </summary>
 public sealed class TrayIconSource : IDisposable
@@ -27,27 +28,43 @@ public sealed class TrayIconSource : IDisposable
     /// </remarks>
     public TrayIconSource()
     {
-        using var bitmap = new SD.Bitmap(Size, Size, SD.Imaging.PixelFormat.Format32bppArgb);
-        using (SD.Graphics g = SD.Graphics.FromImage(bitmap))
-        {
-            g.SmoothingMode = SD.Drawing2D.SmoothingMode.AntiAlias;
-            g.TextRenderingHint = SD.Text.TextRenderingHint.AntiAlias;
-            g.Clear(SD.Color.Transparent);
-
-            using var pillBrush = new SD.SolidBrush(BoxAnnotationStyle.PillFill);
-            using var path = new SD.Drawing2D.GraphicsPath();
-            BoxAnnotationStyle.BuildRoundedRect(path, new SD.RectangleF(0f, 0f, Size, Size), CornerRadius);
-            g.FillPath(pillBrush, path);
-
-            // GetFont returns a process-lifetime cached font: never dispose it.
-            // GetFont trả font cache suốt đời process: không được dispose.
-            using var textBrush = new SD.SolidBrush(BoxAnnotationStyle.TickColor);
-            using var format = new SD.StringFormat { Alignment = SD.StringAlignment.Center, LineAlignment = SD.StringAlignment.Center };
-            g.DrawString("R", BoxAnnotationStyle.GetFont(18), textBrush,
-                new SD.RectangleF(0f, 0f, Size, Size), format);
-        }
-
+        using var bitmap = RenderBitmap();
         Handle = bitmap.GetHicon();
+    }
+
+    /// <summary>
+    /// Renders the 32×32 folded-A tray bitmap; the caller owns and must dispose the returned bitmap.
+    /// Vẽ bitmap tray A dải gấp 32×32; caller sở hữu và phải dispose bitmap được trả về.
+    /// </summary>
+    /// <returns>
+    /// A new transparent-cornered bitmap with an Ink rounded background and the shared brand mark.
+    /// Bitmap mới có các góc trong suốt, nền Ink bo góc và brand mark dùng chung.
+    /// </returns>
+    internal static SD.Bitmap RenderBitmap()
+    {
+        var bitmap = new SD.Bitmap(Size, Size, SD.Imaging.PixelFormat.Format32bppArgb);
+        try
+        {
+            using (SD.Graphics g = SD.Graphics.FromImage(bitmap))
+            {
+                g.SmoothingMode = SD.Drawing2D.SmoothingMode.AntiAlias;
+                g.Clear(SD.Color.Transparent);
+
+                using var pillBrush = new SD.SolidBrush(SD.Color.FromArgb(255, 7, 32, 30));
+                using var path = new SD.Drawing2D.GraphicsPath();
+                BoxAnnotationStyle.BuildRoundedRect(path, new SD.RectangleF(0f, 0f, Size, Size), CornerRadius);
+                g.FillPath(pillBrush, path);
+
+                BrandMarkRenderer.Draw(g, new SD.RectangleF(4f, 4f, 24f, 24f));
+            }
+
+            return bitmap;
+        }
+        catch
+        {
+            bitmap.Dispose();
+            throw;
+        }
     }
 
     /// <summary>

@@ -20,9 +20,9 @@ public class FloatingMenuRendererTests
         using Graphics g = Graphics.FromImage(bitmap);
         g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
         // Match the production surface: grayscale antialiasing, not ClearType subpixel
-        // fringes (which would trip the teal detector).
+        // fringes (which would trip the color detectors).
         // Khớp bề mặt production: khử răng cưa xám, không phải ClearType (vệt màu sẽ
-        // đánh lừa bộ dò teal).
+        // đánh lừa các bộ dò màu).
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
         g.Clear(Color.Transparent);
         FloatingMenuRenderer.DrawMenu(g, s, w, h, l);
@@ -109,7 +109,9 @@ public class FloatingMenuRendererTests
     // A > 0 quan trọng: pixel trong suốt hoàn toàn là (0,0,0), nếu không đếm sẽ để bitmap trống lọt qua test phủ.
     private static bool IsDark(Color c) => c.A > 0 && c.R < 100 && c.G < 100 && c.B < 100;
 
-    private static bool IsTeal(Color c) => c.G > 140 && c.B > 110 && c.G > c.R + 12 && c.B > c.R + 4;
+    private static bool IsAmber(Color c) => c.R > 200 && c.G > 120 && c.G < 210 && c.B < 80;
+
+    private static bool IsIvory(Color c) => c.R > 200 && c.G > 200 && c.B > 180;
 
     /// <summary>
     /// Counts pixels matching <paramref name="isInk"/> inside a band and returns the count, the horizontal
@@ -199,19 +201,43 @@ public class FloatingMenuRendererTests
     }
 
     [Fact]
-    public void Collapsed_ChipDrawn_WithAccentGlyph()
+    public void Collapsed_ChipDrawn_WithBrandMark()
     {
         using Bitmap bitmap = Render(State(collapsed: true));
         var (px, py, pw, ph) = FloatingMenuLayout.PanelRect(State(collapsed: true));
         int cx = px + pw / 2, cy = py + ph / 2;
 
-        int teal = 0;
-        for (int y = cy - 14; y <= cy + 14; y++)
-            for (int x = cx - 14; x <= cx + 14; x++)
-                if (x >= 0 && y >= 0 && x < bitmap.Width && y < bitmap.Height && IsTeal(bitmap.GetPixel(x, y)))
-                    teal++;
+        int amber = 0, ivory = 0;
+        for (int y = cy - 14; y < cy + 14; y++)
+            for (int x = cx - 14; x < cx + 14; x++)
+            {
+                Color pixel = bitmap.GetPixel(x, y);
+                if (IsAmber(pixel)) amber++;
+                if (IsIvory(pixel)) ivory++;
+            }
 
-        Assert.True(teal > 20, $"expected the teal 'R' glyph around the chip centre, got {teal} teal pixels");
+        Assert.True(amber > 20, $"expected the folded-A brand mark around the chip centre, got {amber} amber pixels");
+        Assert.True(ivory > 20, $"expected the folded-A brand mark around the chip centre, got {ivory} ivory pixels");
+    }
+
+    [Fact]
+    public void Collapsed_MarginIsTransparent()
+    {
+        using Bitmap bitmap = Render(State(collapsed: true));
+
+        (int X, int Y)[] origins =
+        [
+            (0, 0),
+            (bitmap.Width - FloatingMenuLayout.ShadowMargin, 0),
+            (0, bitmap.Height - FloatingMenuLayout.ShadowMargin),
+            (bitmap.Width - FloatingMenuLayout.ShadowMargin, bitmap.Height - FloatingMenuLayout.ShadowMargin),
+        ];
+
+        foreach ((int originX, int originY) in origins)
+            for (int offsetY = 0; offsetY < FloatingMenuLayout.ShadowMargin; offsetY++)
+                for (int offsetX = 0; offsetX < FloatingMenuLayout.ShadowMargin; offsetX++)
+                    Assert.True(bitmap.GetPixel(originX + offsetX, originY + offsetY).A == 0,
+                        $"shadow-margin origin ({originX},{originY}), offset ({offsetX},{offsetY}) must be transparent");
     }
 
     [Fact]

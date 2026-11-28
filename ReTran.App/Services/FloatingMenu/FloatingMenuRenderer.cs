@@ -1,6 +1,7 @@
 using System.Globalization;
 using SD = System.Drawing;
 using ReTran_App.Services;
+using ReTran_App.Services.Branding;
 using ReTran_App.Services.OverlayWindow;
 
 namespace ReTran_App.Services.FloatingMenu;
@@ -38,9 +39,6 @@ public static class FloatingMenuRenderer
 
     /// <summary>Hint/error line font size (pixels). Cỡ chữ dòng hint/lỗi (pixel).</summary>
     private const int TinySize = 11;
-
-    /// <summary>Collapsed chip glyph font size (pixels). Cỡ chữ glyph chip thu gọn (pixel).</summary>
-    private const int ChipGlyphSize = 18;
 
     /// <summary>Start/Stop button width (pixels). Rộng nút Start/Stop (pixel).</summary>
     private const float ButtonWidth = 64f;
@@ -109,7 +107,7 @@ public static class FloatingMenuRenderer
 
         if (s.Collapsed)
         {
-            DrawChip(g, s, format, panelBrush, borderPen, tickBrush, path);
+            DrawChip(g, s, panelBrush, borderPen, path);
             return;
         }
 
@@ -213,9 +211,9 @@ public static class FloatingMenuRenderer
             StatFps: l["menu.stats.fps"], StatBoxes: l["menu.stats.boxes"], StatLines: l["menu.stats.lines"]);
     }
 
-    /// <summary>Collapsed chip: rounded background plus the "R" glyph centred in it. Chip thu gọn: nền bo góc kèm glyph "R" ở giữa.</summary>
-    private static void DrawChip(SD.Graphics g, MenuState s, SD.StringFormat format, SD.Brush panelBrush,
-        SD.Pen borderPen, SD.Brush tickBrush, SD.Drawing2D.GraphicsPath path)
+    /// <summary>Collapsed chip: rounded background plus the folded-A brand mark inside a seven-pixel inset. Chip thu gọn: nền bo góc kèm monogram A dải gấp trong bounds cách mép bảy pixel.</summary>
+    private static void DrawChip(SD.Graphics g, MenuState s, SD.Brush panelBrush,
+        SD.Pen borderPen, SD.Drawing2D.GraphicsPath path)
     {
         var (px, py, pw, ph) = FloatingMenuLayout.PanelRect(s);
 
@@ -223,9 +221,7 @@ public static class FloatingMenuRenderer
         g.FillPath(panelBrush, path);
         g.DrawPath(borderPen, path);
 
-        SD.Font font = BoxAnnotationStyle.GetFont(ChipGlyphSize);
-        SD.SizeF size = g.MeasureString("R", font, new SD.PointF(0f, 0f), format);
-        g.DrawString("R", font, tickBrush, px + (pw - size.Width) / 2f, py + (ph - size.Height) / 2f, format);
+        BrandMarkRenderer.Draw(g, new SD.RectangleF(px + 7, py + 7, pw - 14, ph - 14));
     }
 
     /// <summary>Header: three grip dots on the left, the collapse button ("—" icon) at the right corner. Header: ba chấm grip bên trái, nút thu gọn (icon "—") ở góc phải.</summary>

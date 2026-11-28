@@ -14,7 +14,13 @@
 <div class="rt-app @(_running ? "is-live" : "")">
     <header class="rt-topbar">
         <div class="rt-brand">
-            <span class="rt-brand-mark" aria-hidden="true"><i></i></span>
+            <svg class="rt-brand-mark" viewBox="0 0 128 128" aria-hidden="true">
+                <rect width="128" height="128" rx="24" fill="#07201E" />
+                <path d="M95.112 95.112A44 44 0 1 1 95.112 32.888" fill="none" stroke="#FFB020" stroke-width="6" stroke-linecap="round" />
+                <path d="M39 94V41Q39 37 42 34L48 28Q51 25 54 29L94 86Q98 92 90 92H78L56 61V78H71Q75 78 77 82L82 90Q85 94 79 94Z" fill="#EFEAD9" />
+                <path d="M51 27L94 86Q98 92 90 92H78L56 61L61 47Z" fill="#C7CEC4" />
+                <path d="M56 78H71Q75 78 77 82L82 90Q85 94 79 94H69L64 86H56Z" fill="#FFB020" />
+            </svg>
             <span class="rt-brand-name">ReTran</span>
             <span class="rt-brand-sub rt-mono">@(L["deck.brand.sub"])</span>
         </div>
