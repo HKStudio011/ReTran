@@ -25,7 +25,7 @@ public static class PackageSignatureVerifier
     /// ECDSA P-256 public key (SPKI Base64) của release signing keypair.
     /// </summary>
     public const string ReleasePublicKeyBase64 =
-        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEQb0cxFJA3FmW6DvXrgNthnrvC8h67QCZYPqkSvHZ3DMavNd14x9a3ZGyiT5D+ndkCD1C/gjrdUsoV6Fw2xZesQ==";
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE9kK+aiaICKBJB/8i5L25h9Xa1xI6uMUgN65vVjVdrzkQAqYxn7iUzZEdU8HenhB+KtNY5oftByoQ8Lgtla2eAw==";
 
     /// <summary>
     /// Checks the ECDSA signature of file <paramref name="packagePath"/> stored in file <paramref name="signaturePath"/>.
