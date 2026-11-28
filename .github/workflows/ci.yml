@@ -25,6 +25,7 @@ env:
 jobs:
   build-and-test:
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
 
@@ -40,7 +41,16 @@ jobs:
       - name: Build app (Windows)
         run: dotnet build "${{ env.PROJECT_PATH }}" -f net10.0-windows10.0.19041.0 --nologo
 
-      # (cú pháp test của xunit MTP; dùng --no-banner thay vì --nologo: SDK 10.0.x
-      #  MTP mode forward --nologo xuống test app → exit 5 invalid args)
+      # Test assembly tham chiếu ReTran.App MAUI nhưng các test đều chạy headless.
+      # Không cho WinAppSDK bootstrap mở error UI ẩn khi runner thiếu Framework package
+      # (WindowsAppSDK issue #5851); lỗi này xảy ra trước cả test discovery.
+      - name: Build test project
+        run: dotnet build "${{ env.TEST_PROJECT }}" --nologo -p:WindowsAppSdkBootstrapInitialize=false
+
+      # Chạy full xUnit v3 assembly trực tiếp, không filter, và giữ native exit code.
       - name: Test
-        run: dotnet test "${{ env.TEST_PROJECT }}" --no-banner
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          dotnet "ReTran.Tests/bin/Debug/net10.0-windows10.0.19041.0/ReTran.Tests.dll" -noAutoReporters -noLogo -noColor -longRunning 30
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
